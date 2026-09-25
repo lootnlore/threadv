@@ -45,7 +45,8 @@ def check_features(path):
     if wb.sheetnames != expected_sheets:
         problems.append(f"sheets are {wb.sheetnames}")
     names = set(wb.defined_names.keys())
-    for name in ["Platforms", "Sources", "ExpenseCategories", "TaxRate", "DashYear", "MileageRates", "eBay_FVF", "Grailed_Rate"]:
+    for name in ["Platforms", "Sources", "ExpenseCategories", "TaxRate", "DashYear", "MileageRates", "eBay_FVF", "Grailed_Rate",
+                 "NoMarketplaceSales", "HalfEnteredSales"]:
         if name not in names:
             problems.append(f"named range {name} missing")
     inv = wb["Inventory"]
@@ -70,6 +71,9 @@ def check_features(path):
         problems.append("Inventory conditional formatting missing")
     if not [c for row in inv.iter_rows(min_row=4, max_row=4) for c in row if c.comment]:
         problems.append("Inventory header comments missing")
+    for ws in (inv, wb["Expenses"]):
+        if not ws.auto_filter.ref:
+            problems.append(f"{ws.title}: filter arrows missing")
     if inv.freeze_panes != "C5":
         problems.append(f"Inventory freeze panes are {inv.freeze_panes}")
     if not wb["Dashboard"]._charts:

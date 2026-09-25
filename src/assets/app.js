@@ -275,7 +275,8 @@ function setup(root) {
     tab.addEventListener('click', () => selectMode(tab.dataset.mode));
     tab.addEventListener('keydown', (e) => {
       const i = tabs.indexOf(tab);
-      const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+      // Up/Down too: at large text sizes the tabs stack vertically.
+      const to = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
       if (to === undefined) return;
       e.preventDefault();
       selectMode(tabs[(to + tabs.length) % tabs.length].dataset.mode, { moveFocus: true });

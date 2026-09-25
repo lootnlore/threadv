@@ -20,6 +20,7 @@
   --ring: #0b6b58;
   --shadow: 0 1px 2px rgb(22 32 29 / 0.06), 0 8px 24px rgb(22 32 29 / 0.06);
   --radius: 14px;
+  --logo: 1.75rem; /* header logo: scales with text so the name line always matches it */
   --radius-sm: 10px;
   --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
@@ -233,12 +234,10 @@ svg {
   min-height: 60px;
 }
 
-/* When space runs out the site name shortens (ellipsis) rather than pushing
-   the nav onto a second row, whatever name site.config.mjs sets. */
 .brand {
   display: inline-flex;
   flex: 0 1 auto;
-  min-width: 1.75rem; /* the logo always shows */
+  min-width: calc(var(--logo) + 12px); /* the logo always shows (plus the header brand's focus-ring room) */
   align-items: center;
   gap: 10px;
   color: var(--ink);
@@ -267,17 +266,37 @@ svg {
    matches it. */
 .site-header .brand {
   flex-wrap: wrap;
-  height: 1.5em;
+  /* One logo-high line, plus room inside the clip for the logo's focus ring
+     (the negative margin keeps the layout where it was). */
+  height: calc(var(--logo) + 12px);
   overflow: hidden;
+  padding: 6px;
+  margin: -6px;
 }
 
 .site-header .brand svg {
-  width: 1.5em;
-  height: 1.5em;
+  width: var(--logo);
+  height: var(--logo);
 }
 
 .site-header .brand span {
-  line-height: 1.5;
+  line-height: var(--logo);
+}
+
+/* The link box can be wider than a lone logo, so show focus on the logo (and
+   underline the name when it is visible). */
+.site-header .brand:focus-visible {
+  outline: none;
+}
+
+.site-header .brand:focus-visible svg {
+  border-radius: 8px;
+  outline: 3px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.site-header .brand:focus-visible span {
+  text-decoration: underline;
 }
 
 /* Footer: room to wrap a long name instead. */
@@ -303,7 +322,7 @@ svg {
   flex: none;
   flex-wrap: wrap; /* only with very large text: links wrap beside the logo */
   justify-content: flex-end;
-  max-width: calc(100% - 28px - 12px);
+  max-width: calc(100% - var(--logo) - 12px);
   gap: 4px;
 }
 
@@ -340,7 +359,18 @@ svg {
   }
 }
 
+/* Running text may break a word that can't fit a line at all (an email
+   address, a long one-word site name at very large text) rather than widen
+   the page. Normal words always fit, so they never split. Not set on UI
+   labels, where a squeeze must stay measurable (see fitResults in app.js). */
+p,
+li:not(.result),
+a[href^='mailto:'] {
+  overflow-wrap: anywhere;
+}
+
 .site-footer {
+  overflow-wrap: anywhere; /* a long one-word site name at very large text */
   margin-top: 40px;
   padding: 48px 0 32px;
   background: var(--sunken);
@@ -350,6 +380,7 @@ svg {
 
 .footer-grid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 32px;
 }
 
@@ -596,9 +627,9 @@ svg {
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
 }
 
-/* Too narrow for three tabs side by side at this text size (each needs about
-   4.5em for "Profit" and its padding): one per row, never a split word. */
-@container (max-width: 14em) {
+/* Too narrow for three tabs side by side at this text size (measured: below
+   about 10em the word "Profit" no longer fits a third): one per row. */
+@container (max-width: 10.5em) {
   .modes {
     grid-template-columns: minmax(0, 1fr);
     border-radius: var(--radius);
@@ -959,6 +990,12 @@ select {
 }
 
 .pname {
+  /* Name and Best tag: the gap spaces them, and a tag that has to wrap goes
+     under the name with no indent (a space would hang and look squeezed). */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0.5em;
   min-width: 0;
   font-weight: 700;
 }
@@ -971,7 +1008,6 @@ select {
   font-weight: 800;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  vertical-align: 2px;
 }
 
 .tag-best {
@@ -1103,6 +1139,8 @@ select {
 }
 
 .bd-row dt {
+  flex: 1 1 6em; /* labels wrap first; the amount drops below only when a label would get narrower than its longest word */
+  min-width: 0;
   color: var(--muted);
 }
 
@@ -1167,6 +1205,7 @@ select {
   margin: 24px 0 16px;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -1221,8 +1260,10 @@ select {
 
 .promo {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   align-items: center;
+  overflow-wrap: anywhere; /* a long one-word site name at very large text */
 }
 
 @media (min-width: 53.75em) {
@@ -1309,6 +1350,7 @@ select {
 
 .signup input {
   flex: 1 1 240px;
+  min-width: 0; /* shrink below the browser's default input width on small screens */
   max-width: 360px;
   min-height: 48px;
   padding: 0 16px;
@@ -1338,6 +1380,7 @@ select {
   justify-content: space-between;
   gap: 12px;
   overflow-wrap: anywhere; /* a long word at very large text sizes can't push the page wider */
+  hyphens: auto; /* ...and gets a hyphen where the browser has a dictionary */
   min-height: 52px;
   padding: 12px 18px;
   font-weight: 700;

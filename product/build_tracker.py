@@ -561,6 +561,7 @@ def build_expenses(wb):
     dv_cat.add(f"B{FIRST}:B{LAST}")
     dv_date.add(f"A{FIRST}:A{LAST}")
     dv_amount.add(f"D{FIRST}:D{LAST}")
+    ws.auto_filter.ref = f"A4:F{LAST}"  # e.g. filter Tax year at tax time
 
     ws.freeze_panes = "A5"
     return ws
@@ -621,18 +622,30 @@ def build_dashboard(wb, verify=False):
     in_year = f"{sold_in_year},{counted}"
 
     # KPI tiles
-    # Sales left out of the totals because no fee could be worked out.
-    # Sales left out of the totals: this year's without a fee (marketplace blank
-    # or unknown), and half-entered ones of any year (no date sold, or no price).
-    no_fee = f'COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'
-    half = (
-        f'(COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},"")'
-        f'+COUNTIFS({inv}$G${FIRST}:$G${RANGE_END},"<>",{inv}$H${FIRST}:$H${RANGE_END},""))'
-    )
+    # Sales left out of the totals, counted once in two labelled check cells on
+    # Settings: this year's without a fee (marketplace blank or unknown), and
+    # half-entered ones of any year (no date sold, or no price).
+    settings = wb["Settings"]
+    settings.column_dimensions["L"].width = 46
+    settings.column_dimensions["M"].width = 10
+    style(settings["L8"], f_section).value = "Data checks"
+    checks = [
+        ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace",
+         f'=COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'),
+        ("HalfEnteredSales", "Sales missing a date sold or a price (any year)",
+         f'=COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},"")'
+         f'+COUNTIFS({inv}$G${FIRST}:$G${RANGE_END},"<>",{inv}$H${FIRST}:$H${RANGE_END},"")'),
+    ]
+    for i, (name, label, formula) in enumerate(checks):
+        style(settings[f"L{9 + i}"], f_body, border=BOX).value = label
+        style(settings[f"M{9 + i}"], f_calc, CALC_FILL, INT, border=BOX).value = formula
+        define(wb, name, f"Settings!$M${9 + i}")
+    style(settings["L11"], f_note).value = "Both should be 0. The Dashboard warns when they are not."
     style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
-        f'=IF({no_fee}+{half}=0,"",TRIM(IF({no_fee}>0,{no_fee}&" sale(s) this year have no marketplace. ","")'
-        f'&IF({half}>0,{half}&" sale(s) are missing a date sold or a price. ","")'
-        f'&"Left out of the totals: see the red cells on Inventory."))'
+        '=IF(NoMarketplaceSales+HalfEnteredSales=0,"",TRIM('
+        'IF(NoMarketplaceSales>0,NoMarketplaceSales&" sale(s) this year have no marketplace. ","")'
+        '&IF(HalfEnteredSales>0,HalfEnteredSales&" sale(s) are missing a date sold or a price. ","")'
+        '&"Left out of the totals: see the red cells on Inventory."))'
     )
     kpis = [
         ("Items sold", f"=COUNTIFS({in_year})", INT),
@@ -816,12 +829,13 @@ def build_start(wb):
         c.value = f"•  {text}"
         ws.row_dimensions[17 + i].height = 28
 
-    style(ws["B25"], f_note, align=Alignment(wrap_text=True)).value = (
+    note = 17 + len(tips) + 1  # below the tips, however many there are
+    style(ws[f"B{note}"], f_note, align=Alignment(wrap_text=True)).value = (
         "Fee figures are estimates based on each marketplace's published US fees; promotions, store plans and category "
         "exceptions can change them. Tax totals organize your records and are not tax advice. "
         "Licensed for use in your own reselling business. Please do not share or resell this file."
     )
-    ws.row_dimensions[25].height = 40
+    ws.row_dimensions[note].height = 40
     return ws
 
 

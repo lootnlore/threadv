@@ -261,11 +261,12 @@ if (chromium) {
           for (let node = walker.nextNode(); node; node = walker.nextNode()) {
             const el = node.parentElement;
             if (!el.getClientRects().length || el.closest('.visually-hidden, select')) continue;
-            for (const word of node.textContent.matchAll(/[^\s-]+/g)) {
+            for (const word of node.textContent.matchAll(/[^\s\u00ad-]+/g)) {
+              if (node.textContent[word.index - 1] === '\u00ad') continue; // after a soft hyphen: a deliberate break
               const range = document.createRange();
               range.setStart(node, word.index);
               range.setEnd(node, word.index + word[0].length);
-              if (new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size > 1) found.push(`word split across lines: "${word[0]}"`);
+              if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size > 1) found.push(`word split across lines: "${word[0]}"`);
             }
           }
           // Messages sit either beside every name or under every name, never a mix.
@@ -337,20 +338,51 @@ if (chromium) {
     }
   });
 
-  test('no page scrolls sideways, from small phones to desktops, even with large text', async () => {
+  test('no page scrolls sideways or splits a word, default or fully configured, even with large text', async () => {
     const pages = ['/', '/fees/', '/fees/ebay/', '/fees/facebook/', '/tracker/', '/privacy/', '/terms/', '/404.html', '/offline.html'];
+    // Optional settings add content (contact email, signup forms) and a long one-word name.
+    const configured = { CONTACT_EMAIL: 'support@threadvet.com', NEWSLETTER_ACTION: 'https://example.com/subscribe', SITE_NAME: 'ResellerCalculatorPro' };
     const problems = [];
-    for (const width of [320, 360, 414, 600, 768, 800, 1024, 1280]) {
-      for (const text of [1, 1.25, 1.5, 2]) {
-        const { context, page } = await open(null, { viewport: { width, height: 800 }, serviceWorkers: 'block' });
-        await setTextSize(page, text);
-        for (const path of pages) {
-          await page.goto(base + path, { waitUntil: 'domcontentloaded' });
-          await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
-          const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-          if (over > 0) problems.push(`${width}px, text ${text * 100}%, ${path}: +${over}px`);
+    for (const env of [null, configured]) {
+      if (env) build(env);
+      try {
+        for (const width of [320, 360, 414, 768, 1024, 1280]) {
+          for (const text of [1, 1.5, 2, 2.5]) {
+            const { context, page } = await open(null, { viewport: { width, height: 800 }, serviceWorkers: 'block' });
+            await setTextSize(page, text);
+            for (const path of pages) {
+              await page.goto(base + path, { waitUntil: 'domcontentloaded' });
+              await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
+              const found = await page.evaluate(() => {
+                const out = [];
+                const over = document.documentElement.scrollWidth - innerWidth;
+                if (over > 0) out.push(`scrolls sideways +${over}px`);
+                // Words broken across lines, except where the CSS allows it on purpose
+                // (headings, FAQ questions, footer: very long words at huge text) and
+                // in email addresses and links.
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                  const el = node.parentElement;
+                  if (!el.getClientRects().length || el.closest('.visually-hidden, select, script, style, noscript, .site-header .brand')) continue;
+                  const style = getComputedStyle(el);
+                  if (style.overflowWrap === 'anywhere' || style.hyphens === 'auto') continue;
+                  for (const word of node.textContent.matchAll(/[^\s\u00ad-]+/g)) {
+                    if (/[@/]/.test(word[0]) || node.textContent[word.index - 1] === '\u00ad') continue; // emails, links, soft hyphens
+                    const range = document.createRange();
+                    range.setStart(node, word.index);
+                    range.setEnd(node, word.index + word[0].length);
+                    if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size > 1) out.push(`split word "${word[0]}"`);
+                  }
+                }
+                return [...new Set(out)];
+              });
+              if (found.length) problems.push(`${env ? 'configured' : 'default'}, ${width}px, text ${text * 100}%, ${path}: ${found.join('; ')}`);
+            }
+            await context.close();
+          }
         }
-        await context.close();
+      } finally {
+        if (env) build();
       }
     }
     assert.deepEqual(problems, []);
@@ -361,7 +393,7 @@ if (chromium) {
       if (name) build({ SITE_NAME: name });
       try {
         for (const width of [320, 360, 390, 430, 480, 768, 1280]) {
-          for (const text of [1, 1.25, 1.5]) {
+          for (const text of [1, 1.25, 1.5, 2]) {
             const { context, page } = await open(null, { viewport: { width, height: 700 } });
             await setTextSize(page, text);
             await page.goto(`${base}/fees/`, { waitUntil: 'networkidle' });
@@ -370,15 +402,19 @@ if (chromium) {
               const brand = document.querySelector('.site-header .brand').getBoundingClientRect();
               const name = document.querySelector('.site-header .brand span').getBoundingClientRect();
               const shown = name.top < brand.bottom - 1; // on the logo's line, not the clipped one below
+              const nav = document.querySelector('.site-header nav').getBoundingClientRect();
               return {
-                rowGap: Math.abs(brand.top - document.querySelector('.site-header nav').getBoundingClientRect().top),
+                // Beside the logo, not below it (at very large text its links may stack there).
+                beside: nav.left >= brand.right - 1 && nav.top < brand.bottom,
+                shown,
                 cut: shown && name.right > brand.right + 1,
                 sideways: document.documentElement.scrollWidth - innerWidth,
               };
             });
-            assert.ok(r.rowGap < 20, `${where}: nav wrapped under the logo`);
+            assert.ok(r.beside, `${where}: nav wrapped under the logo`);
             // Either the whole name or just the logo (name still read out): never "Threa…".
             assert.ok(!r.cut, `${where}: site name cut short`);
+            if (!name && text === 1 && width >= 768) assert.ok(r.shown, `${where}: there is room, so the name shows`);
             assert.equal(r.sideways, 0, `${where}: page scrolls sideways (header or footer)`);
             const logoLink = page.locator('.site-header').getByRole('link', { name: name || 'ThreadVet', exact: true });
             assert.equal(await logoLink.count(), 1, `${where}: logo link keeps its name`);
