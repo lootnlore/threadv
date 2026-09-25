@@ -317,7 +317,7 @@ export const PLATFORMS = [
     id: 'facebook',
     name: 'Facebook Marketplace',
     company: 'Meta',
-    short: 'FB Marketplace',
+    short: 'Facebook', // results list: "Marketplace" is too long a word beside a figure on small phones
     sellerPaysShipping: true,
     headline: `${pctText(R.facebook.rate)} per shipped order (min ${usdText(R.facebook.min)}), local pickup free`,
     fees(o) {

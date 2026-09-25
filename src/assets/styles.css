@@ -63,7 +63,6 @@ body {
   background: var(--paper);
   color: var(--ink);
   font: 1rem/1.55 var(--font); /* rem, so the reader's browser font size applies */
-  overflow-wrap: break-word;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -227,7 +226,6 @@ svg {
 }
 
 .header-inner {
-  container: header / inline-size; /* see the site-name rule in scripts/build.mjs */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -240,7 +238,7 @@ svg {
 .brand {
   display: inline-flex;
   flex: 0 1 auto;
-  min-width: 28px; /* the logo always shows */
+  min-width: 1.75rem; /* the logo always shows */
   align-items: center;
   gap: 10px;
   color: var(--ink);
@@ -259,10 +257,33 @@ svg {
 }
 
 .brand span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Header: the name shows only when it fits in full beside the nav. The brand
+   is one logo-high line that wraps: a name without room drops to a second
+   line, which is clipped (still read out by screen readers). Works for any
+   name and text size; the logo scales with the text so the line always
+   matches it. */
+.site-header .brand {
+  flex-wrap: wrap;
+  height: 1.5em;
+  overflow: hidden;
+}
+
+.site-header .brand svg {
+  width: 1.5em;
+  height: 1.5em;
+}
+
+.site-header .brand span {
+  line-height: 1.5;
+}
+
+/* Footer: room to wrap a long name instead. */
+.site-footer .brand span {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .logo-bg {
@@ -515,6 +536,7 @@ svg {
 }
 
 .calc-input {
+  container-type: inline-size; /* the mode tabs adapt to it */
   min-width: 0;
   padding: 16px;
   border-bottom: 1px solid var(--line);
@@ -574,6 +596,19 @@ svg {
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
 }
 
+/* Too narrow for three tabs side by side at this text size (each needs about
+   4.5em for "Profit" and its padding): one per row, never a split word. */
+@container (max-width: 14em) {
+  .modes {
+    grid-template-columns: minmax(0, 1fr);
+    border-radius: var(--radius);
+  }
+
+  .modes button {
+    border-radius: var(--radius-sm);
+  }
+}
+
 .mode-hint {
   font-size: 0.92rem;
   color: var(--muted);
@@ -582,7 +617,9 @@ svg {
 
 .fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Two columns while each can hold its label's longest word ("commission")
+     and a usable input at the current text size, else one (see .check-grid). */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, max(7.5em, calc((100% - 12px) / 2))), 1fr));
   gap: 0 12px;
 }
 
@@ -928,7 +965,6 @@ select {
 
 .tag {
   display: inline-block;
-  margin-left: 8px;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 0.7rem;
@@ -1060,18 +1096,18 @@ select {
 
 .bd-row {
   display: flex;
+  flex-wrap: wrap; /* no room beside the label (large text, big amount): the amount goes below */
   justify-content: space-between;
-  gap: 12px;
+  gap: 0 12px;
   padding: 3px 0;
 }
 
 .bd-row dt {
-  min-width: 0; /* long labels wrap; the amount beside them never gets pushed out */
   color: var(--muted);
 }
 
 .bd-row dd {
-  margin: 0;
+  margin: 0 0 0 auto;
   white-space: nowrap;
 }
 

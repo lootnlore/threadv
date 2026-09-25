@@ -256,6 +256,26 @@ test('renaming the site in site.config.mjs renames it everywhere', () => {
     assert.ok(!text.includes('ThreadVet'), `${relative(copy, file)} still says ThreadVet`);
   }
   assert.match(readFileSync(join(copy, 'dist/terms/index.html'), 'utf8'), /FlipCheck Reseller Tracker/);
+  const title = () => readFileSync(join(copy, 'dist/tracker/index.html'), 'utf8').match(/<title>([^<]*)</)[1];
+  assert.equal(title(), 'FlipCheck Reseller Tracker: Profit, Fee &amp; Tax Spreadsheet', 'the brand is already in the product name');
+
+  // A product name of its own: used everywhere, and the title adds the brand.
+  const cfg = join(copy, 'site.config.mjs');
+  const edited = readFileSync(cfg, 'utf8').replace('name: `${name} Reseller Tracker`', "name: 'Resale Ledger'");
+  assert.notEqual(edited, readFileSync(cfg, 'utf8'));
+  writeFileSync(cfg, edited);
+  execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, SITE_NAME: 'FlipCheck' } });
+  assert.equal(title(), 'Resale Ledger: Profit, Fee &amp; Tax Spreadsheet | FlipCheck');
+  assert.match(readFileSync(join(copy, 'dist/terms/index.html'), 'utf8'), /buy the Resale Ledger/);
+});
+
+test('tracker launch signups are tagged so only they get the launch note', () => {
+  const copy = copyProject();
+  execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, NEWSLETTER_ACTION: 'https://example.com/subscribe' } });
+  const page = (path) => readFileSync(join(copy, 'dist', path), 'utf8');
+  const { field, value } = config.newsletter.launchTag;
+  assert.ok(page('tracker/index.html').includes(`<input type="hidden" name="${field}" value="${value}">`));
+  assert.ok(!page('index.html').includes(`value="${value}"`), 'fee-alert signups are not tagged for the launch');
 });
 
 test('fee change dates are machine-readable', () => {

@@ -62,6 +62,7 @@ Everything is in [`site.config.mjs`](site.config.mjs). Values can also come from
 | `tracker.name`, `tracker.price` | (edit the file) | Product name (site and spreadsheet) and price in dollars, e.g. `19` or `24.50` |
 | `tracker.checkoutUrl` | `TRACKER_CHECKOUT_URL` | Store product link (https). Until set, the buy button says "Coming soon" |
 | `newsletter.action` | `NEWSLETTER_ACTION` | Form endpoint, e.g. `https://buttondown.com/api/emails/embed-subscribe/<you>`. Hidden until set |
+| `newsletter.launchTag` | (edit the file) | Hidden field that marks tracker-page signups, so the launch note goes to them only. Defaults to Buttondown's `tag` field |
 | `analytics.plausibleDomain` | `PLAUSIBLE_DOMAIN` | Optional cookie-free analytics |
 
 The Content Security Policy is generated from this config, so analytics and newsletter domains are allowed automatically.

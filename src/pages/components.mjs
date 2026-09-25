@@ -166,15 +166,16 @@ export function trackerPromo(config) {
 const ALERTS_LEDE = 'Marketplaces change fees several times a year. Get one short email when they do, with what it means for your prices.';
 
 /** The email signup. The privacy policy lists what it is used for: fee alerts and the tracker launch note. */
-export function newsletter(config, { heading = 'Get fee-change alerts', lede = ALERTS_LEDE, id = 'alerts' } = {}) {
+export function newsletter(config, { heading = 'Get fee-change alerts', lede = ALERTS_LEDE, id = 'alerts', tag } = {}) {
   if (!config.newsletter.action) return '';
+  const hidden = tag?.field ? `\n<input type="hidden" name="${esc(tag.field)}" value="${esc(tag.value)}">` : '';
   return `<section class="section" aria-labelledby="${id}-title" id="${id}">
 <div class="wrap narrow center">
 <h2 id="${id}-title">${esc(heading)}</h2>
 <p class="lede">${esc(lede)}</p>
 <form class="signup" action="${esc(config.newsletter.action)}" method="post" target="_blank">
 <label class="visually-hidden" for="${id}-email">Email address</label>
-<input id="${id}-email" name="${esc(config.newsletter.emailField)}" type="email" autocomplete="email" required placeholder="you@example.com">
+<input id="${id}-email" name="${esc(config.newsletter.emailField)}" type="email" autocomplete="email" required placeholder="you@example.com">${hidden}
 <button class="btn btn-primary" type="submit">Subscribe</button>
 </form>
 <p class="fineprint">No spam. Unsubscribe any time.</p>

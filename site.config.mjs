@@ -62,6 +62,10 @@ export default {
   newsletter: {
     action: process.env.NEWSLETTER_ACTION || '',
     emailField: 'email',
+    // Signups on the tracker page (before it launches) carry this hidden field
+    // so you can send the launch note to them only, as the privacy policy says.
+    // Buttondown reads `tag`; for another provider use its tag/group field name.
+    launchTag: { field: 'tag', value: 'tracker-launch' },
   },
 
   // Optional privacy-friendly analytics (no cookie banner needed). Set the domain to enable.

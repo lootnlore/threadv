@@ -120,6 +120,7 @@ ${config.tracker.checkoutUrl ? '' : newsletter(config, {
    heading: 'Get notified when the tracker launches',
    lede: 'One email when it is ready, then the same short fee-change alerts every subscriber gets.',
    id: 'launch',
+   tag: config.newsletter.launchTag,
  })}
 `;
 

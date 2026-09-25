@@ -60,6 +60,12 @@ def check_features(path):
         for dv in ws.data_validations.dataValidation:
             if dv.error and not dv.showErrorMessage:
                 problems.append(f"{ws.title}!{dv.sqref}: validation never shows its error ({dv.error!r})")
+            # ...and cover every prebuilt row (LibreOffice drops trailing rows it thinks are unused).
+            for rng in dv.sqref.ranges:
+                if rng.max_row != build_tracker.LAST:
+                    problems.append(f"{ws.title}!{rng.coord}: validation stops at row {rng.max_row}, not {build_tracker.LAST}")
+        if ws[f"A{build_tracker.LAST}"].fill.fgColor.rgb in (None, "00000000"):
+            problems.append(f"{ws.title}: row {build_tracker.LAST} lost its input styling")
     if len(list(inv.conditional_formatting)) < 3:
         problems.append("Inventory conditional formatting missing")
     if not [c for row in inv.iter_rows(min_row=4, max_row=4) for c in row if c.comment]:
@@ -110,15 +116,20 @@ def main():
         for col in "LOP":
             if inv[f"{col}{r}"].value not in (None, ""):
                 problems.append(f"Sold on {market!r}: {col}{r} should be blank, sheet shows {inv[f'{col}{r}'].value!r}")
-    # A sale without a date sold is flagged too.
-    for i, market in enumerate(build_tracker.NO_DATE_CASES):
-        status = inv[f"S{build_tracker.no_date_row(i)}"].value
-        if status != "Needs date":
-            problems.append(f"{market} sale without a date: Status reads {status!r}, expected 'Needs date'")
-    left_out = len(build_tracker.NO_FEE_CASES) + len(build_tracker.NO_DATE_CASES)
+    # Half-entered sales are flagged too.
+    for half_entered, row_of, want in [
+        (build_tracker.NO_DATE_CASES, build_tracker.no_date_row, "Needs date"),
+        (build_tracker.NO_PRICE_CASES, build_tracker.no_price_row, "Needs price"),
+    ]:
+        for i, market in enumerate(half_entered):
+            status = inv[f"S{row_of(i)}"].value
+            if status != want:
+                problems.append(f"{market} sale: Status reads {status!r}, expected {want!r}")
+    no_fee, half = len(build_tracker.NO_FEE_CASES), len(build_tracker.NO_DATE_CASES) + len(build_tracker.NO_PRICE_CASES)
     warning = wb["Dashboard"]["E3"].value or ""
-    if not warning.startswith(f"{left_out} sale(s) left out"):
-        problems.append(f"Dashboard warning for sales left out reads {warning!r}, expected {left_out} sale(s)")
+    for part in (f"{no_fee} sale(s) this year have no marketplace", f"{half} sale(s) are missing a date sold or a price"):
+        if part not in warning:
+            problems.append(f"Dashboard warning reads {warning!r}; expected it to say {part!r}")
     # ...and they are left out everywhere: counts and every cost line of the tax
     # summary include exactly the sales with a fee and a date in the Dashboard year.
     dash = wb["Dashboard"]

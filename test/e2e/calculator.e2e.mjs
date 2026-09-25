@@ -252,9 +252,21 @@ if (chromium) {
             if (r.width && (r.right > box.right + 0.5 || r.left < box.left - 0.5)) found.push(`outside the card: ${el.className || el.tagName}`);
           }
           if (document.documentElement.scrollWidth > innerWidth) found.push('page scrolls sideways');
-          // Nor may any text spill out of its own box (e.g. "Marketplace" in a checkbox column).
-          for (const el of calc.querySelectorAll('label, .check, .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
+          // Nor may any text spill out of its own box (e.g. "Marketplace" in a checkbox column)...
+          for (const el of calc.querySelectorAll('label, .check, [role=tab], .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
             if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) found.push(`text spills out: ${el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}"`);
+          }
+          // ...or break in the middle of a word ("Merca/ri"): each word's line boxes must share one line.
+          const walker = document.createTreeWalker(calc, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const el = node.parentElement;
+            if (!el.getClientRects().length || el.closest('.visually-hidden, select')) continue;
+            for (const word of node.textContent.matchAll(/[^\s-]+/g)) {
+              const range = document.createRange();
+              range.setStart(node, word.index);
+              range.setEnd(node, word.index + word[0].length);
+              if (new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size > 1) found.push(`word split across lines: "${word[0]}"`);
+            }
           }
           // Messages sit either beside every name or under every name, never a mix.
           const top = (el) => el.getBoundingClientRect().top;
@@ -276,6 +288,36 @@ if (chromium) {
       }
       await context.close();
     }
+  });
+
+  test('results stack their figures only when a name would be squeezed, all rows together', async () => {
+    const placement = (page) =>
+      page.evaluate(() => ({
+        stacked: document.querySelector('[data-results]').classList.contains('stacked'),
+        under: [...document.querySelectorAll('.result')].map((r) => r.querySelector('.figure').getBoundingClientRect().top >= r.querySelector('.pname').getBoundingClientRect().bottom - 1),
+      }));
+    const { context, page, errors } = await open(null, { viewport: { width: 320, height: 800 } });
+    await page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
+    let r = await placement(page);
+    assert.ok(r.stacked && r.under.every(Boolean), 'a $4,000 sale on a 320px phone: every figure under its name');
+    // Resizing refits the list, without ResizeObserver loop errors.
+    await page.evaluate(() => {
+      window.errorsSeen = [];
+      addEventListener('error', (e) => window.errorsSeen.push(e.message));
+    });
+    for (const width of [900, 320, 900, 320, 900]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(120);
+    }
+    r = await placement(page);
+    assert.ok(!r.stacked && r.under.every((u) => !u), 'room again: every figure beside its name');
+    assert.deepEqual(await page.evaluate(() => window.errorsSeen), []);
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    r = await placement(page);
+    assert.ok(!r.stacked && r.under.every((u) => !u), 'default sale on a 390px phone: figures beside names');
+    assert.deepEqual(errors, []);
+    await context.close();
   });
 
   test('fee tables show their numbers on a phone without scrolling sideways', async () => {
@@ -325,13 +367,19 @@ if (chromium) {
             await page.goto(`${base}/fees/`, { waitUntil: 'networkidle' });
             const where = `${width}px, text ${text * 100}%${name ? `, "${name}"` : ''}`;
             const r = await page.evaluate(() => {
-              const span = document.querySelector('.brand span');
-              const top = (q) => document.querySelector(q).getBoundingClientRect().top;
-              return { rowGap: Math.abs(top('.brand') - top('.site-header nav')), hidden: span.clientWidth <= 1, cut: span.scrollWidth > span.clientWidth + 1 };
+              const brand = document.querySelector('.site-header .brand').getBoundingClientRect();
+              const name = document.querySelector('.site-header .brand span').getBoundingClientRect();
+              const shown = name.top < brand.bottom - 1; // on the logo's line, not the clipped one below
+              return {
+                rowGap: Math.abs(brand.top - document.querySelector('.site-header nav').getBoundingClientRect().top),
+                cut: shown && name.right > brand.right + 1,
+                sideways: document.documentElement.scrollWidth - innerWidth,
+              };
             });
             assert.ok(r.rowGap < 20, `${where}: nav wrapped under the logo`);
             // Either the whole name or just the logo (name still read out): never "Threa…".
-            assert.ok(r.hidden || !r.cut, `${where}: site name cut short`);
+            assert.ok(!r.cut, `${where}: site name cut short`);
+            assert.equal(r.sideways, 0, `${where}: page scrolls sideways (header or footer)`);
             const logoLink = page.locator('.site-header').getByRole('link', { name: name || 'ThreadVet', exact: true });
             assert.equal(await logoLink.count(), 1, `${where}: logo link keeps its name`);
             await context.close();

@@ -220,6 +220,7 @@ VERIFY_LABEL = 6.5
 
 NO_FEE_CASES = [None, "Bogus Market"]  # Sold on left blank, and a name not in Platforms
 NO_DATE_CASES = ["Mercari"]  # a sale entered without its date sold
+NO_PRICE_CASES = ["Depop"]  # a date sold entered without the sale price
 
 
 def no_fee_row(i):
@@ -228,6 +229,10 @@ def no_fee_row(i):
 
 def no_date_row(i):
     return no_fee_row(len(NO_FEE_CASES)) + i
+
+
+def no_price_row(i):
+    return no_date_row(len(NO_DATE_CASES)) + i
 
 
 def verify_cases():
@@ -418,10 +423,10 @@ def date_validation():
     return dv
 
 
-def amount_validation(what="an amount", unit=", without the $ sign"):
+def amount_validation(error="Enter an amount of 0 or more, without the $ sign."):
     dv = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True, showErrorMessage=True)
     dv.errorTitle = "Not a valid number"
-    dv.error = f"Enter {what} of 0 or more{unit}."
+    dv.error = error
     return dv
 
 
@@ -460,8 +465,12 @@ def build_inventory(wb, verify=False):
         ws[f"P{r}"] = f'=IF($O{r}="","",$O{r}-{label}-N($E{r})-N($K{r}))'
         ws[f"Q{r}"] = f'=IF(OR($P{r}="",N($E{r})=0),"",$P{r}/$E{r})'
         ws[f"R{r}"] = f'=IF(OR($D{r}="",$G{r}=""),"",$G{r}-$D{r})'
-        # A sale price without a date sold can't be put in a year: flagged, not counted.
-        ws[f"S{r}"] = f'=IF($G{r}<>"","Sold",IF($H{r}<>"","Needs date",IF(OR($A{r}<>"",$B{r}<>"",$E{r}<>""),"In stock","")))'
+        # Half-entered sales are flagged and left out of the totals: a price without
+        # a date sold can't be put in a year, a date without a price has no amount.
+        ws[f"S{r}"] = (
+            f'=IF($G{r}<>"",IF($H{r}="","Needs price","Sold"),'
+            f'IF($H{r}<>"","Needs date",IF(OR($A{r}<>"",$B{r}<>"",$E{r}<>""),"In stock","")))'
+        )
 
     example = ["TV-0001", "Patagonia Better Sweater, men's M", "Goodwill", as_of(23), 8, "Poshmark", as_of(11), 45, None, None, 0.5, None, None]
     for col, value in enumerate(example, start=1):
@@ -485,6 +494,10 @@ def build_inventory(wb, verify=False):
             row = ["VERIFY", "no date", "Other", as_of(24), VERIFY_COST, market, None, 45, 5, VERIFY_LABEL]
             for col, value in enumerate(row, start=1):
                 ws.cell(row=no_date_row(i), column=col, value=value)
+        for i, market in enumerate(NO_PRICE_CASES):
+            row = ["VERIFY", "no price", "Other", as_of(24), VERIFY_COST, market, as_of(5), None, 5, VERIFY_LABEL]
+            for col, value in enumerate(row, start=1):
+                ws.cell(row=no_price_row(i), column=col, value=value)
 
     # showErrorMessage makes Excel and Sheets refuse bad entries (openpyxl's default is off).
     dv_platform = DataValidation(type="list", formula1="=Platforms", allow_blank=True, showErrorMessage=True)
@@ -511,6 +524,10 @@ def build_inventory(wb, verify=False):
         f"G{FIRST}:G{LAST}",
         FormulaRule(formula=[f'AND($H{FIRST}<>"",$G{FIRST}="")'], font=red, fill=PatternFill("solid", fgColor="FBE3E1")),
     )
+    ws.conditional_formatting.add(
+        f"H{FIRST}:H{LAST}",
+        FormulaRule(formula=[f'AND($G{FIRST}<>"",$H{FIRST}="")'], font=red, fill=PatternFill("solid", fgColor="FBE3E1")),
+    )
     ws.conditional_formatting.add(f"P{FIRST}:P{LAST}", CellIsRule(operator="lessThan", formula=["0"], font=red))
     ws.conditional_formatting.add(
         f"S{FIRST}:S{LAST}", FormulaRule(formula=[f'$S{FIRST}="Sold"'], font=Font(name=FONT, size=10, color=BRAND, bold=True))
@@ -527,10 +544,13 @@ def build_inventory(wb, verify=False):
 def build_expenses(wb):
     ws = wb.create_sheet("Expenses")
     title(ws, "Business expenses", "Costs that are not tied to one item. Row 5 is an example: type over it. Totals by category are on the Dashboard.")
-    header_row(ws, 4, ["Date", "Category", "Description", "Amount", "Notes"], [12, 30, 34, 12, 30])
+    header_row(ws, 4, ["Date", "Category", "Description", "Amount", "Notes", "Tax year"], [12, 30, 34, 12, 30, 10])
     for r in range(FIRST, LAST + 1):
         for col, fmt in zip("ABCDE", [DATE_FMT, None, None, USD, None]):
             style(ws[f"{col}{r}"], f_input, INPUT_FILL, fmt, border=BOX)
+        # For filtering by year. Every row also needs a formula for LibreOffice's
+        # re-save (recalculate) to keep all the prebuilt rows and their checks.
+        style(ws[f"F{r}"], f_calc, CALC_FILL, "0", border=BOX).value = f'=IF($A{r}="","",YEAR($A{r}))'
     for col, value in zip("ABCDE", [as_of(22), "Shipping supplies", "Poly mailers, 100 pack", 14.99, "Receipt in email"]):
         ws[f"{col}{FIRST}"] = value
 
@@ -570,7 +590,7 @@ def build_mileage(wb, verify=False):
         for i, (day, miles) in enumerate(mileage_verify_cases()):
             for col, value in zip("ABE", [day, "VERIFY", miles]):
                 ws[f"{col}{FIRST + 1 + i}"] = value
-    dv_date, dv_miles = date_validation(), amount_validation("the miles", "")
+    dv_date, dv_miles = date_validation(), amount_validation("Enter the miles as a number, 0 or more.")
     for dv in (dv_date, dv_miles):
         ws.add_data_validation(dv)
     dv_date.add(f"A{FIRST}:A{LAST}")
@@ -602,14 +622,17 @@ def build_dashboard(wb, verify=False):
 
     # KPI tiles
     # Sales left out of the totals because no fee could be worked out.
-    # Sales left out of the totals: no fee (marketplace blank or unknown) this
-    # year, or no date sold at all (so no year).
-    missing = (
-        f'(COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'
-        f'+COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},""))'
+    # Sales left out of the totals: this year's without a fee (marketplace blank
+    # or unknown), and half-entered ones of any year (no date sold, or no price).
+    no_fee = f'COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'
+    half = (
+        f'(COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},"")'
+        f'+COUNTIFS({inv}$G${FIRST}:$G${RANGE_END},"<>",{inv}$H${FIRST}:$H${RANGE_END},""))'
     )
     style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
-        f'=IF({missing}=0,"",{missing}&" sale(s) left out of the totals: no marketplace or no date sold. See the red cells on Inventory.")'
+        f'=IF({no_fee}+{half}=0,"",TRIM(IF({no_fee}>0,{no_fee}&" sale(s) this year have no marketplace. ","")'
+        f'&IF({half}>0,{half}&" sale(s) are missing a date sold or a price. ","")'
+        f'&"Left out of the totals: see the red cells on Inventory."))'
     )
     kpis = [
         ("Items sold", f"=COUNTIFS({in_year})", INT),
@@ -702,7 +725,9 @@ def build_dashboard(wb, verify=False):
         style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({inv}$C${FIRST}:$C${RANGE_END},$A{r})"
         style(ws[f"C{r}"], f_calc, fmt=INT, border=BOX).value = f'=COUNTIFS({inv}$C${FIRST}:$C${RANGE_END},$A{r},{inv}$S${FIRST}:$S${RANGE_END},"Sold")'
         style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$E${FIRST}:$E${RANGE_END},{inv}$C${FIRST}:$C${RANGE_END},$A{r})"
-        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{inv}$C${FIRST}:$C${RANGE_END},$A{r})"
+        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = (
+            f'=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{inv}$C${FIRST}:$C${RANGE_END},$A{r},{inv}$S${FIRST}:$S${RANGE_END},"Sold")'
+        )
         style(ws[f"F{r}"], f_calc, fmt=PCT, border=BOX).value = f'=IF(B{r}=0,"",C{r}/B{r})'
     last_source = top + 1 + len(SOURCES)
 
@@ -779,6 +804,7 @@ def build_start(wb):
         *([f"{buyer_ships_names()}: the buyer pays for the label, so Shipping charged and Label cost are ignored (shown struck through) on those rows."]
           if buyer_ships_names() else []),
         f"Local cash sale? Pick {OTHER} as the marketplace; its fee is 0 unless you change it on the Fees tab.",
+        "A red cell on Inventory means a half-entered sale (no marketplace, date sold or price). It stays out of the Dashboard totals until you fill it in; the Dashboard says how many there are.",
         "Row 5 on each log is an example. Type over it, or right-click its row number and choose Delete to remove the whole row. Don't clear the gray cells on their own: they hold that row's formulas (copy one down from the row above to repair).",
         f"There are {DATA_ROWS:,} ready rows on each log. Need more? Copy the last row and paste it below; the formulas come along, and the Dashboard counts rows up to {RANGE_END:,}.",
         "Fees change: update the rates on the Fees tab. Sales with Actual fees filled in keep their exact numbers.",

@@ -228,12 +228,15 @@ function setup(root) {
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
   }
+  // Refit when the list's width changes. Next frame, not inside the callback:
+  // toggling .stacked changes the list's height, and changing an observed
+  // element's size from its own callback raises "ResizeObserver loop" errors.
   let fittedWidth = 0;
   new ResizeObserver(([entry]) => {
     const width = Math.round(entry.contentRect.width);
     if (width !== fittedWidth) {
       fittedWidth = width;
-      fitResults();
+      requestAnimationFrame(fitResults);
     }
   }).observe(resultsEl);
 
