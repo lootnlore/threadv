@@ -47,7 +47,7 @@ export const RATES = {
   poshmark: { rate: 0.2, flat: 2.95, threshold: 15 },
   mercari: { rate: 0.1 },
   depop: { proc: 0.033, procFixed: 0.45, boost: 0.12 },
-  etsy: { listing: 0.2, txn: 0.065, proc: 0.03, procFixed: 0.25, offsiteCap: 100 },
+  etsy: { listing: 0.2, txn: 0.065, proc: 0.03, procFixed: 0.25, offsite: 0.15, offsiteReduced: 0.12, offsiteReducedFrom: 10000, offsiteCap: 100 },
   whatnot: { commission: 0.08, proc: 0.029, procFixed: 0.3 },
   facebook: { rate: 0.1, min: 0.8 },
   grailed: { threshold: 120, lowRate: 0.06, min: 1.99, rate: 0.09, proc: 0.0349, procFixed: 0.49 },
@@ -128,12 +128,12 @@ export const EBAY_CATEGORIES = {
   },
 };
 
-// Labels stay short enough for a phone-width dropdown.
+// Labels stay short enough for a phone-width dropdown ("$10k+/yr").
 const offsiteAds = (rate, who) => ({ label: who ? `Offsite Ads ${pctText(rate)} (${who})` : `Offsite Ads sale (${pctText(rate)})`, rate });
 export const ETSY_OFFSITE = {
   none: { label: 'No Offsite Ads sale', rate: 0 },
-  standard: offsiteAds(0.15),
-  reduced: offsiteAds(0.12, '$10k+/yr'),
+  standard: offsiteAds(R.etsy.offsite),
+  reduced: offsiteAds(R.etsy.offsiteReduced, `$${R.etsy.offsiteReducedFrom / 1000}k+/yr`),
 };
 
 const ebayTotal = (o) => o.price + o.ship + o.tax;
@@ -278,7 +278,7 @@ export const PLATFORMS = [
       ['Payment processing', `${pctText(R.etsy.proc)} + ${usdText(R.etsy.procFixed)}`, 'Order total incl. sales tax'],
       [
         'Offsite Ads (sometimes)',
-        `${pctText(ETSY_OFFSITE.standard.rate)} (${pctText(ETSY_OFFSITE.reduced.rate)} for $10k+/yr sellers), max ${usdText(R.etsy.offsiteCap)}`,
+        `${pctText(R.etsy.offsite)} (${pctText(R.etsy.offsiteReduced)} for sellers with ${usdText(R.etsy.offsiteReducedFrom)}+ a year), max ${usdText(R.etsy.offsiteCap)}`,
         'Item + shipping',
       ],
     ],

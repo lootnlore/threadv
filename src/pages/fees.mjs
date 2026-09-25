@@ -109,6 +109,12 @@ function shippingAnswer(platform) {
     : `No. ${name} calculates its fees on the item price, so shipping you charge the buyer does not add to them. You still pay for your own label.`;
 }
 
+/** Who pays for shipping, from each platform's sellerPaysShipping. */
+const buyerPays = PLATFORMS.filter((p) => !p.sellerPaysShipping).map((p) => p.name);
+const buyerPaysNote = buyerPays.length
+  ? `${andList(buyerPays)} buyers pay for shipping; on the others it depends on your listing.`
+  : 'Who pays for shipping depends on your listing.';
+
 export function feePage(config, platform) {
   const ex = at(platform, 40);
   const hundred = at(platform, 100);
@@ -204,7 +210,7 @@ ${calculator({ focus: platform.id })}
 <div class="wrap narrow">
 <h2 id="cmp-title">What you keep from a $50 sale, by marketplace</h2>
 <ol class="compare" role="list">${others}</ol>
-<p class="fineprint">Before shipping labels and item cost. Poshmark buyers pay for shipping; on the others it depends on your listing.</p>
+<p class="fineprint">Before shipping labels and item cost. ${buyerPaysNote}</p>
 </div>
 </section>
 

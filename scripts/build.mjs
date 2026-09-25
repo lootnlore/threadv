@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import config from '../site.config.mjs';
 import { layout } from '../src/pages/layout.mjs';
+import { abs } from '../src/pages/components.mjs';
 import { home } from '../src/pages/home.mjs';
 import { feesHub, feePage } from '../src/pages/fees.mjs';
 import { tracker } from '../src/pages/tracker.mjs';
@@ -116,7 +117,18 @@ async function build() {
   await write(MARKER, 'Created by scripts/build.mjs. This folder is wiped on every build.\n');
 
   // ---- assets: content-hashed names, so a URL always means the same bytes ----
-  const css = minifyCss(await readFile(join(ROOT, 'src/assets/styles.css'), 'utf8'));
+  // On a header too narrow for the full site name beside the nav (small phone,
+  // large text), show just the logo rather than "Threa…". How narrow depends
+  // on the name, so these rules are written here: about 0.66em per bold
+  // character at the brand's 1.15rem, plus the logo, gaps and nav links (two
+  // below 30em, where "Calculator" is hidden; three above). The name stays
+  // readable to screen readers (visually hidden, not removed).
+  const nameEm = config.name.length * 0.66 * 1.15;
+  const hideName = '.brand span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}';
+  const logoOnly = (navEm) => `@container header (max-width:${Math.ceil((nameEm + navEm) * 10) / 10}em){${hideName}}`;
+  const css =
+    minifyCss(await readFile(join(ROOT, 'src/assets/styles.css'), 'utf8')) +
+    `@media (max-width:29.99em){${logoOnly(11)}}@media (min-width:30em){${logoOnly(17.5)}}`;
   const published = { css: `styles.${hash(css)}.css` };
   await write(`assets/${published.css}`, css);
   for (const [src, name] of MODULES) {
@@ -218,11 +230,11 @@ async function build() {
     'sitemap.xml',
     `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${indexable.map((p) => `<url><loc>${config.url}${p.path}</loc><lastmod>${p.lastmod}</lastmod></url>`).join('\n')}
+${indexable.map((p) => `<url><loc>${abs(config, p.path)}</loc><lastmod>${p.lastmod}</lastmod></url>`).join('\n')}
 </urlset>
 `,
   );
-  await write('robots.txt', `User-agent: *\nAllow: /\n\nSitemap: ${config.url}/sitemap.xml\n`);
+  await write('robots.txt', `User-agent: *\nAllow: /\n\nSitemap: ${abs(config, '/sitemap.xml')}\n`);
   const icons = [...iconFiles.map((f) => `/assets/icons/${f}`), '/favicon.ico'];
   // Every page loads offline.js (and analytics.js when enabled), so they must be
   // cached too or a page served from the cache would fail its script loads.

@@ -209,6 +209,7 @@ function setup(root) {
       verdictEl.innerHTML = verdict.html;
       resultsEl.innerHTML = renderResults(mode, results, { focus, target: input.target });
       for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
+      fitResults();
     }
     if (save) {
       if (!sharedView) persist(state);
@@ -217,6 +218,24 @@ function setup(root) {
     announce();
   }
   const renderSoon = debounce(() => render({ save: true }), 60);
+
+  // Figures sit beside the names unless a name no longer fits beside its
+  // figure (a big amount, large text): then every figure moves under its name,
+  // so the list stays even. (Without JavaScript a CSS container query does a
+  // rougher version of this.)
+  function fitResults() {
+    resultsEl.classList.remove('stacked');
+    const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
+    resultsEl.classList.toggle('stacked', squeezed);
+  }
+  let fittedWidth = 0;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    if (width !== fittedWidth) {
+      fittedWidth = width;
+      fitResults();
+    }
+  }).observe(resultsEl);
 
   // Screen readers hear the verdict once the user pauses, not after every
   // keystroke, and only when it changed. Nothing is announced on page load.

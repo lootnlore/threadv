@@ -52,8 +52,14 @@ def check_features(path):
     lists = {str(dv.formula1).lstrip("="): str(dv.sqref) for dv in inv.data_validations.dataValidation if dv.type == "list"}
     if not lists.get("Platforms", "").startswith("F5") or not lists.get("Sources", "").startswith("C5"):
         problems.append(f"Inventory dropdowns changed: {lists}")
-    if not any(dv.type == "date" for dv in inv.data_validations.dataValidation):
-        problems.append("Inventory date validation missing")
+    # Every validation that has an error message must actually show it (and refuse the entry).
+    for ws in (inv, wb["Expenses"], wb["Mileage"]):
+        kinds = {dv.type for dv in ws.data_validations.dataValidation}
+        if not {"date", "decimal"} <= kinds:
+            problems.append(f"{ws.title}: date or amount validation missing ({sorted(kinds)})")
+        for dv in ws.data_validations.dataValidation:
+            if dv.error and not dv.showErrorMessage:
+                problems.append(f"{ws.title}!{dv.sqref}: validation never shows its error ({dv.error!r})")
     if len(list(inv.conditional_formatting)) < 3:
         problems.append("Inventory conditional formatting missing")
     if not [c for row in inv.iter_rows(min_row=4, max_row=4) for c in row if c.comment]:
@@ -104,12 +110,25 @@ def main():
         for col in "LOP":
             if inv[f"{col}{r}"].value not in (None, ""):
                 problems.append(f"Sold on {market!r}: {col}{r} should be blank, sheet shows {inv[f'{col}{r}'].value!r}")
+    # A sale without a date sold is flagged too.
+    for i, market in enumerate(build_tracker.NO_DATE_CASES):
+        status = inv[f"S{build_tracker.no_date_row(i)}"].value
+        if status != "Needs date":
+            problems.append(f"{market} sale without a date: Status reads {status!r}, expected 'Needs date'")
+    left_out = len(build_tracker.NO_FEE_CASES) + len(build_tracker.NO_DATE_CASES)
     warning = wb["Dashboard"]["E3"].value or ""
-    if not warning.startswith(f"{len(build_tracker.NO_FEE_CASES)} sale(s) left out"):
-        problems.append(f"Dashboard warning for sales without a marketplace reads {warning!r}")
-    # ...and they are left out everywhere: counts and every cost line of the tax summary.
+    if not warning.startswith(f"{left_out} sale(s) left out"):
+        problems.append(f"Dashboard warning for sales left out reads {warning!r}, expected {left_out} sale(s)")
+    # ...and they are left out everywhere: counts and every cost line of the tax
+    # summary include exactly the sales with a fee and a date in the Dashboard year.
     dash = wb["Dashboard"]
-    counted = [r for r in range(build_tracker.FIRST, build_tracker.LAST + 1) if isinstance(inv[f"N{r}"].value, (int, float))]
+    year = dash["B3"].value
+
+    def in_totals(r):
+        sold = inv[f"G{r}"].value
+        return isinstance(inv[f"N{r}"].value, (int, float)) and hasattr(sold, "year") and sold.year == year
+
+    counted = [r for r in range(build_tracker.FIRST, build_tracker.LAST + 1) if in_totals(r)]
     label_of = {dash[f"A{r}"].value: dash[f"B{r}"].value for r in range(1, dash.max_row + 1)}
     expected_totals = {
         "Items sold": (dash["A6"].value, len(counted)),
@@ -118,7 +137,7 @@ def main():
     }
     for name, (got, want) in expected_totals.items():
         if not isinstance(got, (int, float)) or abs(got - want) > 0.005:
-            problems.append(f"Dashboard {name}: sheet {got!r}, expected {want!r} (sales with a fee only)")
+            problems.append(f"Dashboard {name}: sheet {got!r}, expected {want!r} (sales with a fee, sold in {year})")
     no_fee_ok = len(problems) == before
 
     # Mileage: the rate each trip gets must be the IRS rate in force that day (src/data/mileage.mjs).

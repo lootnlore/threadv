@@ -219,6 +219,7 @@ svg {
   position: sticky;
   top: 0;
   z-index: 50;
+  background: var(--paper); /* browsers without color-mix() (Safari < 16.2) */
   background: color-mix(in srgb, var(--paper) 88%, transparent);
   backdrop-filter: saturate(1.4) blur(10px);
   -webkit-backdrop-filter: saturate(1.4) blur(10px);
@@ -226,6 +227,7 @@ svg {
 }
 
 .header-inner {
+  container: header / inline-size; /* see the site-name rule in scripts/build.mjs */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -621,6 +623,7 @@ svg {
 
 .input-wrap:focus-within {
   border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent);
 }
 
@@ -771,20 +774,12 @@ select {
 
 .check-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Two columns when each can hold a checkbox and "Marketplace" (the longest
+     word) at the current text size, otherwise one. In em, so larger text
+     switches to one column by itself; max() caps it at two, min() keeps a
+     single column inside the form. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, max(9em, calc((100% - 12px) / 2))), 1fr));
   gap: 0 12px;
-}
-
-/* One column when two no longer fit the text size ("Facebook Marketplace").
-   The form is the container: a fieldset can't be one. */
-.calc-form {
-  container-type: inline-size;
-}
-
-@container (max-width: 13em) {
-  .check-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .see-results {
@@ -895,7 +890,9 @@ select {
 }
 
 .result.is-focus {
+  background: var(--sunken);
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
 }
 
@@ -981,6 +978,11 @@ select {
     white-space: normal;
     text-align: right;
   }
+}
+
+/* A name squeezed by its figure (set by app.js): every figure under its name. */
+.results.stacked .figure {
+  grid-column: 2 / -1;
 }
 
 /* Very narrow for the text size (large text on a small phone): amounts too,
@@ -1385,7 +1387,6 @@ table.data {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--muted);
-  white-space: nowrap;
 }
 
 .data tbody tr:last-child > * {
@@ -1463,6 +1464,7 @@ table.data {
 }
 
 .compare .is-current {
+  background: var(--sunken);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 8px;
 }
@@ -1545,6 +1547,7 @@ code {
   width: 10px;
   height: 10px;
   border-radius: 50%;
+  background: var(--on-brand);
   background: color-mix(in srgb, var(--on-brand) 55%, transparent);
 }
 

@@ -135,6 +135,16 @@ install -m 644 "$HERE/nginx/threadvet-security.conf" "$SNIPPET"
 # so a folder the web user could write to would let it plant a symlink and
 # get root to write anywhere (CVE-2016-1247).
 install -d -m 0755 -o root -g adm /var/log/threadvet
+# The files themselves are 0640 www-data:adm like Debian's nginx logs (nginx
+# would otherwise create them world-readable). Existing logs are kept.
+for log in access error; do
+  if [[ -e /var/log/threadvet/$log.log ]]; then
+    chown www-data:adm "/var/log/threadvet/$log.log"
+    chmod 0640 "/var/log/threadvet/$log.log"
+  else
+    install -m 0640 -o www-data -g adm /dev/null "/var/log/threadvet/$log.log"
+  fi
+done
 install -m 644 "$HERE/logrotate/threadvet" /etc/logrotate.d/threadvet
 SITE=/etc/nginx/sites-available/threadvet
 BACKUP=""

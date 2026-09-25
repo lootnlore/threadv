@@ -7,8 +7,6 @@ import { abs } from './components.mjs';
 const LOGO_PATH = readFileSync(new URL('../assets/icons/icon.svg', import.meta.url), 'utf8').match(/<path d="([^"]+)"/)[1];
 const LOGO = `<svg class="logo-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" class="logo-bg"/><path class="logo-fg" d="${LOGO_PATH}"/></svg>`;
 
-/** Absolute URL for a site path. */
-
 function csp(config) {
   const script = ["'self'"];
   const connect = ["'self'"];

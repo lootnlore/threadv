@@ -73,6 +73,13 @@ if (chromium) {
     return { context, page, errors };
   };
   const verdict = async (page) => (await page.locator('[data-verdict]').innerText()).replace(/\s+/g, ' ');
+  // A reader's browser font size setting, applied as a real default (Chrome
+  // DevTools protocol) so em media queries move with it, as they would for them.
+  const setTextSize = async (page, scale) => {
+    if (scale === 1) return;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Page.setFontSizes', { fontSizes: { standard: Math.round(16 * scale), fixed: Math.round(13 * scale) } });
+  };
   const saved = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('threadvet:settings:v2')));
   const settle = (page) => page.waitForTimeout(350);
 
@@ -225,12 +232,12 @@ if (chromium) {
   test('calculator layout holds on small phones and with large text', async () => {
     // Long messages and every mode, on the home page and a fee page (pinned result).
     const states = ['/#mode=maxbuy&price=5', '/#mode=price&target=99999', '/#price=4000&cost=100', '/fees/facebook/#mode=maxbuy&price=5'];
-    for (const [width, text] of [[320, 1], [320, 1.5], [320, 2], [340, 2], [390, 1], [390, 1.5], [390, 2], [414, 1], [1280, 1]]) {
-      // bypassCSP only lets the test enlarge the text the way a browser setting would.
-      const { context, page } = await open(null, { viewport: { width, height: 800 }, bypassCSP: true });
+    const sizes = [[320, 1], [320, 1.25], [320, 1.5], [320, 2], [330, 1.25], [360, 1.25], [390, 1], [390, 1.5], [390, 2], [414, 1], [900, 1.75], [1280, 1], [1280, 1.75]];
+    for (const [width, text] of sizes) {
+      const { context, page } = await open(null, { viewport: { width, height: 800 } });
+      await setTextSize(page, text);
       for (const state of states) {
         await page.goto(base + state, { waitUntil: 'networkidle' });
-        if (text !== 1) await page.addStyleTag({ content: `html{font-size:${text * 100}%}` });
         // Open everything (setting `open`, since a click would close an already open panel).
         await page.evaluate(() => document.querySelectorAll('.calc details').forEach((d) => (d.open = true)));
         const problems = await page.evaluate(() => {
@@ -245,6 +252,10 @@ if (chromium) {
             if (r.width && (r.right > box.right + 0.5 || r.left < box.left - 0.5)) found.push(`outside the card: ${el.className || el.tagName}`);
           }
           if (document.documentElement.scrollWidth > innerWidth) found.push('page scrolls sideways');
+          // Nor may any text spill out of its own box (e.g. "Marketplace" in a checkbox column).
+          for (const el of calc.querySelectorAll('label, .check, .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
+            if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) found.push(`text spills out: ${el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}"`);
+          }
           // Messages sit either beside every name or under every name, never a mix.
           const top = (el) => el.getBoundingClientRect().top;
           const msgRows = [...document.querySelectorAll('.result')].filter((r) => r.querySelector('.figure.msg'));
@@ -288,11 +299,11 @@ if (chromium) {
     const pages = ['/', '/fees/', '/fees/ebay/', '/fees/facebook/', '/tracker/', '/privacy/', '/terms/', '/404.html', '/offline.html'];
     const problems = [];
     for (const width of [320, 360, 414, 600, 768, 800, 1024, 1280]) {
-      for (const text of [1, 1.5, 2]) {
-        const { context, page } = await open(null, { viewport: { width, height: 800 }, bypassCSP: true, serviceWorkers: 'block' });
+      for (const text of [1, 1.25, 1.5, 2]) {
+        const { context, page } = await open(null, { viewport: { width, height: 800 }, serviceWorkers: 'block' });
+        await setTextSize(page, text);
         for (const path of pages) {
           await page.goto(base + path, { waitUntil: 'domcontentloaded' });
-          if (text !== 1) await page.addStyleTag({ content: `html{font-size:${text * 100}%}` });
           await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
           const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
           if (over > 0) problems.push(`${width}px, text ${text * 100}%, ${path}: +${over}px`);
@@ -303,16 +314,28 @@ if (chromium) {
     assert.deepEqual(problems, []);
   });
 
-  test('the header stays on one row from 320px phones to desktops, even with a long site name', async () => {
+  test('the header stays on one row and never cuts the site name short', async () => {
     for (const name of ['', 'ResellerCalculatorPro']) {
       if (name) build({ SITE_NAME: name });
       try {
         for (const width of [320, 360, 390, 430, 480, 768, 1280]) {
-          const { context, page } = await open(null, { viewport: { width, height: 700 } });
-          await page.goto(`${base}/fees/`, { waitUntil: 'networkidle' });
-          const [brand, nav] = await page.evaluate(() => ['.brand', '.site-header nav'].map((q) => document.querySelector(q).getBoundingClientRect().top));
-          assert.ok(Math.abs(brand - nav) < 20, `${width}px${name ? ` with "${name}"` : ''}: nav wrapped under the logo`);
-          await context.close();
+          for (const text of [1, 1.25, 1.5]) {
+            const { context, page } = await open(null, { viewport: { width, height: 700 } });
+            await setTextSize(page, text);
+            await page.goto(`${base}/fees/`, { waitUntil: 'networkidle' });
+            const where = `${width}px, text ${text * 100}%${name ? `, "${name}"` : ''}`;
+            const r = await page.evaluate(() => {
+              const span = document.querySelector('.brand span');
+              const top = (q) => document.querySelector(q).getBoundingClientRect().top;
+              return { rowGap: Math.abs(top('.brand') - top('.site-header nav')), hidden: span.clientWidth <= 1, cut: span.scrollWidth > span.clientWidth + 1 };
+            });
+            assert.ok(r.rowGap < 20, `${where}: nav wrapped under the logo`);
+            // Either the whole name or just the logo (name still read out): never "Threa…".
+            assert.ok(r.hidden || !r.cut, `${where}: site name cut short`);
+            const logoLink = page.locator('.site-header').getByRole('link', { name: name || 'ThreadVet', exact: true });
+            assert.equal(await logoLink.count(), 1, `${where}: logo link keeps its name`);
+            await context.close();
+          }
         }
       } finally {
         if (name) build();

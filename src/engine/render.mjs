@@ -114,7 +114,7 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
         (mode !== 'profit' || (r.profit > 0 && r.profit >= target));
       const cls = ['result', best && 'is-best', r.id === focus && 'is-focus'].filter(Boolean).join(' ');
       const tag = best ? '<span class="tag tag-best">Best</span>' : '';
-      const head = `<span class="result-main"><span class="rank" aria-hidden="true">${i + 1}</span><span class="pname">${esc(r.short)}${tag}</span>${figureFor(mode, r)}</span>
+      const head = `<span class="result-main"><span class="rank" aria-hidden="true">${i + 1}</span><span class="pname">${esc(r.short)}${tag ? `<wbr>${tag}` : ''}</span>${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable
         ? `<div class="result-head">${head}</div>`

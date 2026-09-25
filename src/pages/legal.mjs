@@ -45,7 +45,7 @@ export function privacy(config) {
 <h2>Analytics</h2>
 ${analytics}
 <h2>Email alerts</h2>
-<p>If you subscribe to fee-change alerts, your email address is stored by our email provider and used only to send those alerts. Every email has an unsubscribe link.</p>
+<p>If you subscribe to fee-change alerts, your email address is stored by our email provider and used only to send those alerts and, if you signed up on the tracker page before it launched, one note when it launches. Every email has an unsubscribe link.</p>
 <h2>Purchases</h2>
 <p>Tracker purchases are processed by our store provider. We receive your email address and order details so we can deliver the file and support you. We never see or store card numbers.</p>
 <h2>Affiliate links</h2>

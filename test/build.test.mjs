@@ -248,17 +248,14 @@ test('preview server never maps a path outside its folder', () => {
 
 test('renaming the site in site.config.mjs renames it everywhere', () => {
   const copy = copyProject();
-  const cfg = join(copy, 'site.config.mjs');
-  const edited = readFileSync(cfg, 'utf8').replace('name: `${name} Reseller Tracker`', "name: 'FlipCheck Tracker'");
-  assert.notEqual(edited, readFileSync(cfg, 'utf8'), 'the test edits the tracker name');
-  writeFileSync(cfg, edited);
+  // Only the brand changes: the product name follows it (tracker.name derives from it).
   execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, SITE_NAME: 'FlipCheck' } });
   const built = walk(join(copy, 'dist')).filter((f) => /\.(html|webmanifest)$/.test(f));
   for (const file of built) {
     const text = readFileSync(file, 'utf8');
     assert.ok(!text.includes('ThreadVet'), `${relative(copy, file)} still says ThreadVet`);
   }
-  assert.match(readFileSync(join(copy, 'dist/terms/index.html'), 'utf8'), /FlipCheck Tracker/);
+  assert.match(readFileSync(join(copy, 'dist/terms/index.html'), 'utf8'), /FlipCheck Reseller Tracker/);
 });
 
 test('fee change dates are machine-readable', () => {

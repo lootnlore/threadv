@@ -331,7 +331,7 @@ test('RATES drive the fees and the defaults', () => {
 
 test('every rate in RATES appears in its platform\'s descriptions', () => {
   // Catches prose left behind when a rate changes: percentages and dollar amounts alike.
-  const money = new Set(['fvfCap', 'handbagsCap', 'orderFee', 'orderFeeSmall', 'smallOrderMax', 'flat', 'threshold', 'procFixed', 'listing', 'offsiteCap', 'min']);
+  const money = new Set(['fvfCap', 'handbagsCap', 'orderFee', 'orderFeeSmall', 'smallOrderMax', 'flat', 'threshold', 'procFixed', 'listing', 'offsiteCap', 'offsiteReducedFrom', 'min']);
   for (const p of PLATFORMS) {
     // Only text the fee pages actually show counts.
     const prose = [p.headline, ...p.rows.flat(), ...p.notes].join(' ');

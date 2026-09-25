@@ -219,10 +219,15 @@ VERIFY_LABEL = 6.5
 
 
 NO_FEE_CASES = [None, "Bogus Market"]  # Sold on left blank, and a name not in Platforms
+NO_DATE_CASES = ["Mercari"]  # a sale entered without its date sold
 
 
 def no_fee_row(i):
     return FIRST + 1 + len(verify_cases()) + i
+
+
+def no_date_row(i):
+    return no_fee_row(len(NO_FEE_CASES)) + i
 
 
 def verify_cases():
@@ -406,6 +411,20 @@ INV_HEADERS = [
 ]
 
 
+def date_validation():
+    dv = DataValidation(type="date", operator="greaterThan", formula1="36526", allow_blank=True, showErrorMessage=True)
+    dv.errorTitle = "Not a date"
+    dv.error = f"Enter a date, for example {as_of(11):%m/%d/%Y}."
+    return dv
+
+
+def amount_validation(what="an amount", unit=", without the $ sign"):
+    dv = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True, showErrorMessage=True)
+    dv.errorTitle = "Not a valid number"
+    dv.error = f"Enter {what} of 0 or more{unit}."
+    return dv
+
+
 def build_inventory(wb, verify=False):
     ws = wb.create_sheet("Inventory")
     title(ws, "Inventory & sales", "One row per item. Fill the yellow cells; the gray cells calculate themselves. Row 5 is an example: type over it.")
@@ -441,7 +460,8 @@ def build_inventory(wb, verify=False):
         ws[f"P{r}"] = f'=IF($O{r}="","",$O{r}-{label}-N($E{r})-N($K{r}))'
         ws[f"Q{r}"] = f'=IF(OR($P{r}="",N($E{r})=0),"",$P{r}/$E{r})'
         ws[f"R{r}"] = f'=IF(OR($D{r}="",$G{r}=""),"",$G{r}-$D{r})'
-        ws[f"S{r}"] = f'=IF($G{r}<>"","Sold",IF(OR($A{r}<>"",$B{r}<>"",$E{r}<>""),"In stock",""))'
+        # A sale price without a date sold can't be put in a year: flagged, not counted.
+        ws[f"S{r}"] = f'=IF($G{r}<>"","Sold",IF($H{r}<>"","Needs date",IF(OR($A{r}<>"",$B{r}<>"",$E{r}<>""),"In stock","")))'
 
     example = ["TV-0001", "Patagonia Better Sweater, men's M", "Goodwill", as_of(23), 8, "Poshmark", as_of(11), 45, None, None, 0.5, None, None]
     for col, value in enumerate(example, start=1):
@@ -461,15 +481,18 @@ def build_inventory(wb, verify=False):
             row = ["VERIFY", "no fee", "Other", as_of(24), VERIFY_COST, market, as_of(5), 45, 5, VERIFY_LABEL]
             for col, value in enumerate(row, start=1):
                 ws.cell(row=r, column=col, value=value)
+        for i, market in enumerate(NO_DATE_CASES):
+            row = ["VERIFY", "no date", "Other", as_of(24), VERIFY_COST, market, None, 45, 5, VERIFY_LABEL]
+            for col, value in enumerate(row, start=1):
+                ws.cell(row=no_date_row(i), column=col, value=value)
 
-    dv_platform = DataValidation(type="list", formula1="=Platforms", allow_blank=True)
+    # showErrorMessage makes Excel and Sheets refuse bad entries (openpyxl's default is off).
+    dv_platform = DataValidation(type="list", formula1="=Platforms", allow_blank=True, showErrorMessage=True)
     dv_platform.error = "Pick a marketplace from the list (edit the list on the Settings tab)."
     dv_platform.errorTitle = "Unknown marketplace"
     dv_source = DataValidation(type="list", formula1="=Sources", allow_blank=True, showErrorMessage=False)
-    dv_date = DataValidation(type="date", operator="greaterThan", formula1="36526", allow_blank=True)
-    dv_date.error = f"Enter a date, for example {as_of(11):%m/%d/%Y}."
-    dv_money = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True)
-    dv_money.error = "Enter an amount of 0 or more, without the $ sign."
+    dv_date = date_validation()
+    dv_money = amount_validation()
     for dv in (dv_platform, dv_source, dv_date, dv_money):
         ws.add_data_validation(dv)
     dv_platform.add(f"F{FIRST}:F{LAST}")
@@ -483,6 +506,10 @@ def build_inventory(wb, verify=False):
     ws.conditional_formatting.add(
         f"F{FIRST}:F{LAST}",
         FormulaRule(formula=[f'AND($H{FIRST}<>"",$N{FIRST}="")'], font=red, fill=PatternFill("solid", fgColor="FBE3E1")),
+    )
+    ws.conditional_formatting.add(
+        f"G{FIRST}:G{LAST}",
+        FormulaRule(formula=[f'AND($H{FIRST}<>"",$G{FIRST}="")'], font=red, fill=PatternFill("solid", fgColor="FBE3E1")),
     )
     ws.conditional_formatting.add(f"P{FIRST}:P{LAST}", CellIsRule(operator="lessThan", formula=["0"], font=red))
     ws.conditional_formatting.add(
@@ -508,8 +535,12 @@ def build_expenses(wb):
         ws[f"{col}{FIRST}"] = value
 
     dv_cat = DataValidation(type="list", formula1="=ExpenseCategories", allow_blank=True, showErrorMessage=False)
-    ws.add_data_validation(dv_cat)
+    dv_date, dv_amount = date_validation(), amount_validation()
+    for dv in (dv_cat, dv_date, dv_amount):
+        ws.add_data_validation(dv)
     dv_cat.add(f"B{FIRST}:B{LAST}")
+    dv_date.add(f"A{FIRST}:A{LAST}")
+    dv_amount.add(f"D{FIRST}:D{LAST}")
 
     ws.freeze_panes = "A5"
     return ws
@@ -539,6 +570,11 @@ def build_mileage(wb, verify=False):
         for i, (day, miles) in enumerate(mileage_verify_cases()):
             for col, value in zip("ABE", [day, "VERIFY", miles]):
                 ws[f"{col}{FIRST + 1 + i}"] = value
+    dv_date, dv_miles = date_validation(), amount_validation("the miles", "")
+    for dv in (dv_date, dv_miles):
+        ws.add_data_validation(dv)
+    dv_date.add(f"A{FIRST}:A{LAST}")
+    dv_miles.add(f"E{FIRST}:E{LAST}")
     ws.freeze_panes = "A5"
     return ws
 
@@ -566,9 +602,14 @@ def build_dashboard(wb, verify=False):
 
     # KPI tiles
     # Sales left out of the totals because no fee could be worked out.
-    missing = f'COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'
+    # Sales left out of the totals: no fee (marketplace blank or unknown) this
+    # year, or no date sold at all (so no year).
+    missing = (
+        f'(COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'
+        f'+COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},""))'
+    )
     style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
-        f'=IF({missing}=0,"",{missing}&" sale(s) left out of the totals: no marketplace. See the red Sold on cells on Inventory.")'
+        f'=IF({missing}=0,"",{missing}&" sale(s) left out of the totals: no marketplace or no date sold. See the red cells on Inventory.")'
     )
     kpis = [
         ("Items sold", f"=COUNTIFS({in_year})", INT),
