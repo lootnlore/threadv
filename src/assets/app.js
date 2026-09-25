@@ -271,12 +271,18 @@ function setup(root) {
     syncUrl();
   }
 
+  // At large text sizes the tabs stack: a vertical tablist, moved with
+  // Up/Down (side by side, Up/Down keep scrolling the page).
+  const tablist = tabs[0].parentElement;
+  const stacked = () => tabs[1].getBoundingClientRect().top > tabs[0].getBoundingClientRect().top + 1;
+  new ResizeObserver(() => tablist.setAttribute('aria-orientation', stacked() ? 'vertical' : 'horizontal')).observe(tablist);
+
   for (const tab of tabs) {
     tab.addEventListener('click', () => selectMode(tab.dataset.mode));
     tab.addEventListener('keydown', (e) => {
       const i = tabs.indexOf(tab);
-      // Up/Down too: at large text sizes the tabs stack vertically.
-      const to = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+      const step = stacked() ? { ArrowDown: i + 1, ArrowUp: i - 1 } : { ArrowRight: i + 1, ArrowLeft: i - 1 };
+      const to = { ...step, Home: 0, End: tabs.length - 1 }[e.key];
       if (to === undefined) return;
       e.preventDefault();
       selectMode(tabs[(to + tabs.length) % tabs.length].dataset.mode, { moveFocus: true });

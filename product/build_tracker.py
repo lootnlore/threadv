@@ -600,6 +600,35 @@ def build_mileage(wb, verify=False):
     return ws
 
 
+INV = "Inventory!"
+
+
+def sold_in_year_criteria():
+    """COUNTIFS/SUMIFS criteria pair: Date sold falls in the Dashboard year."""
+    return f'{INV}$G${FIRST}:$G${RANGE_END},">="&DATE(DashYear,1,1),{INV}$G${FIRST}:$G${RANGE_END},"<"&DATE(DashYear+1,1,1)'
+
+
+def build_checks(wb):
+    """Settings > Data checks: sales left out of the Dashboard totals, counted
+    once in two labelled cells that the Dashboard warning reads."""
+    ws = wb["Settings"]
+    ws.column_dimensions["L"].width = 46
+    ws.column_dimensions["M"].width = 10
+    style(ws["L8"], f_section).value = "Data checks"
+    checks = [
+        ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace",
+         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$N${FIRST}:$N${RANGE_END},"",{sold_in_year_criteria()})'),
+        ("HalfEnteredSales", "Sales missing a date sold or a price (any year)",
+         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$G${FIRST}:$G${RANGE_END},"")'
+         f'+COUNTIFS({INV}$G${FIRST}:$G${RANGE_END},"<>",{INV}$H${FIRST}:$H${RANGE_END},"")'),
+    ]
+    for i, (name, label, formula) in enumerate(checks):
+        style(ws[f"L{9 + i}"], f_body, border=BOX).value = label
+        style(ws[f"M{9 + i}"], f_calc, CALC_FILL, "0", border=BOX).value = formula  # "0", not "-": the note says both should be 0
+        define(wb, name, f"Settings!$M${9 + i}")
+    style(ws["L11"], f_note).value = "Both should be 0. The Dashboard warns when they are not."
+
+
 def build_dashboard(wb, verify=False):
     ws = wb.create_sheet("Dashboard", 1)
     title(ws, "Dashboard", "Everything below updates from your Inventory, Expenses and Mileage tabs.")
@@ -615,35 +644,17 @@ def build_dashboard(wb, verify=False):
     define(wb, "DashYear", "Dashboard!$B$3")
 
     inv = "Inventory!"
-    sold_in_year = f'{inv}$G${FIRST}:$G${RANGE_END},">="&DATE(DashYear,1,1),{inv}$G${FIRST}:$G${RANGE_END},"<"&DATE(DashYear+1,1,1)'
+    sold_in_year = sold_in_year_criteria()
     # Totals count only sales whose fee could be worked out (a number in Fees);
     # the others are left out entirely (sales, costs and counts) and flagged in E3.
     counted = f'{inv}$N${FIRST}:$N${RANGE_END},">=0"'
     in_year = f"{sold_in_year},{counted}"
 
     # KPI tiles
-    # Sales left out of the totals, counted once in two labelled check cells on
-    # Settings: this year's without a fee (marketplace blank or unknown), and
-    # half-entered ones of any year (no date sold, or no price).
-    settings = wb["Settings"]
-    settings.column_dimensions["L"].width = 46
-    settings.column_dimensions["M"].width = 10
-    style(settings["L8"], f_section).value = "Data checks"
-    checks = [
-        ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace",
-         f'=COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$N${FIRST}:$N${RANGE_END},"",{sold_in_year})'),
-        ("HalfEnteredSales", "Sales missing a date sold or a price (any year)",
-         f'=COUNTIFS({inv}$H${FIRST}:$H${RANGE_END},"<>",{inv}$G${FIRST}:$G${RANGE_END},"")'
-         f'+COUNTIFS({inv}$G${FIRST}:$G${RANGE_END},"<>",{inv}$H${FIRST}:$H${RANGE_END},"")'),
-    ]
-    for i, (name, label, formula) in enumerate(checks):
-        style(settings[f"L{9 + i}"], f_body, border=BOX).value = label
-        style(settings[f"M{9 + i}"], f_calc, CALC_FILL, INT, border=BOX).value = formula
-        define(wb, name, f"Settings!$M${9 + i}")
-    style(settings["L11"], f_note).value = "Both should be 0. The Dashboard warns when they are not."
+    # Sales left out of the totals (counted on Settings > Data checks).
     style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
         '=IF(NoMarketplaceSales+HalfEnteredSales=0,"",TRIM('
-        'IF(NoMarketplaceSales>0,NoMarketplaceSales&" sale(s) this year have no marketplace. ","")'
+        'IF(NoMarketplaceSales>0,NoMarketplaceSales&" sale(s) in "&DashYear&" have no marketplace. ","")'
         '&IF(HalfEnteredSales>0,HalfEnteredSales&" sale(s) are missing a date sold or a price. ","")'
         '&"Left out of the totals: see the red cells on Inventory."))'
     )
@@ -847,6 +858,7 @@ def build(verify=False):
     build_mileage(wb, verify)
     build_fees(wb)
     build_settings(wb)
+    build_checks(wb)
     build_dashboard(wb, verify)
     wb.calculation.fullCalcOnLoad = True
     for ws in wb.worksheets:

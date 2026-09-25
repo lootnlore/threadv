@@ -74,8 +74,7 @@ h3 {
   letter-spacing: -0.02em;
   margin: 0 0 0.5em;
   text-wrap: balance;
-  overflow-wrap: anywhere; /* a word wider than the screen (very large text) may break */
-  hyphens: auto;
+  hyphens: auto; /* where the browser has a dictionary; see the break-word rule below */
 }
 
 h1 {
@@ -153,7 +152,7 @@ svg {
 
 .wrap {
   width: 100%;
-  max-width: 1120px;
+  max-width: 70rem; /* rem: grows with the reader's text size, like the em breakpoints */
   margin: 0 auto;
   padding: 0 16px;
 }
@@ -253,6 +252,8 @@ svg {
 
 .brand svg {
   flex: none;
+  width: var(--logo); /* scales with the text, like the name beside it */
+  height: var(--logo);
 }
 
 .brand span {
@@ -274,11 +275,6 @@ svg {
   margin: -6px;
 }
 
-.site-header .brand svg {
-  width: var(--logo);
-  height: var(--logo);
-}
-
 .site-header .brand span {
   line-height: var(--logo);
 }
@@ -291,7 +287,7 @@ svg {
 
 .site-header .brand:focus-visible svg {
   border-radius: 8px;
-  outline: 3px solid var(--brand);
+  outline: 3px solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -299,7 +295,13 @@ svg {
   text-decoration: underline;
 }
 
-/* Footer: room to wrap a long name instead. */
+/* Footer: room to show a long name in full instead. It moves below the logo
+   when it doesn't fit beside it, and breaks only when it is wider than the
+   whole column ("anywhere", unlike break-word, lets the flex item shrink). */
+.site-footer .brand {
+  flex-wrap: wrap;
+}
+
 .site-footer .brand span {
   white-space: normal;
   overflow-wrap: anywhere;
@@ -359,18 +361,22 @@ svg {
   }
 }
 
-/* Running text may break a word that can't fit a line at all (an email
+/* Text may break a word only when it can't fit a whole line (an email
    address, a long one-word site name at very large text) rather than widen
-   the page. Normal words always fit, so they never split. Not set on UI
-   labels, where a squeeze must stay measurable (see fitResults in app.js). */
+   the page. break-word, not anywhere: it leaves layout widths alone, so a
+   flex or grid row can't squeeze a normal word into splitting, and a squeeze
+   stays measurable (see fitResults in app.js). */
+h1,
+h2,
+h3,
 p,
-li:not(.result),
-a[href^='mailto:'] {
-  overflow-wrap: anywhere;
+li,
+summary,
+.site-footer {
+  overflow-wrap: break-word;
 }
 
 .site-footer {
-  overflow-wrap: anywhere; /* a long one-word site name at very large text */
   margin-top: 40px;
   padding: 48px 0 32px;
   background: var(--sunken);
@@ -409,11 +415,13 @@ a[href^='mailto:'] {
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
 }
 
 .site-footer li a {
   display: inline-block;
+  max-width: 100%; /* a long one-word site name in a link then wraps, not overflows */
   padding: 4px 0;
   color: var(--ink);
   text-decoration: none;
@@ -869,19 +877,22 @@ select {
   outline: 3px solid var(--ring);
 }
 
+/* The icon sits outside the text flow, so the verdict wraps like a paragraph
+   (and breaks a word only when it can't fit a line). */
 .verdict {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  position: relative;
   margin-bottom: 14px;
-  padding: 14px 16px;
+  padding: 14px 16px 14px 50px;
   border-radius: var(--radius);
   font-size: 1.02rem;
   line-height: 1.4;
+  overflow-wrap: break-word;
 }
 
 .verdict::before {
-  flex: none;
+  position: absolute;
+  left: 16px;
+  top: 14px;
   display: grid;
   place-items: center;
   width: 24px;
@@ -1060,8 +1071,20 @@ select {
 /* Very narrow for the text size (large text on a small phone): amounts too,
    and the details line uses the full width. */
 @container (max-width: 12em) {
-  .figure {
-    grid-column: 2 / -1;
+  /* The name gets the full width: the rank badge (decorative: the list order
+     says the same) steps aside and every figure goes under its name. */
+  .result-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rank {
+    display: none;
+  }
+
+  .result-main > .figure,
+  .results.stacked .result-main > .figure {
+    grid-column: 1 / -1;
+    font-size: 1.05rem; /* on its own row: body size keeps a big amount on one line */
   }
 
   .result-sub {
@@ -1140,7 +1163,6 @@ select {
 
 .bd-row dt {
   flex: 1 1 6em; /* labels wrap first; the amount drops below only when a label would get narrower than its longest word */
-  min-width: 0;
   color: var(--muted);
 }
 
@@ -1263,7 +1285,6 @@ select {
   grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   align-items: center;
-  overflow-wrap: anywhere; /* a long one-word site name at very large text */
 }
 
 @media (min-width: 53.75em) {
@@ -1278,20 +1299,24 @@ select {
   margin: 0;
   padding: 20px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
 
+/* The tick sits outside the text flow, so each item wraps like a paragraph. */
 .checklist li {
-  display: flex;
-  gap: 10px;
+  position: relative;
+  padding-left: 32px;
 }
 
 .checklist li::before {
   content: '\2713';
-  flex: none;
+  position: absolute;
+  left: 0;
+  top: 0.1em;
   display: grid;
   place-items: center;
   width: 22px;
@@ -1375,14 +1400,13 @@ select {
 }
 
 .faq summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  overflow-wrap: anywhere; /* a long word at very large text sizes can't push the page wider */
-  hyphens: auto; /* ...and gets a hyphen where the browser has a dictionary */
+  /* Plain text with the +/− icon out of the flow, so a question wraps like
+     any paragraph (and breaks a word only when it can't fit a line). */
+  position: relative;
+  display: block;
+  hyphens: auto;
   min-height: 52px;
-  padding: 12px 18px;
+  padding: 13px 48px 13px 18px;
   font-weight: 700;
   cursor: pointer;
   list-style: none;
@@ -1394,7 +1418,10 @@ select {
 
 .faq summary::after {
   content: '+';
-  flex: none;
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
   font-size: 1.4rem;
   font-weight: 400;
   color: var(--brand);
@@ -1421,6 +1448,10 @@ select {
   list-style: none;
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+.crumbs li {
+  min-width: 0; /* a long one-word site name wraps inside the crumb */
 }
 
 .crumbs li + li::before {
@@ -1518,8 +1549,9 @@ table.data {
 
 .compare li {
   display: flex;
+  flex-wrap: wrap; /* no room (large text): the amount goes under the name, never squeezing it */
   justify-content: space-between;
-  gap: 12px;
+  gap: 0 12px;
   padding: 10px 4px;
   border-bottom: 1px solid var(--line);
   counter-increment: cmp;
@@ -1532,12 +1564,11 @@ table.data {
 }
 
 .compare li > :first-child {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
+  flex: 1 1 auto;
 }
 
 .compare .num {
+  margin-left: auto;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -1590,6 +1621,7 @@ code {
 
 .product {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 32px;
   align-items: center;
 }

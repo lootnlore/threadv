@@ -31,6 +31,52 @@ try {
   test('e2e (skipped: run `npm i --no-save playwright-core` first)', { skip: true }, () => {});
 }
 
+/**
+ * Runs in the page: words under `root` broken across lines although they would
+ * have fit. A break is fine only when the word is wider than the room the
+ * layout could give it: the nearest box that isn't itself sized by a flex or
+ * grid parent (so a squeezed flex/grid column doesn't excuse the split).
+ * Soft hyphens, emails and links are allowed to break.
+ */
+function avoidableSplits(root) {
+  const found = [];
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap';
+  document.body.append(probe);
+  const sizedByParent = (el) => /flex|grid/.test(getComputedStyle(el.parentElement).display);
+  const walker = document.createTreeWalker(document.querySelector(root), NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const el = node.parentElement;
+    if (!el.getClientRects().length || el.closest('.visually-hidden, select, script, style, noscript, .site-header .brand')) continue;
+    for (const word of node.textContent.matchAll(/[^\s\u00ad-]+/g)) {
+      if (/[@/]/.test(word[0]) || node.textContent[word.index - 1] === '\u00ad') continue;
+      const range = document.createRange();
+      range.setStart(node, word.index);
+      range.setEnd(node, word.index + word[0].length);
+      if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size < 2) continue;
+      const style = getComputedStyle(el);
+      probe.style.font = style.font;
+      probe.style.letterSpacing = style.letterSpacing;
+      probe.style.textTransform = style.textTransform;
+      probe.textContent = word[0];
+      // Walk up to that box, keeping the padding and borders of the boxes in
+      // between (a card's own padding is room the word never had).
+      let box = el;
+      let inset = 0;
+      const sides = (st) => ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce((sum, k) => sum + parseFloat(st[k]), 0);
+      while (box.parentElement && box !== document.body && (getComputedStyle(box).display.startsWith('inline') || sizedByParent(box))) {
+        if (!getComputedStyle(box).display.startsWith('inline')) inset += sides(getComputedStyle(box));
+        box = box.parentElement;
+      }
+      const boxStyle = getComputedStyle(box);
+      const room = box.clientWidth - parseFloat(boxStyle.paddingLeft) - parseFloat(boxStyle.paddingRight) - inset;
+      if (probe.getBoundingClientRect().width <= room) found.push(`split word "${word[0]}"`);
+    }
+  }
+  probe.remove();
+  return [...new Set(found)];
+}
+
 let server;
 let base;
 let browser;
@@ -213,6 +259,24 @@ if (chromium) {
     await context.close();
   });
 
+  test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
+    const { context, page } = await open(null, { viewport: { width: 320, height: 800 } });
+    await setTextSize(page, 2);
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    assert.equal(await page.getAttribute('[role=tablist]', 'aria-orientation'), 'vertical');
+    await page.getByRole('tab', { name: 'Profit' }).focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.mode), 'maxbuy');
+    await context.close();
+
+    const side = await open('/', { viewport: { width: 390, height: 800 } });
+    assert.equal(await side.page.getAttribute('[role=tablist]', 'aria-orientation'), 'horizontal');
+    await side.page.getByRole('tab', { name: 'Profit' }).focus();
+    await side.page.keyboard.press('ArrowDown');
+    assert.equal(await side.page.evaluate(() => document.activeElement.dataset.mode), 'profit', 'Down does not switch side-by-side tabs');
+    await side.context.close();
+  });
+
   test('keyboard: tabs use arrow keys, the skip link keeps the mode, Enter jumps to results on phones', async () => {
     const { context, page } = await open('/#mode=price');
     await page.getByRole('tab', { name: 'List price' }).focus();
@@ -232,7 +296,7 @@ if (chromium) {
   test('calculator layout holds on small phones and with large text', async () => {
     // Long messages and every mode, on the home page and a fee page (pinned result).
     const states = ['/#mode=maxbuy&price=5', '/#mode=price&target=99999', '/#price=4000&cost=100', '/fees/facebook/#mode=maxbuy&price=5'];
-    const sizes = [[320, 1], [320, 1.25], [320, 1.5], [320, 2], [330, 1.25], [360, 1.25], [390, 1], [390, 1.5], [390, 2], [414, 1], [900, 1.75], [1280, 1], [1280, 1.75]];
+    const sizes = [[320, 1], [320, 1.25], [320, 1.5], [320, 2], [320, 2.5], [330, 1.25], [360, 1.25], [360, 2.5], [390, 1], [390, 1.5], [390, 2], [414, 1], [900, 1.75], [1280, 1], [1280, 1.75]];
     for (const [width, text] of sizes) {
       const { context, page } = await open(null, { viewport: { width, height: 800 } });
       await setTextSize(page, text);
@@ -256,19 +320,6 @@ if (chromium) {
           for (const el of calc.querySelectorAll('label, .check, [role=tab], .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
             if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) found.push(`text spills out: ${el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}"`);
           }
-          // ...or break in the middle of a word ("Merca/ri"): each word's line boxes must share one line.
-          const walker = document.createTreeWalker(calc, NodeFilter.SHOW_TEXT);
-          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-            const el = node.parentElement;
-            if (!el.getClientRects().length || el.closest('.visually-hidden, select')) continue;
-            for (const word of node.textContent.matchAll(/[^\s\u00ad-]+/g)) {
-              if (node.textContent[word.index - 1] === '\u00ad') continue; // after a soft hyphen: a deliberate break
-              const range = document.createRange();
-              range.setStart(node, word.index);
-              range.setEnd(node, word.index + word[0].length);
-              if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size > 1) found.push(`word split across lines: "${word[0]}"`);
-            }
-          }
           // Messages sit either beside every name or under every name, never a mix.
           const top = (el) => el.getBoundingClientRect().top;
           const msgRows = [...document.querySelectorAll('.result')].filter((r) => r.querySelector('.figure.msg'));
@@ -285,6 +336,8 @@ if (chromium) {
           }
           return [...new Set(found)];
         });
+        // ...nor break a word that would have fit ("Merca/ri").
+        problems.push(...(await page.evaluate(avoidableSplits, '.calc')));
         assert.deepEqual(problems, [], `${width}px, text ${text * 100}%, ${state}`);
       }
       await context.close();
@@ -340,42 +393,29 @@ if (chromium) {
 
   test('no page scrolls sideways or splits a word, default or fully configured, even with large text', async () => {
     const pages = ['/', '/fees/', '/fees/ebay/', '/fees/facebook/', '/tracker/', '/privacy/', '/terms/', '/404.html', '/offline.html'];
-    // Optional settings add content (contact email, signup forms) and a long one-word name.
-    const configured = { CONTACT_EMAIL: 'support@threadvet.com', NEWSLETTER_ACTION: 'https://example.com/subscribe', SITE_NAME: 'ResellerCalculatorPro' };
+    // Every optional setting on: contact email, signup forms, a live buy button,
+    // analytics (privacy text) and a long one-word site name.
+    const configured = {
+      CONTACT_EMAIL: 'support@threadvet.com',
+      NEWSLETTER_ACTION: 'https://example.com/subscribe',
+      TRACKER_CHECKOUT_URL: 'https://example.com/buy',
+      PLAUSIBLE_DOMAIN: 'threadvet.com',
+      SITE_NAME: 'ResellerCalculatorPro',
+    };
     const problems = [];
     for (const env of [null, configured]) {
       if (env) build(env);
       try {
-        for (const width of [320, 360, 414, 768, 1024, 1280]) {
-          for (const text of [1, 1.5, 2, 2.5]) {
+        for (const width of [320, 360, 414, 600, 768, 800, 1024, 1280, 1920]) {
+          for (const text of [1, 1.25, 1.5, 2, 2.5]) {
             const { context, page } = await open(null, { viewport: { width, height: 800 }, serviceWorkers: 'block' });
+            await context.route(/^https?:\/\/(?!localhost)/, (route) => route.abort()); // no outside network (analytics)
             await setTextSize(page, text);
             for (const path of pages) {
               await page.goto(base + path, { waitUntil: 'domcontentloaded' });
               await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
-              const found = await page.evaluate(() => {
-                const out = [];
-                const over = document.documentElement.scrollWidth - innerWidth;
-                if (over > 0) out.push(`scrolls sideways +${over}px`);
-                // Words broken across lines, except where the CSS allows it on purpose
-                // (headings, FAQ questions, footer: very long words at huge text) and
-                // in email addresses and links.
-                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-                  const el = node.parentElement;
-                  if (!el.getClientRects().length || el.closest('.visually-hidden, select, script, style, noscript, .site-header .brand')) continue;
-                  const style = getComputedStyle(el);
-                  if (style.overflowWrap === 'anywhere' || style.hyphens === 'auto') continue;
-                  for (const word of node.textContent.matchAll(/[^\s\u00ad-]+/g)) {
-                    if (/[@/]/.test(word[0]) || node.textContent[word.index - 1] === '\u00ad') continue; // emails, links, soft hyphens
-                    const range = document.createRange();
-                    range.setStart(node, word.index);
-                    range.setEnd(node, word.index + word[0].length);
-                    if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size > 1) out.push(`split word "${word[0]}"`);
-                  }
-                }
-                return [...new Set(out)];
-              });
+              const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+              const found = [...(over > 0 ? [`scrolls sideways +${over}px`] : []), ...(await page.evaluate(avoidableSplits, 'body'))];
               if (found.length) problems.push(`${env ? 'configured' : 'default'}, ${width}px, text ${text * 100}%, ${path}: ${found.join('; ')}`);
             }
             await context.close();
