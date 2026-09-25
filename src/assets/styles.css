@@ -74,7 +74,6 @@ h3 {
   letter-spacing: -0.02em;
   margin: 0 0 0.5em;
   text-wrap: balance;
-  hyphens: auto; /* where the browser has a dictionary; see the break-word rule below */
 }
 
 h1 {
@@ -158,7 +157,7 @@ svg {
 }
 
 .narrow {
-  max-width: 780px;
+  max-width: 48.75rem; /* rem, like .wrap */
 }
 
 .center {
@@ -570,7 +569,7 @@ summary,
 
 @media (min-width: 56.25em) {
   .calc {
-    grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+    grid-template-columns: minmax(21.25rem, 26.25rem) minmax(0, 1fr); /* rem: the form keeps its proportions at any text size */
   }
 }
 
@@ -590,6 +589,7 @@ summary,
 }
 
 .calc-output {
+  container-type: inline-size; /* the verdict adapts to it */
   padding: 16px;
   background: var(--paper);
   min-width: 0;
@@ -877,12 +877,22 @@ select {
   outline: 3px solid var(--ring);
 }
 
-/* The icon sits outside the text flow, so the verdict wraps like a paragraph
-   (and breaks a word only when it can't fit a line). */
+/* Icons beside text (verdict, checklist): an icon column sized in rem, so it
+   scales with the text, and a minmax(0) text column that wraps like a
+   paragraph. The icon is centred on the first line (--nudge). When the box is
+   narrow for the text size, the icon goes inline instead: the text runs under
+   it, and a word that can't fit beside it moves to the next line whole
+   (a line may break after an inline-block) rather than splitting. */
 .verdict {
-  position: relative;
+  --icon: 1.5rem;
+  --line: 1.428rem; /* 1.02rem x 1.4 */
+  --nudge: calc((var(--line) - var(--icon)) / 2);
+  display: grid;
+  grid-template-columns: var(--icon) minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
   margin-bottom: 14px;
-  padding: 14px 16px 14px 50px;
+  padding: 14px 16px;
   border-radius: var(--radius);
   font-size: 1.02rem;
   line-height: 1.4;
@@ -890,16 +900,25 @@ select {
 }
 
 .verdict::before {
-  position: absolute;
-  left: 16px;
-  top: 14px;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: var(--icon);
+  height: var(--icon);
+  margin-top: var(--nudge);
   border-radius: 50%;
   font-size: 0.85rem;
   font-weight: 900;
+}
+
+@container (max-width: 12em) {
+  .verdict {
+    display: block;
+  }
+
+  .verdict::before {
+    display: inline-grid;
+    margin: 0 10px 0 0;
+  }
 }
 
 .verdict-good {
@@ -909,6 +928,7 @@ select {
 
 .verdict-good::before {
   content: '\2713';
+  content: '\2713' / ''; /* decorative: the verdict's words say it */
   background: var(--brand);
   color: var(--on-brand);
 }
@@ -920,11 +940,13 @@ select {
 
 .verdict-bad::before {
   content: '!';
+  content: '!' / '';
   background: var(--neg);
   color: var(--surface);
 }
 
 .results {
+  --rank: 1.625rem; /* rank badge: rem, so it scales with the text */
   list-style: none;
   margin: 0;
   padding: 0;
@@ -986,8 +1008,8 @@ select {
   flex: none;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: var(--rank);
+  height: var(--rank);
   border-radius: 50%;
   background: var(--sunken);
   color: var(--muted);
@@ -1024,6 +1046,12 @@ select {
 .tag-best {
   background: var(--brand-soft);
   color: var(--brand-strong);
+}
+
+.tag-rank {
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 .figure {
@@ -1071,8 +1099,9 @@ select {
 /* Very narrow for the text size (large text on a small phone): amounts too,
    and the details line uses the full width. */
 @container (max-width: 12em) {
-  /* The name gets the full width: the rank badge (decorative: the list order
-     says the same) steps aside and every figure goes under its name. */
+  /* The name gets the full width: the rank badge steps aside (rows are in
+     rank order; a fee page's pinned row names its rank in a tag) and every
+     figure goes under its name. */
   .result-main {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1103,7 +1132,7 @@ select {
 
 .result-sub {
   display: block;
-  margin: 4px 0 0 36px;
+  margin: 4px 0 0 calc(var(--rank) + 10px); /* under the name: past the rank badge and gap */
   font-size: 0.84rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -1247,8 +1276,8 @@ select {
   content: counter(step);
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 1.75rem;
+  height: 1.75rem;
   margin-right: 10px;
   border-radius: 50%;
   background: var(--brand-soft);
@@ -1306,26 +1335,45 @@ select {
   border-radius: var(--radius);
 }
 
-/* The tick sits outside the text flow, so each item wraps like a paragraph. */
+/* Same pattern as the verdict. Items are plain text (one grid cell). */
+.checklist {
+  container-type: inline-size;
+}
+
 .checklist li {
-  position: relative;
-  padding-left: 32px;
+  --icon: 1.375rem;
+  --line: 1.55rem;
+  --nudge: calc((var(--line) - var(--icon)) / 2);
+  display: grid;
+  grid-template-columns: var(--icon) minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
 }
 
 .checklist li::before {
   content: '\2713';
-  position: absolute;
-  left: 0;
-  top: 0.1em;
+  content: '\2713' / '';
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: var(--icon);
+  height: var(--icon);
+  margin-top: var(--nudge);
   border-radius: 50%;
   background: var(--brand-soft);
   color: var(--brand-strong);
   font-size: 0.75rem;
   font-weight: 900;
+}
+
+@container (max-width: 12em) {
+  .checklist li {
+    display: block;
+  }
+
+  .checklist li::before {
+    display: inline-grid;
+    margin: 0 10px 0 0;
+  }
 }
 
 .timeline {
@@ -1374,9 +1422,9 @@ select {
 }
 
 .signup input {
-  flex: 1 1 240px;
+  flex: 1 1 15rem;
   min-width: 0; /* shrink below the browser's default input width on small screens */
-  max-width: 360px;
+  max-width: 22.5rem;
   min-height: 48px;
   padding: 0 16px;
   border: 1.5px solid var(--line-strong);
@@ -1387,6 +1435,7 @@ select {
 }
 
 .faq {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: minmax(0, 1fr); /* never wider than the page, even with very large text */
   gap: 10px;
@@ -1401,12 +1450,12 @@ select {
 
 .faq summary {
   /* Plain text with the +/− icon out of the flow, so a question wraps like
-     any paragraph (and breaks a word only when it can't fit a line). */
+     any paragraph (and breaks a word only when it can't fit a line). Not a
+     grid like the verdict: some browsers ignore display on <summary>. */
   position: relative;
   display: block;
-  hyphens: auto;
   min-height: 52px;
-  padding: 13px 48px 13px 18px;
+  padding: 13px calc(18px + 1.75rem) 13px 18px; /* right: the icon's room, in rem so it scales */
   font-weight: 700;
   cursor: pointer;
   list-style: none;
@@ -1418,10 +1467,11 @@ select {
 
 .faq summary::after {
   content: '+';
+  content: '+' / ''; /* decorative: the summary already says open or closed */
   position: absolute;
-  top: 50%;
+  top: 13px; /* the padding: level with the first line, */
   right: 18px;
-  transform: translateY(-50%);
+  line-height: 1.55rem; /* and exactly as tall as it */
   font-size: 1.4rem;
   font-weight: 400;
   color: var(--brand);
@@ -1429,6 +1479,27 @@ select {
 
 .faq details[open] summary::after {
   content: '\2212';
+  content: '\2212' / '';
+}
+
+/* Narrow for the text size: no column kept free for the icon; it follows the
+   question as text (the space before it wraps like any other). */
+@container (max-width: 16em) {
+  .faq summary {
+    padding-right: 18px;
+  }
+
+  .faq summary::after {
+    content: ' +';
+    content: ' +' / '';
+    position: static;
+    line-height: 1;
+  }
+
+  .faq details[open] summary::after {
+    content: ' \2212';
+    content: ' \2212' / '';
+  }
 }
 
 .faq details p {
@@ -1547,11 +1618,14 @@ table.data {
   counter-reset: cmp;
 }
 
+/* Rank, then name and amount. The name wraps between words; the amount moves
+   under it only when the name's longest word and the amount can't share a
+   line, and the rank stands alone only when that word can't fit beside it. */
 .compare li {
   display: flex;
-  flex-wrap: wrap; /* no room (large text): the amount goes under the name, never squeezing it */
-  justify-content: space-between;
-  gap: 0 12px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.5em;
   padding: 10px 4px;
   border-bottom: 1px solid var(--line);
   counter-increment: cmp;
@@ -1559,12 +1633,21 @@ table.data {
 
 .compare li::before {
   content: counter(cmp) '.';
-  width: 1.8em;
+  min-width: 1.25em;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
-.compare li > :first-child {
-  flex: 1 1 auto;
+.cmp-row {
+  flex: 1 1 0%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 12px;
+}
+
+.cmp-row > :first-child {
+  flex: 1 1 0%;
 }
 
 .compare .num {

@@ -70,6 +70,12 @@ function breakdown(mode, r, target) {
   return `<dl>${rows.join('')}</dl>${taxNote}`;
 }
 
+/** 1 -> "1st", 2 -> "2nd", 11 -> "11th", 22 -> "22nd". */
+export function ordinal(n) {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  return `${n}${(!teen && { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10]) || 'th'}`;
+}
+
 function figureFor(mode, r) {
   if (mode === 'maxbuy') {
     return r.maxCost >= 0
@@ -101,7 +107,9 @@ function subFor(mode, r) {
  */
 export function renderResults(mode, results, { focus, target = 0 } = {}) {
   const rows = results.map((r, i) => [r, i]);
-  // On a platform's own fee page, pin it first but keep its true rank number.
+  // On a platform's own fee page, pin it first but keep its true rank: the
+  // badge shows the number and a tag says it in words (the badge is hidden
+  // from screen readers and, with very large text, from view).
   const pinned = rows.findIndex(([r]) => r.id === focus);
   if (pinned > 0) rows.unshift(...rows.splice(pinned, 1));
   return rows
@@ -113,7 +121,11 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
         (mode !== 'maxbuy' || r.maxCost >= 0) &&
         (mode !== 'profit' || (r.profit > 0 && r.profit >= target));
       const cls = ['result', best && 'is-best', r.id === focus && 'is-focus'].filter(Boolean).join(' ');
-      const tag = best ? '<span class="tag tag-best">Best</span>' : '';
+      const tag = best
+        ? '<span class="tag tag-best">Best</span>'
+        : r.id === focus && pinned > 0
+          ? `<span class="tag tag-rank">${ordinal(i + 1)} of ${results.length}</span>`
+          : '';
       const head = `<span class="result-main"><span class="rank" aria-hidden="true">${i + 1}</span><span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable

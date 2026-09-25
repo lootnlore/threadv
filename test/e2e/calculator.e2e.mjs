@@ -54,10 +54,10 @@ function avoidableSplits(root) {
       range.setStart(node, word.index);
       range.setEnd(node, word.index + word[0].length);
       if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size < 2) continue;
+      // One by one: the font shorthand reads as "" when a longhand it can't
+      // express is set (tabular-nums).
       const style = getComputedStyle(el);
-      probe.style.font = style.font;
-      probe.style.letterSpacing = style.letterSpacing;
-      probe.style.textTransform = style.textTransform;
+      for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontStretch', 'fontVariantNumeric', 'fontFeatureSettings', 'letterSpacing', 'textTransform']) probe.style[k] = style[k];
       probe.textContent = word[0];
       // Walk up to that box, keeping the padding and borders of the boxes in
       // between (a card's own padding is room the word never had).
@@ -260,21 +260,30 @@ if (chromium) {
   });
 
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
-    const { context, page } = await open(null, { viewport: { width: 320, height: 800 } });
-    await setTextSize(page, 2);
-    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
-    assert.equal(await page.getAttribute('[role=tablist]', 'aria-orientation'), 'vertical');
-    await page.getByRole('tab', { name: 'Profit' }).focus();
-    await page.keyboard.press('ArrowDown');
-    assert.equal(await page.evaluate(() => document.activeElement.dataset.mode), 'maxbuy');
-    await context.close();
+    // One session crossing the switch both ways: text size up, then a wider window.
+    const { context, page } = await open('/', { viewport: { width: 320, height: 800 } });
+    const tablist = '[role=tablist]';
+    const orientation = (value) => page.waitForFunction(([sel, v]) => document.querySelector(sel).getAttribute('aria-orientation') === v, [tablist, value]);
+    const press = async (from, key) => {
+      await page.getByRole('tab', { name: from }).click();
+      await page.keyboard.press(key);
+      return page.evaluate(() => document.activeElement.dataset.mode);
+    };
+    await orientation('horizontal');
+    assert.equal(await press('Profit', 'ArrowDown'), 'profit', 'Down does not switch side-by-side tabs');
+    assert.equal(await press('Profit', 'ArrowRight'), 'maxbuy');
 
-    const side = await open('/', { viewport: { width: 390, height: 800 } });
-    assert.equal(await side.page.getAttribute('[role=tablist]', 'aria-orientation'), 'horizontal');
-    await side.page.getByRole('tab', { name: 'Profit' }).focus();
-    await side.page.keyboard.press('ArrowDown');
-    assert.equal(await side.page.evaluate(() => document.activeElement.dataset.mode), 'profit', 'Down does not switch side-by-side tabs');
-    await side.context.close();
+    await setTextSize(page, 2);
+    await orientation('vertical');
+    assert.equal(await press('Profit', 'ArrowDown'), 'maxbuy');
+    assert.equal(await press('Max buy', 'ArrowUp'), 'profit');
+    assert.equal(await press('Profit', 'ArrowRight'), 'profit', 'Right does not switch stacked tabs');
+
+    await page.setViewportSize({ width: 900, height: 800 });
+    await orientation('horizontal');
+    assert.equal(await press('Profit', 'ArrowDown'), 'profit');
+    assert.equal(await press('Profit', 'ArrowRight'), 'maxbuy');
+    await context.close();
   });
 
   test('keyboard: tabs use arrow keys, the skip link keeps the mode, Enter jumps to results on phones', async () => {

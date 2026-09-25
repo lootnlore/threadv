@@ -132,9 +132,9 @@ export function feePage(config, platform) {
     .sort((a, b) => b.payout - a.payout)
     .map(
       (r) =>
-        `<li${r.id === platform.id ? ' class="is-current"' : ''}>${
+        `<li${r.id === platform.id ? ' class="is-current"' : ''}><span class="cmp-row">${
           r.id === platform.id ? `<strong>${esc(r.name)}</strong>` : `<a href="/fees/${r.id}/">${esc(r.name)}</a>`
-        }<span class="num">${money(r.payout)}</span></li>`,
+        } <span class="num">${money(r.payout)}</span></span></li>`,
     )
     .join('');
 

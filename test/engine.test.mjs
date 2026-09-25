@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
-import { percent, money } from '../src/engine/render.mjs';
+import { percent, money, renderResults, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
@@ -363,4 +363,59 @@ test('every platform is fully described for the fee pages', () => {
     assert.ok(p.notes.length >= 1, p.id);
     assert.ok(p.sources.length >= 1 && p.sources.every((s) => s.url.startsWith('https://')), p.id);
   }
+});
+
+test('ordinal numbers', () => {
+  assert.deepEqual([1, 2, 3, 4, 9, 11, 12, 13, 21, 22, 23, 101, 111, 112].map(ordinal), [
+    '1st', '2nd', '3rd', '4th', '9th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st', '111th', '112th',
+  ]);
+});
+
+/** The rendered rows as plain data: id, rank badge, tags and the text a reader without CSS sees. */
+const rows = (html) =>
+  html.split('<li ').slice(1).map((li) => ({
+    id: li.match(/data-id="([^"]+)"/)[1],
+    best: li.includes('class="result is-best'),
+    rank: Number(li.match(/<span class="rank" aria-hidden="true">(\d+)<\/span>/)[1]),
+    tags: [...li.matchAll(/<span class="tag [^"]+">([^<]+)<\/span>/g)].map((m) => m[1]),
+    name: li.match(/<span class="pname">(.*?)<\/span><span class="figure/)[1].replace(/<[^>]+>/g, ''),
+  }));
+
+test('results: the Best badge only on a top result the verdict would recommend', () => {
+  const run = (mode, raw) => rows(renderResults(mode, rank(mode, input(raw)), { target: input(raw).target }));
+  const good = run('profit', { price: 40, cost: 5, target: 5 });
+  assert.deepEqual(good.map((r) => r.best), good.map((_, i) => i === 0), 'profit: only the top row');
+  assert.deepEqual(good[0].tags, ['Best']);
+  assert.ok(run('profit', { price: 40, cost: 5, target: 500 }).every((r) => !r.best), 'profit under the minimum');
+  assert.ok(run('profit', { price: 10, cost: 50 }).every((r) => !r.best), 'a loss everywhere');
+  assert.equal(run('maxbuy', { price: 40, target: 5 })[0].best, true);
+  assert.ok(run('maxbuy', { price: 5, target: 50 }).every((r) => !r.best), 'max buy below zero');
+  assert.equal(run('price', { cost: 5, target: 10 })[0].best, true);
+  const out = renderResults('price', rank('price', input({ cost: MAX_CENTS, target: MAX_CENTS })), { target: MAX_CENTS });
+  assert.ok(rows(out).every((r) => !r.best) && out.includes('Out of range'), 'unreachable list price');
+});
+
+test('results: a fee page pins its marketplace first and keeps its real rank, in words too', () => {
+  const i = input({ price: 40, cost: 5 });
+  const ranked = rank('profit', i);
+  const last = ranked.at(-1).id;
+  const out = rows(renderResults('profit', ranked, { focus: last, target: i.target }));
+  assert.equal(out[0].id, last, 'pinned first');
+  assert.equal(out[0].rank, ranked.length, 'badge keeps the true rank');
+  assert.deepEqual(out[0].tags, [`${ordinal(ranked.length)} of ${ranked.length}`], 'rank in words for screen readers and narrow screens');
+  assert.deepEqual(out.slice(1).map((r) => r.id), ranked.slice(0, -1).map((r) => r.id), 'the rest in rank order');
+  assert.deepEqual(out.slice(1).map((r) => r.rank), ranked.slice(0, -1).map((_, n) => n + 1));
+  assert.deepEqual(out[1].tags, ['Best'], 'Best stays on the real winner');
+  // Already on top: no rank tag (the Best badge says it).
+  const top = rows(renderResults('profit', ranked, { focus: ranked[0].id, target: i.target }));
+  assert.deepEqual(top[0].tags, ['Best']);
+  assert.ok(top.every((r) => !r.tags.some((t) => t.includes(' of '))));
+});
+
+test('results: names and tags read correctly without CSS', () => {
+  const i = input({ price: 40, cost: 5 });
+  const ranked = rank('profit', i);
+  const out = rows(renderResults('profit', ranked, { focus: ranked[2].id, target: i.target }));
+  assert.equal(out[1].name, `${ranked[0].short} Best`, 'a space before the tag');
+  assert.equal(out[0].name, `${ranked[2].short} 3rd of ${ranked.length}`);
 });

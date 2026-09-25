@@ -603,21 +603,29 @@ def build_mileage(wb, verify=False):
 INV = "Inventory!"
 
 
-def sold_in_year_criteria():
-    """COUNTIFS/SUMIFS criteria pair: Date sold falls in the Dashboard year."""
-    return f'{INV}$G${FIRST}:$G${RANGE_END},">="&DATE(DashYear,1,1),{INV}$G${FIRST}:$G${RANGE_END},"<"&DATE(DashYear+1,1,1)'
+def in_dash_year(dates):
+    """COUNTIFS/SUMIFS criteria pair: a date in `dates` falls in the Dashboard year."""
+    return f'{dates},">="&DATE(DashYear,1,1),{dates},"<"&DATE(DashYear+1,1,1)'
+
+
+SOLD_IN_YEAR = in_dash_year(f"{INV}$G${FIRST}:$G${RANGE_END}")
+
+
+def count_text(count, one, many):
+    """Formula text: '1 sale is' / 'N sales are' for the count in `count`."""
+    return f'IF({count}=1,"1 {one}",{count}&" {many}")'
 
 
 def build_checks(wb):
     """Settings > Data checks: sales left out of the Dashboard totals, counted
     once in two labelled cells that the Dashboard warning reads."""
     ws = wb["Settings"]
-    ws.column_dimensions["L"].width = 46
+    ws.column_dimensions["L"].width = 64
     ws.column_dimensions["M"].width = 10
     style(ws["L8"], f_section).value = "Data checks"
     checks = [
-        ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace",
-         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$N${FIRST}:$N${RANGE_END},"",{sold_in_year_criteria()})'),
+        ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace from the Settings list",
+         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$N${FIRST}:$N${RANGE_END},"",{SOLD_IN_YEAR})'),
         ("HalfEnteredSales", "Sales missing a date sold or a price (any year)",
          f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$G${FIRST}:$G${RANGE_END},"")'
          f'+COUNTIFS({INV}$G${FIRST}:$G${RANGE_END},"<>",{INV}$H${FIRST}:$H${RANGE_END},"")'),
@@ -643,30 +651,29 @@ def build_dashboard(wb, verify=False):
     style(ws["C3"], f_note).value = "This year. Type a year over it (last year's, at tax time)."
     define(wb, "DashYear", "Dashboard!$B$3")
 
-    inv = "Inventory!"
-    sold_in_year = sold_in_year_criteria()
     # Totals count only sales whose fee could be worked out (a number in Fees);
     # the others are left out entirely (sales, costs and counts) and flagged in E3.
-    counted = f'{inv}$N${FIRST}:$N${RANGE_END},">=0"'
-    in_year = f"{sold_in_year},{counted}"
+    counted = f'{INV}$N${FIRST}:$N${RANGE_END},">=0"'
+    in_year = f"{SOLD_IN_YEAR},{counted}"
 
     # KPI tiles
     # Sales left out of the totals (counted on Settings > Data checks).
     style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
         '=IF(NoMarketplaceSales+HalfEnteredSales=0,"",TRIM('
-        'IF(NoMarketplaceSales>0,NoMarketplaceSales&" sale(s) in "&DashYear&" have no marketplace. ","")'
-        '&IF(HalfEnteredSales>0,HalfEnteredSales&" sale(s) are missing a date sold or a price. ","")'
+        f'IF(NoMarketplaceSales>0,{count_text("NoMarketplaceSales", "sale", "sales")}&" in "&DashYear&'
+        f'IF(NoMarketplaceSales=1," has"," have")&" no marketplace from the Settings list. ","")'
+        f'&IF(HalfEnteredSales>0,{count_text("HalfEnteredSales", "sale is", "sales are")}&" missing a date sold or a price. ","")'
         '&"Left out of the totals: see the red cells on Inventory."))'
     )
     kpis = [
         ("Items sold", f"=COUNTIFS({in_year})", INT),
-        ("Sales incl. shipping", f"=SUMIFS({inv}$O${FIRST}:$O${RANGE_END},{in_year})+SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
-        ("Marketplace fees", f"=SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
-        ("Profit", f"=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{in_year})", USD0),
+        ("Sales incl. shipping", f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{in_year})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
+        ("Marketplace fees", f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
+        ("Profit", f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{in_year})", USD0),
         ("Avg profit per sale", '=IF(A6=0,"",D6/A6)', USD),
-        ("Avg days to sell", f'=IFERROR(AVERAGEIFS({inv}$R${FIRST}:$R${RANGE_END},{in_year}),"")', "0"),
-        ("Sell-through (all time)", f'=IFERROR(COUNTIF({inv}$S${FIRST}:$S${RANGE_END},"Sold")/(COUNTIF({inv}$S${FIRST}:$S${RANGE_END},"Sold")+COUNTIF({inv}$S${FIRST}:$S${RANGE_END},"In stock")),"")', PCT),
-        ("Unsold stock at cost", f'=SUMIFS({inv}$E${FIRST}:$E${RANGE_END},{inv}$S${FIRST}:$S${RANGE_END},"In stock")', USD0),
+        ("Avg days to sell", f'=IFERROR(AVERAGEIFS({INV}$R${FIRST}:$R${RANGE_END},{in_year}),"")', "0"),
+        ("Sell-through (all time)", f'=IFERROR(COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"Sold")/(COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"Sold")+COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"In stock")),"")', PCT),
+        ("Unsold stock at cost", f'=SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{INV}$S${FIRST}:$S${RANGE_END},"In stock")', USD0),
     ]
     # Two rows of four tiles: labels on 5/8, values on 6/9.
     for i, (label, formula, fmt) in enumerate(kpis):
@@ -689,12 +696,12 @@ def build_dashboard(wb, verify=False):
         style(ws[f"{col}13"], f_head, HEAD_FILL, border=BOX, align=Alignment(horizontal="center")).value = text
     for m in range(1, 13):
         r = 13 + m
-        month = f'{inv}$G${FIRST}:$G${RANGE_END},">="&$A{r},{inv}$G${FIRST}:$G${RANGE_END},"<"&DATE(YEAR($A{r}),MONTH($A{r})+1,1),{counted}'
+        month = f'{INV}$G${FIRST}:$G${RANGE_END},">="&$A{r},{INV}$G${FIRST}:$G${RANGE_END},"<"&DATE(YEAR($A{r}),MONTH($A{r})+1,1),{counted}'
         style(ws[f"A{r}"], f_label, fmt="mmmm", border=BOX, align=Alignment(horizontal="left")).value = f"=DATE(DashYear,{m},1)"
         style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({month})"
-        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$O${FIRST}:$O${RANGE_END},{month})+SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{month})"
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{month})"
-        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{month})"
+        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{month})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{month})"
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{month})"
+        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{month})"
         style(ws[f"F{r}"], f_calc, fmt=PCT, border=BOX).value = f'=IF(C{r}=0,"",E{r}/C{r})'
     style(ws["A26"], f_label, SOFT_FILL, border=BOX).value = "Year total"
     for col, fmt in zip("BCDE", [INT, USD0, USD0, USD0]):
@@ -727,14 +734,14 @@ def build_dashboard(wb, verify=False):
         style(ws[f"{col}30"], f_head, HEAD_FILL, border=BOX, align=Alignment(horizontal="center", wrap_text=True)).value = text
     for i in range(len(platform_names())):
         r = 31 + i
-        by = f"{inv}$F${FIRST}:$F${RANGE_END},$A{r},{in_year}"
+        by = f"{INV}$F${FIRST}:$F${RANGE_END},$A{r},{in_year}"
         style(ws[f"A{r}"], f_label, border=BOX).value = f"=INDEX(Platforms,{i + 1})"
         style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({by})"
-        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$O${FIRST}:$O${RANGE_END},{by})+SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{by})"
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$N${FIRST}:$N${RANGE_END},{by})"
-        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{by})"
+        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{by})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{by})"
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{by})"
+        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{by})"
         style(ws[f"F{r}"], f_calc, fmt=USD, border=BOX).value = f'=IF(B{r}=0,"",E{r}/B{r})'
-        style(ws[f"G{r}"], f_calc, fmt="0", border=BOX).value = f'=IFERROR(AVERAGEIFS({inv}$R${FIRST}:$R${RANGE_END},{by}),"")'
+        style(ws[f"G{r}"], f_calc, fmt="0", border=BOX).value = f'=IFERROR(AVERAGEIFS({INV}$R${FIRST}:$R${RANGE_END},{by}),"")'
     last_market = 30 + len(platform_names())
 
     # By source (all time)
@@ -746,11 +753,11 @@ def build_dashboard(wb, verify=False):
     for i in range(len(SOURCES)):
         r = top + 2 + i
         style(ws[f"A{r}"], f_label, border=BOX).value = f"=INDEX(Sources,{i + 1})"
-        style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({inv}$C${FIRST}:$C${RANGE_END},$A{r})"
-        style(ws[f"C{r}"], f_calc, fmt=INT, border=BOX).value = f'=COUNTIFS({inv}$C${FIRST}:$C${RANGE_END},$A{r},{inv}$S${FIRST}:$S${RANGE_END},"Sold")'
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv}$E${FIRST}:$E${RANGE_END},{inv}$C${FIRST}:$C${RANGE_END},$A{r})"
+        style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({INV}$C${FIRST}:$C${RANGE_END},$A{r})"
+        style(ws[f"C{r}"], f_calc, fmt=INT, border=BOX).value = f'=COUNTIFS({INV}$C${FIRST}:$C${RANGE_END},$A{r},{INV}$S${FIRST}:$S${RANGE_END},"Sold")'
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{INV}$C${FIRST}:$C${RANGE_END},$A{r})"
         style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = (
-            f'=SUMIFS({inv}$P${FIRST}:$P${RANGE_END},{inv}$C${FIRST}:$C${RANGE_END},$A{r},{inv}$S${FIRST}:$S${RANGE_END},"Sold")'
+            f'=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{INV}$C${FIRST}:$C${RANGE_END},$A{r},{INV}$S${FIRST}:$S${RANGE_END},"Sold")'
         )
         style(ws[f"F{r}"], f_calc, fmt=PCT, border=BOX).value = f'=IF(B{r}=0,"",C{r}/B{r})'
     last_source = top + 1 + len(SOURCES)
@@ -760,7 +767,7 @@ def build_dashboard(wb, verify=False):
     style(ws[f"A{e}"], f_section).value = "Expenses by category (Dashboard year)"
     for col, text in zip("AB", ["Category", "Total"]):
         style(ws[f"{col}{e + 1}"], f_head, HEAD_FILL, border=BOX, align=Alignment(horizontal="center")).value = text
-    exp = f'Expenses!$A${FIRST}:$A${RANGE_END},">="&DATE(DashYear,1,1),Expenses!$A${FIRST}:$A${RANGE_END},"<"&DATE(DashYear+1,1,1)'
+    exp = in_dash_year(f"Expenses!$A${FIRST}:$A${RANGE_END}")
     for i in range(len(EXPENSE_CATEGORIES)):
         r = e + 2 + i
         style(ws[f"A{r}"], f_label, border=BOX).value = f"=INDEX(ExpenseCategories,{i + 1})"
@@ -777,14 +784,14 @@ def build_dashboard(wb, verify=False):
     rows = [
         ("Gross sales (item + shipping charged)", "=C26"),
         ("Marketplace fees", "=-D26"),
-        ("Cost of items sold", f"=-SUMIFS({inv}$E${FIRST}:$E${RANGE_END},{in_year})"),
+        ("Cost of items sold", f"=-SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{in_year})"),
         # Labels on marketplaces where the buyer pays them are ignored, as on each row.
-        ("Shipping labels", f"=-(SUMIFS({inv}$J${FIRST}:$J${RANGE_END},{in_year})" + "".join(
-            f"-SUMIFS({inv}$J${FIRST}:$J${RANGE_END},{inv}$F${FIRST}:$F${RANGE_END},INDEX(Platforms,{i}),{in_year})" for i in buyer_ships()
+        ("Shipping labels", f"=-(SUMIFS({INV}$J${FIRST}:$J${RANGE_END},{in_year})" + "".join(
+            f"-SUMIFS({INV}$J${FIRST}:$J${RANGE_END},{INV}$F${FIRST}:$F${RANGE_END},INDEX(Platforms,{i}),{in_year})" for i in buyer_ships()
         ) + ")"),
-        ("Other per-item costs", f"=-SUMIFS({inv}$K${FIRST}:$K${RANGE_END},{in_year})"),
+        ("Other per-item costs", f"=-SUMIFS({INV}$K${FIRST}:$K${RANGE_END},{in_year})"),
         ("Business expenses (Expenses tab)", f"=-B{exp_total}"),
-        ("Mileage deduction (Mileage tab)", f'=-SUMIFS(Mileage!$G${FIRST}:$G${RANGE_END},Mileage!$A${FIRST}:$A${RANGE_END},">="&DATE(DashYear,1,1),Mileage!$A${FIRST}:$A${RANGE_END},"<"&DATE(DashYear+1,1,1))'),
+        ("Mileage deduction (Mileage tab)", f'=-SUMIFS(Mileage!$G${FIRST}:$G${RANGE_END},{in_dash_year(f"Mileage!$A${FIRST}:$A${RANGE_END}")})'),
     ]
     for i, (label, formula) in enumerate(rows):
         r = t + 1 + i

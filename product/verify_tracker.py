@@ -131,7 +131,10 @@ def main():
                 problems.append(f"{market} sale: Status reads {status!r}, expected {want!r}")
     no_fee, half = len(build_tracker.NO_FEE_CASES), len(build_tracker.NO_DATE_CASES) + len(build_tracker.NO_PRICE_CASES)
     warning = wb["Dashboard"]["E3"].value or ""
-    for part in (f"{no_fee} sale(s) in {wb['Dashboard']['B3'].value} have no marketplace", f"{half} sale(s) are missing a date sold or a price"):
+    sales = lambda n, one, many: f"1 {one}" if n == 1 else f"{n} {many}"
+    year = wb["Dashboard"]["B3"].value
+    for part in (f"{sales(no_fee, 'sale', 'sales')} in {year} {'has' if no_fee == 1 else 'have'} no marketplace from the Settings list",
+                 f"{sales(half, 'sale is', 'sales are')} missing a date sold or a price"):
         if part not in warning:
             problems.append(f"Dashboard warning reads {warning!r}; expected it to say {part!r}")
     # ...and they are left out everywhere: counts and every cost line of the tax
