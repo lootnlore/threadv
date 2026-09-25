@@ -1,0 +1,27 @@
+{
+  "name": "ThreadVet",
+  "caption": {
+    "price": 40,
+    "cost": 8,
+    "label": 7
+  },
+  "marketplaces": 9,
+  "rows": [
+    {
+      "name": "Poshmark",
+      "profit": "$24.00"
+    },
+    {
+      "name": "Depop",
+      "profit": "$23.13"
+    },
+    {
+      "name": "TikTok Shop",
+      "profit": "$21.80"
+    },
+    {
+      "name": "Mercari",
+      "profit": "$21.00"
+    }
+  ]
+}

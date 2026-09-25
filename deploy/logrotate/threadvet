@@ -1,0 +1,17 @@
+# Installed by setup-vps.sh as /etc/logrotate.d/threadvet. The privacy policy
+# promises access logs are deleted after 14 days: today's file plus 13 rotated
+# days, and nothing older than 14 days, whatever the distro's nginx default is.
+/var/log/threadvet/*.log {
+	daily
+	rotate 13
+	maxage 14
+	missingok
+	notifempty
+	compress
+	delaycompress
+	create 0640 www-data adm
+	sharedscripts
+	postrotate
+		invoke-rc.d nginx rotate >/dev/null 2>&1 || true
+	endscript
+}

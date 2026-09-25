@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+# The paid spreadsheet is generated locally and sold, never committed.
+product/dist/
+__pycache__/
+*.pyc
+# Your deploy public key, copied here only to hand it to setup-vps.sh.
+deploy/deploy_key.pub

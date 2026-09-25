@@ -1,0 +1,313 @@
+import test, { after } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, existsSync, statSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
+import { createServer, request } from 'node:http';
+import config from '../site.config.mjs';
+import { FEES_VERIFIED, percentOf } from '../src/engine/fees.mjs';
+import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
+import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
+import { ogData } from '../scripts/og-data.mjs';
+
+const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
+const tempDirs = [OUT];
+after(() => tempDirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+execFileSync(process.execPath, ['scripts/build.mjs', '--out', OUT, '--quiet'], { cwd: new URL('..', import.meta.url) });
+
+const walk = (dir) => readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? walk(join(dir, f)) : [join(dir, f)]));
+const files = walk(OUT);
+const html = files.filter((f) => f.endsWith('.html')).map((f) => ({ file: relative(OUT, f), src: readFileSync(f, 'utf8') }));
+const pathOf = (file) => (file.endsWith('index.html') ? `/${file.replace(/index\.html$/, '')}` : `/${file}`);
+const NOINDEX = new Set(['404.html', 'offline.html']);
+
+/** A throwaway copy of everything the build reads, for tests that edit sources or could delete files. */
+function copyProject() {
+  const copy = mkdtempSync(join(tmpdir(), 'threadvet-copy-'));
+  tempDirs.push(copy);
+  for (const entry of ['scripts', 'src', 'site.config.mjs', 'package.json']) {
+    cpSync(fileURLToPath(new URL(`../${entry}`, import.meta.url)), join(copy, entry), { recursive: true });
+  }
+  return copy;
+}
+
+function resolves(url) {
+  const clean = url.split(/[?#]/)[0];
+  if (clean === '') return true;
+  const target = join(OUT, clean);
+  return clean.endsWith('/') ? existsSync(join(target, 'index.html')) : existsSync(target);
+}
+
+test('builds every expected page', () => {
+  assert.equal(html.length, 16);
+  for (const f of ['index.html', 'fees/index.html', 'fees/ebay/index.html', 'tracker/index.html', 'privacy/index.html', 'terms/index.html', '404.html', 'offline.html']) {
+    assert.ok(html.some((h) => h.file === f), f);
+  }
+});
+
+test('every page has complete, sane metadata', () => {
+  for (const { file, src } of html) {
+    assert.match(src, /^<!DOCTYPE html>\n<html lang="en">/, file);
+    const title = src.match(/<title>([^<]+)<\/title>/)?.[1];
+    assert.ok(title && title.length <= 80, `${file}: title "${title}"`);
+    const desc = src.match(/<meta name="description" content="([^"]+)">/)?.[1];
+    assert.ok(desc && desc.length >= 50 && desc.length <= 170, `${file}: description length ${desc?.length}`);
+    assert.equal(src.match(/<h1[\s>]/g)?.length, 1, `${file}: exactly one h1`);
+    if (NOINDEX.has(file)) {
+      assert.match(src, /<meta name="robots" content="noindex">/);
+    } else {
+      assert.ok(src.includes(`<link rel="canonical" href="${config.url}${pathOf(file)}">`), `${file}: canonical`);
+    }
+  }
+});
+
+test('no template leaks in output', () => {
+  for (const { file, src } of html) {
+    for (const bad of ['undefined', 'NaN', '[object Object]', '${', '&amp;amp;']) {
+      assert.ok(!src.includes(bad), `${file} contains ${bad}`);
+    }
+  }
+  const sw = readFileSync(join(OUT, 'sw.js'), 'utf8');
+  assert.ok(!sw.includes('__VERSION__') && !sw.includes('__PRECACHE__'));
+});
+
+test('nav marks the current page, and only the section on sub-pages', () => {
+  const nav = (file) => html.find((h) => h.file === file).src.match(/<nav aria-label="Main">[\s\S]*?<\/nav>/)[0];
+  const ebay = nav('fees/ebay/index.html');
+  assert.match(ebay, /<a href="\/fees\/" aria-current="true">/);
+  assert.ok(!ebay.includes('aria-current="page"'));
+  assert.match(nav('fees/index.html'), /<a href="\/fees\/" aria-current="page">/);
+});
+
+test('ids are unique within each page', () => {
+  for (const { file, src } of html) {
+    const ids = [...src.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(new Set(ids).size, ids.length, `${file}: duplicate id`);
+  }
+});
+
+test('internal links and assets resolve', () => {
+  for (const { file, src } of html) {
+    for (const [, url] of src.matchAll(/(?:href|src)="(\/[^"]*)"/g)) {
+      assert.ok(resolves(url), `${file} -> ${url}`);
+    }
+  }
+  const sw = readFileSync(join(OUT, 'sw.js'), 'utf8');
+  for (const url of JSON.parse(sw.match(/const PRECACHE = (\[.*?\]);/)[1])) assert.ok(resolves(url), `precache ${url}`);
+  const manifest = JSON.parse(readFileSync(join(OUT, 'manifest.webmanifest'), 'utf8'));
+  for (const icon of manifest.icons) assert.ok(resolves(icon.src), icon.src);
+});
+
+test('assets are content-hashed and import each other by hashed name', () => {
+  const manifest = JSON.parse(readFileSync(join(OUT, 'assets', 'manifest.json'), 'utf8'));
+  assert.equal(manifest.length, 7); // styles + 4 modules + offline + analytics
+  for (const name of manifest) {
+    assert.match(name, /^[a-z]+\.[0-9a-f]{10}\.(js|css)$/);
+    const src = readFileSync(join(OUT, 'assets', name), 'utf8');
+    for (const [, spec] of src.matchAll(/from '([^']+)'/g)) {
+      assert.match(spec, /^\.\/[a-z]+\.[0-9a-f]{10}\.js$/, `${name} imports ${spec}`);
+      assert.ok(manifest.includes(spec.slice(2)), spec);
+    }
+  }
+});
+
+test('refuses to wipe folders it did not create', () => {
+  // Runs a copy of the project, so a broken guard could only ever wipe the copy.
+  const copy = copyProject();
+  const run = (out) => execFileSync(process.execPath, ['scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy, stdio: 'pipe' });
+  assert.throws(() => run('.'), /contains the project/);
+  assert.throws(() => run('src'), /not created by this build/);
+  const foreign = mkdtempSync(join(tmpdir(), 'threadvet-foreign-'));
+  tempDirs.push(foreign);
+  writeFileSync(join(foreign, 'keep.txt'), 'mine');
+  assert.throws(() => run(foreign), /not created by this build/);
+  assert.ok(existsSync(join(foreign, 'keep.txt')) && existsSync(join(copy, 'src/engine/fees.mjs')), 'nothing was deleted');
+  run(OUT); // its own previous output is fine
+});
+
+test('build rejects source changes that would ship a broken site', () => {
+  const copy = copyProject();
+  const run = (env = {}) =>
+    execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, ...env } });
+  // A stray .DS_Store in the icons is neither published nor precached.
+  writeFileSync(join(copy, 'src/assets/icons/.DS_Store'), 'x');
+  run();
+  assert.ok(!existsSync(join(copy, 'dist/assets/icons/.DS_Store')));
+  assert.ok(!readFileSync(join(copy, 'dist/sw.js'), 'utf8').includes('.DS_Store'));
+  // Double-quoted imports are rewritten too.
+  const app = join(copy, 'src/assets/app.js');
+  writeFileSync(app, readFileSync(app, 'utf8').replace("from '../engine/render.mjs'", 'from "../engine/render.mjs"'));
+  run();
+  const built = readdirSync(join(copy, 'dist/assets')).find((f) => f.startsWith('app.'));
+  assert.ok(!readFileSync(join(copy, 'dist/assets', built), 'utf8').includes('.mjs'));
+  // An import the build cannot publish stops the build instead of shipping a 404.
+  writeFileSync(app, `import './helpers.mjs';\n${readFileSync(app, 'utf8')}`);
+  assert.throws(() => run(), /cannot publish/);
+  // Outside links must be https.
+  writeFileSync(app, readFileSync(app, 'utf8').replace("import './helpers.mjs';\n", ''));
+  assert.throws(() => run({ NEWSLETTER_ACTION: 'http://example.com/subscribe' }), /newsletter.action must start with https/);
+  assert.throws(() => run({ TRACKER_CHECKOUT_URL: 'javascript:alert(1)' }), /tracker.checkoutUrl must start with https/);
+  const cfg = join(copy, 'site.config.mjs');
+  const original = readFileSync(cfg, 'utf8');
+  writeFileSync(cfg, original.replace(/price: [\d.]+,/, 'price: 24.5,'));
+  run();
+  assert.match(readFileSync(join(copy, 'dist/tracker/index.html'), 'utf8'), /One-time \$24\.50/, 'prices show cents');
+  for (const ok of ['19.99', '4.35', '1.10']) {
+    writeFileSync(cfg, original.replace(/price: [\d.]+,/, `price: ${ok},`));
+    run(); // float prices that are whole cents are accepted
+  }
+  writeFileSync(cfg, original.replace(/price: [\d.]+,/, 'price: 19.999,'));
+  assert.throws(() => run(), /tracker.price must be a positive number/);
+  writeFileSync(cfg, original.replace(/price: [\d.]+,/, "price: '19',"));
+  assert.throws(() => run(), /tracker.price must be a positive number/);
+});
+
+test('structured data is valid JSON with a schema.org context', () => {
+  for (const { file, src } of html) {
+    for (const [, json] of src.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)) {
+      const data = JSON.parse(json);
+      assert.equal(data['@context'], 'https://schema.org', file);
+    }
+  }
+});
+
+test('everything a precached page loads is precached too, with or without analytics', () => {
+  for (const env of [{}, { PLAUSIBLE_DOMAIN: 'example.com' }]) {
+    const dir = mkdtempSync(join(tmpdir(), 'threadvet-'));
+    tempDirs.push(dir);
+    execFileSync(process.execPath, ['scripts/build.mjs', '--out', dir, '--quiet'], {
+      cwd: new URL('..', import.meta.url),
+      env: { ...process.env, ...env },
+    });
+    const precache = JSON.parse(readFileSync(join(dir, 'sw.js'), 'utf8').match(/const PRECACHE = (\[.*?\]);/)[1]);
+    for (const page of precache.filter((u) => u.endsWith('/') || u.endsWith('.html'))) {
+      const src = readFileSync(join(dir, page.endsWith('/') ? `${page}index.html` : page), 'utf8');
+      // Everything the page itself loads: CSS, scripts, icons, the web manifest.
+      const used = [...src.matchAll(/<(?:script|link)\b[^>]*?(?:src|href)="(\/[^"]+)"/g)].map((m) => m[1]);
+      assert.ok(used.filter((u) => /\.(js|css)$/.test(u)).length >= 2, `${page} loads its CSS and scripts`);
+      assert.ok(used.includes('/favicon.ico'), `${page} links the favicon`);
+      for (const url of used) assert.ok(precache.includes(url), `${page} loads ${url}, which is not precached (env ${JSON.stringify(env)})`);
+    }
+  }
+});
+
+test('preview server mirrors nginx: redirects stay on this site, dotfiles refused, real 404s', async () => {
+  // Serve a copy of the site from a folder whose parent holds a file that must stay private.
+  const base = mkdtempSync(join(tmpdir(), 'threadvet-serve-'));
+  tempDirs.push(base);
+  cpSync(OUT, join(base, 'site'), { recursive: true });
+  writeFileSync(join(base, 'secret.txt'), 'private');
+  mkdirSync(join(base, 'site-old'));
+  writeFileSync(join(base, 'site-old', 'secret.txt'), 'private');
+  mkdirSync(join(base, 'site', 'caf\u00e9'));
+  writeFileSync(join(base, 'site', 'caf\u00e9', 'index.html'), 'ok');
+
+  const server = createServer(createStaticHandler(join(base, 'site')));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  // Raw request paths: fetch() would normalize ../ and // before sending.
+  const get = (path) =>
+    new Promise((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port: server.address().port, path }, (res) => {
+        res.resume();
+        res.on('end', () => resolve({ status: res.statusCode, location: res.headers.location }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  try {
+    assert.deepEqual(await get('/fees?x=1'), { status: 301, location: '/fees/?x=1' });
+    // Repeated or encoded slashes never produce a //host redirect.
+    assert.deepEqual(await get('//fees'), { status: 301, location: '/fees/' });
+    assert.ok(!(await get('/%2Ffees')).location.startsWith('//'));
+    assert.ok(!(await get('/\\fees')).location.startsWith('//'));
+    assert.deepEqual(await get('/caf%C3%A9'), { status: 301, location: '/caf%C3%A9/' }, 'Location stays encoded');
+    assert.equal((await get('/fees/')).status, 200);
+    assert.equal((await get('/no-such-page/')).status, 404);
+    assert.equal((await get('/404.html')).status, 404, 'the error page is not a page of its own');
+    for (const path of ['/.threadvet-build', '/%2Ethreadvet-build', '/.git/config']) assert.equal((await get(path)).status, 403, path);
+    for (const path of ['/../secret.txt', '/..%2Fsecret.txt', '/%2e%2e/secret.txt', '/../site-old/secret.txt', '/..%2Fsite-old%2Fsecret.txt']) {
+      assert.notEqual((await get(path)).status, 200, `${path} must not escape the site folder`);
+    }
+    assert.equal((await get('fees')).status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+test('preview server never maps a path outside its folder', () => {
+  const root = join(tmpdir(), 'site');
+  assert.equal(insideRoot(root, '/fees/../index.html'), join(root, 'index.html'));
+  assert.equal(insideRoot(root, '/'), join(root, '/'));
+  // Relative paths can climb: into the parent, or a sibling sharing the name prefix.
+  assert.equal(insideRoot(root, '../secret.txt'), null);
+  assert.equal(insideRoot(root, '../site-old/secret.txt'), null);
+  assert.equal(insideRoot(root, 'a/../../site-old'), null);
+});
+
+test('renaming the site in site.config.mjs renames it everywhere', () => {
+  const copy = copyProject();
+  const cfg = join(copy, 'site.config.mjs');
+  const edited = readFileSync(cfg, 'utf8').replace('name: `${name} Reseller Tracker`', "name: 'FlipCheck Tracker'");
+  assert.notEqual(edited, readFileSync(cfg, 'utf8'), 'the test edits the tracker name');
+  writeFileSync(cfg, edited);
+  execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, SITE_NAME: 'FlipCheck' } });
+  const built = walk(join(copy, 'dist')).filter((f) => /\.(html|webmanifest)$/.test(f));
+  for (const file of built) {
+    const text = readFileSync(file, 'utf8');
+    assert.ok(!text.includes('ThreadVet'), `${relative(copy, file)} still says ThreadVet`);
+  }
+  assert.match(readFileSync(join(copy, 'dist/terms/index.html'), 'utf8'), /FlipCheck Tracker/);
+});
+
+test('fee change dates are machine-readable', () => {
+  const home = html.find((h) => h.file === 'index.html').src;
+  const times = [...home.matchAll(/<time datetime="([^"]+)">([^<]+)<\/time>/g)];
+  assert.ok(times.length >= 3);
+  for (const [, iso, text] of times) {
+    assert.match(iso, /^\d{4}-\d{2}(-\d{2})?$/);
+    assert.ok(text.includes(iso.slice(0, 4)), `${text} shows the year of ${iso}`);
+  }
+  assert.ok(!/<time>/.test(home), 'every <time> has a datetime');
+});
+
+test('tracker page quotes the current IRS mileage rates from the shared data', () => {
+  const page = html.find((h) => h.file === 'tracker/index.html').src;
+  const latest = IRS_MILEAGE_RATES.at(-1);
+  assert.ok(page.includes(`${percentOf(latest.rate)}&cent;`), 'latest rate shown');
+  assert.ok(page.includes(`the ${MILEAGE_YEAR} IRS business rate`), 'year shown');
+});
+
+test('the social card image shows the current numbers', () => {
+  const drawn = JSON.parse(readFileSync(new URL('../src/assets/og.json', import.meta.url), 'utf8'));
+  assert.deepEqual(drawn, ogData(), 'src/assets/og.png is out of date (numbers or site name): run `node scripts/gen-images.mjs` (see its header)');
+});
+
+test('service worker version changes when only page text changes', () => {
+  const OUT2 = mkdtempSync(join(tmpdir(), 'threadvet-'));
+  tempDirs.push(OUT2);
+  execFileSync(process.execPath, ['scripts/build.mjs', '--out', OUT2, '--quiet'], {
+    cwd: new URL('..', import.meta.url),
+    env: { ...process.env, CONTACT_EMAIL: 'changed@example.com' },
+  });
+  const version = (dir) => readFileSync(join(dir, 'sw.js'), 'utf8').match(/const VERSION = "([0-9a-f]+)"/)[1];
+  assert.notEqual(version(OUT), version(OUT2));
+});
+
+test('sitemap lists every indexable page and nothing else', () => {
+  const sitemap = readFileSync(join(OUT, 'sitemap.xml'), 'utf8');
+  const locs = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1]);
+  const expected = html.filter((h) => !NOINDEX.has(h.file)).map((h) => `${config.url}${pathOf(h.file)}`);
+  assert.deepEqual(locs.sort(), expected.sort());
+  const feeDate = sitemap.match(/fees\/ebay\/<\/loc><lastmod>([^<]+)</)[1];
+  assert.equal(feeDate, FEES_VERIFIED, 'fee pages carry the fee verification date');
+  assert.match(readFileSync(join(OUT, 'robots.txt'), 'utf8'), new RegExp(`Sitemap: ${config.url}/sitemap.xml`));
+});
+
+test('affiliate links are marked sponsored', () => {
+  const home = html.find((h) => h.file === 'index.html').src;
+  for (const c of config.crosslisters) {
+    assert.ok(home.includes(`href="${c.url}" rel="sponsored noopener"`), c.id);
+  }
+});

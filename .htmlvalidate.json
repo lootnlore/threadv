@@ -1,0 +1,11 @@
+{
+  "extends": ["html-validate:recommended"],
+  "rules": {
+    "no-inline-style": "error",
+    "require-sri": "off",
+    "long-title": "off",
+    "form-dup-name": ["error", { "shared": ["radio", "checkbox", "button", "reset", "submit"] }],
+    "no-redundant-role": "off",
+    "prefer-native-element": ["error", { "exclude": ["list"] }]
+  }
+}
