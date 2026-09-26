@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
-import { percent, money, renderResults, renderVerdict, ordinal } from '../src/engine/render.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
@@ -376,6 +376,11 @@ test('ordinal numbers', () => {
     '1st', '2nd', '3rd', '4th', '9th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st', '111th', '112th',
   ]);
 });
+
+// The renderers take rankedRows(); rank the results the way app.js and the
+// calculator page do, once for both.
+const renderResults = (mode, results, opts = {}) => renderRows(mode, rankedRows(mode, results, opts.target ?? 0), opts);
+const renderVerdict = (mode, results, i) => verdictOfRows(mode, rankedRows(mode, results, i.target), i);
 
 /** The rendered rows as plain data: id, rank badge (and whether it is read aloud), tags, name. */
 const rows = (html) =>

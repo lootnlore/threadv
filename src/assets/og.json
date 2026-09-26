@@ -1,10 +1,6 @@
 {
   "name": "ThreadVet",
-  "caption": {
-    "price": 40,
-    "cost": 8,
-    "label": 7
-  },
+  "caption": "$40 sale · $8 cost · $7 label",
   "marketplaces": 9,
   "rows": [
     {

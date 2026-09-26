@@ -5,7 +5,6 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
-import { rankedRows } from './calc.mjs';
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
@@ -105,12 +104,13 @@ function subFor(mode, r) {
 }
 
 /**
- * The ranked <li> rows. Each row is a <details> whose summary is the
- * headline, so tapping anywhere on a result opens its fee breakdown.
- * `focus` pins and highlights one platform (fee pages).
+ * The ranked <li> rows, from rankedRows() (the same rows renderVerdict gets,
+ * so the list and the verdict share one ranking). Each row is a <details>
+ * whose summary is the headline, so tapping anywhere on a result opens its
+ * fee breakdown. `focus` pins and highlights one platform (fee pages).
  */
-export function renderResults(mode, results, { focus, target = 0 } = {}) {
-  const rows = rankedRows(mode, results, target);
+export function renderResults(mode, ranked, { focus, target = 0 } = {}) {
+  const rows = [...ranked];
   // On a platform's own fee page, pin it first but keep its true rank.
   const pinned = rows.findIndex(({ r }) => r.id === focus);
   if (pinned > 0) rows.unshift(...rows.splice(pinned, 1));
@@ -138,14 +138,14 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
 }
 
 /**
- * One-line decision at the top of the results. Returns { tone, html }.
- * `input` is the normalized input (cents).
+ * One-line decision at the top of the results, from rankedRows(). Returns
+ * { tone, html }. `input` is the normalized input (cents).
  */
-export function renderVerdict(mode, results, input) {
+export function renderVerdict(mode, ranked, input) {
   const out = (tone, html) => ({ tone, html: `<span>${html}</span>` });
   const target = money(input.target);
   // The top results, as the list ranks them: every platform tied for first is named.
-  const winners = rankedRows(mode, results, input.target).filter((row) => row.rank === 1);
+  const winners = ranked.filter((row) => row.rank === 1);
   if (!winners.length) {
     return out('bad', `<strong>Out of range.</strong> No platform reaches ${target} profit with these costs.`);
   }

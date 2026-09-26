@@ -7,7 +7,7 @@
 // until the images are regenerated.
 import config from '../site.config.mjs';
 import { normalizeInputs, rank, rankedRows, DEFAULTS } from '../src/engine/calc.mjs';
-import { PLATFORMS } from '../src/engine/fees.mjs';
+import { PLATFORMS, usdText } from '../src/engine/fees.mjs';
 import { money } from '../src/engine/render.mjs';
 
 /** Rows the card's panel has room for (gen-images.mjs lays out 630px). */
@@ -29,12 +29,15 @@ export function rowsToShow(ranks, max) {
 }
 
 /** The card's content; `raw` is the calculator input (the defaults). */
+const usd = (cents) => usdText(cents / 100);
+
 export function ogData(raw = DEFAULTS) {
   const input = normalizeInputs(raw);
   const rows = rankedRows('profit', rank('profit', input), input.target);
   return {
     name: config.name,
-    caption: { price: raw.price, cost: raw.cost, label: raw.label },
+    // From the checked input, formatted as on the site ("$40", "$7.50").
+    caption: `${usd(input.price)} sale \u00b7 ${usd(input.cost)} cost \u00b7 ${usd(input.label)} label`,
     marketplaces: PLATFORMS.length,
     rows: rows.slice(0, rowsToShow(rows.map((row) => row.rank), CARD_ROWS)).map(({ r, rank: n, best }) => ({
       rank: n,

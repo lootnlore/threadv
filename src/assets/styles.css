@@ -1873,12 +1873,20 @@ code {
 /* ---------- Windows High Contrast (forced colors) ---------- */
 
 /* Forced colors drop backgrounds and shadows, so states shown that way get a
-   line instead: none of these can hide or mimic a focus ring (the tab and
-   nav states are underlines; the Best edge is a border, inside the row's
-   focus ring; the pinned edge sits outside the row). */
+   line instead, placed so none can hide or mimic a focus ring and none moves
+   layout: the tab and nav states are underlines, the Best edge an outline
+   outside the row (the row's focus ring is inside its summary), the pinned
+   edge a dashed border in place of the plain one. Every focus ring uses the
+   system focus colour. */
 @media (forced-colors: active) {
+  :focus-visible,
+  .verdict:focus-visible,
+  .site-header .brand:focus-visible svg {
+    outline-color: Highlight;
+  }
+
   .input-wrap:focus-within {
-    outline: 3px solid; /* its input's own outline is off */
+    outline: 3px solid Highlight; /* its input's own outline is off */
     outline-offset: 2px;
   }
 
@@ -1889,12 +1897,17 @@ code {
   }
 
   .result.is-best {
-    border-width: 3px;
+    outline: 3px solid;
+    outline-offset: 2px;
   }
 
   .result.is-focus {
+    border-style: dashed;
+  }
+
+  .compare .is-current {
     outline: 2px dashed;
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
 
   .tag,

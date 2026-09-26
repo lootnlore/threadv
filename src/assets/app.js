@@ -10,7 +10,7 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, LIMITS, normalizeInputs, rank, parseNumber, has } from '../engine/calc.mjs';
+import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, parseNumber, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, MODES } from '../engine/render.mjs';
 import { PLATFORMS, usdText } from '../engine/fees.mjs';
 
@@ -203,11 +203,11 @@ function setup(root) {
       verdictEl.innerHTML = '<span><strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.</span>';
       resultsEl.innerHTML = '';
     } else {
-      const results = rank(mode, input, ids);
-      const verdict = renderVerdict(mode, results, input);
+      const rows = rankedRows(mode, rank(mode, input, ids), input.target);
+      const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
       verdictEl.innerHTML = verdict.html;
-      resultsEl.innerHTML = renderResults(mode, results, { focus, target: input.target });
+      resultsEl.innerHTML = renderResults(mode, rows, { focus, target: input.target });
       for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
       fitResults();
     }

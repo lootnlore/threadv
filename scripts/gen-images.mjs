@@ -82,7 +82,7 @@ p{font-size:27px;color:#56615d;margin:0;line-height:1.35}
 <p>Free calculator for resellers: fees, payout and profit on ${data.marketplaces} marketplaces.</p>
 </div>
 <div class="panel">
-<div class="cap">$${data.caption.price} sale &middot; $${data.caption.cost} cost &middot; $${data.caption.label} label</div>
+<div class="cap">${esc(data.caption)}</div>
 ${rows}
 </div>
 </div>`;

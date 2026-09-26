@@ -482,7 +482,16 @@ if (chromium) {
         if (!el) return null;
         const st = getComputedStyle(el);
         const outline = st.outlineStyle !== 'none' && parseFloat(st.outlineWidth) > 0 && !/rgba\(.*, 0\)$/.test(st.outlineColor);
-        return { outline, outlineStyle: st.outlineStyle, outlineWidth: parseFloat(st.outlineWidth), underline: st.textDecorationLine.includes('underline'), border: parseFloat(st.borderTopWidth) };
+        return {
+          outline,
+          outlineStyle: st.outlineStyle,
+          outlineWidth: parseFloat(st.outlineWidth),
+          outlineOffset: parseFloat(st.outlineOffset),
+          outlineColor: st.outlineColor,
+          underline: st.textDecorationLine.includes('underline'),
+          border: parseFloat(st.borderTopWidth),
+          borderStyle: st.borderTopStyle,
+        };
       }, selector);
     const get = async (page, selector) => {
       const st = await styleOf(page, selector);
@@ -499,19 +508,60 @@ if (chromium) {
       ['focused field', '.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)', 'outline'],
       ['selected tab', '[role=tab][aria-selected=true]', '[role=tab][aria-selected=false]', 'underline'],
       ['current page link', '.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])', 'underline'],
-      ['pinned result', '.result.is-focus', plainRow, 'outline'],
+      ['Best result', '.result.is-best', plainRow, 'outline'],
+      ["this page's row in the fee list", '.compare .is-current', '.compare li:not(.is-current)', 'outline'],
       ['Best tag', '.tag-best', '.pname', 'outline'],
       ['rank badge', '.rank', '.pname', 'outline'],
     ];
     for (const [state, on, off, line] of states) {
       assert.deepEqual([(await get(page, on))[line], (await get(page, off))[line]], [true, false], state);
     }
-    assert.ok((await get(page, '.result.is-best')).border >= 3 && (await get(page, plainRow)).border < 2, 'Best result: a thick edge');
-    // A result both pinned and Best keeps both edges.
-    await page.goto(`${base}/fees/poshmark/`, { waitUntil: 'networkidle' });
+    const pinnedRow = await get(page, '.result.is-focus');
+    assert.equal(pinnedRow.borderStyle, 'dashed', 'pinned result: a dashed edge');
+    assert.equal((await get(page, plainRow)).borderStyle, 'solid');
+    // State lines keep clear of the rows' focus rings: the Best edge is outside
+    // the row, the ring inside its summary, and neither changes the row's size.
+    const best = await get(page, '.result.is-best');
+    assert.ok(best.outlineOffset >= 0 && best.border === pinnedRow.border, `Best edge outside the row, same border: ${JSON.stringify(best)}`);
+    await page.keyboard.press('Tab'); // keyboard use, so programmatic focus counts as :focus-visible
+    const ring = await page.evaluate(() => {
+      const summary = document.querySelector('.result.is-best summary');
+      summary.focus();
+      const st = getComputedStyle(summary);
+      return { visible: summary.matches(':focus-visible'), offset: parseFloat(st.outlineOffset), width: parseFloat(st.outlineWidth) };
+    });
+    assert.ok(ring.visible && ring.width >= 3 && ring.offset + ring.width <= 0, `the Best row's focus ring is inside its summary: ${JSON.stringify(ring)}`);
+    await page.focus('#f-price');
+    const lefts = await page.evaluate(() => [...document.querySelectorAll('.result .pname')].map((n) => Math.round(n.getBoundingClientRect().left)));
+    assert.equal(new Set(lefts).size, 1, `names line up in every row: ${lefts}`);
+    // Every focus ring, the field's included, is the system focus colour.
+    const fieldRing = (await get(page, '.input-wrap:has(#f-price)')).outlineColor;
+    await page.keyboard.press('Tab');
+    const tabRing = await page.evaluate(() => {
+      const tab = document.querySelector('[role=tab][aria-selected=true]');
+      tab.focus();
+      return getComputedStyle(tab).outlineColor;
+    });
+    const logoRing = await page.evaluate(() => {
+      document.querySelector('.site-header .brand').focus();
+      return getComputedStyle(document.querySelector('.site-header .brand svg')).outlineColor;
+    });
+    assert.deepEqual([fieldRing, logoRing], [tabRing, tabRing], 'focus rings share one colour');
+    // A result both pinned and Best keeps both edges (the top marketplace's own page).
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    const top = await page.getAttribute('.result.is-best', 'data-id');
+    await page.goto(`${base}/fees/${top}/`, { waitUntil: 'networkidle' });
     const both = await get(page, '.result.is-best.is-focus');
-    assert.ok(both.border >= 3 && both.outlineStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
+    assert.ok(both.outlineStyle === 'solid' && both.outlineWidth >= 3 && both.borderStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
     await context.close();
+
+    // Nothing spills at very large text in forced colors either.
+    const small = await open(null, { viewport: { width: 320, height: 800 }, forcedColors: 'active' });
+    await setTextSize(small.page, 2.5);
+    await small.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    const spills = await small.page.evaluate(() => [...document.querySelectorAll('.result .pname, .result .figure')].filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent));
+    assert.deepEqual(spills, [], 'forced colors, 320px, text 250%');
+    await small.context.close();
 
     // Focus rings, normal and forced colors: a focused state element shows the
     // focus ring, not its state line.

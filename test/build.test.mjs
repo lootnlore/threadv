@@ -315,6 +315,7 @@ test('the social card lists up to four rows, cutting a tie only when more than f
   // Best as on the site: on the top row at the defaults, and nowhere when the
   // verdict would reject the top result (a minimum above every profit).
   assert.equal(ogData().rows[0].best, true);
+  assert.equal(ogData({ ...DEFAULTS, price: 40, cost: 8, label: 7.5 }).caption, '$40 sale \u00b7 $8 cost \u00b7 $7.50 label', 'caption formatted as on the site');
   const rejected = ogData({ ...DEFAULTS, target: 1000 }).rows;
   assert.ok(rejected.length > 0 && rejected.every((r) => !r.best), JSON.stringify(rejected));
 });

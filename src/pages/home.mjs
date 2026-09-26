@@ -26,7 +26,7 @@ export function home(config) {
     },
     {
       q: 'How do I price one item for several marketplaces?',
-      a: `Use "List price" mode. Enter what you paid and the profit you want, and the calculator finds the lowest price on each marketplace that gets you there. On a $40 item, Mercari keeps ${money(merc.payout)} while Poshmark keeps ${money(posh.payout)}, so the same profit needs a different price on each.`,
+      a: `Use "List price" mode. Enter what you paid and the profit you want, and the calculator finds the lowest price on each marketplace that gets you there. On a $40 item you keep ${money(merc.payout)} on Mercari but ${money(posh.payout)} on Poshmark, so the same profit needs a different price on each.`,
     },
     {
       q: 'How current are these fees?',
