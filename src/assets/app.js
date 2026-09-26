@@ -171,11 +171,14 @@ function setup(root) {
 
   // ---- rendering ----
 
+  /** Flags each numeric field; returns the fields on show that hold a bad value. */
   function validate(values) {
+    const bad = [];
     for (const key of NUMERIC) {
       const el = field(key);
       if (!el) continue;
       const problem = problemWith(key, values[key]);
+      if (problem && !el.closest('[hidden]')) bad.push(key);
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -185,13 +188,27 @@ function setup(root) {
         h.classList.toggle('hint-error', Boolean(problem));
       }
     }
+    return bad;
+  }
+
+  /**
+   * While the numbers can't be trusted (a flagged field, or no sell price where
+   * the mode needs one) the verdict asks for them instead of deciding, and the
+   * last results stay dimmed and out of reach (inert) until they can.
+   */
+  function showPending(html) {
+    verdictEl.className = 'verdict verdict-bad';
+    verdictEl.innerHTML = `<span>${html}</span>`;
+    resultsEl.classList.add('is-stale');
+    resultsEl.inert = true;
   }
 
   /** `save` marks the user's own edits: stored (outside a shared link) and mirrored to the URL. */
   function render({ save = false } = {}) {
     const state = readForm();
-    validate(state.values);
     fieldBox('ebayCustomRate').hidden = state.values.ebayCategory !== 'custom';
+    const bad = validate(state.values);
+    const needsPrice = !MODES[mode].hidden.includes('price') && !(parseNumber(state.values.price) > 0);
 
     const open = new Set([...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id));
     const input = normalizeInputs(state.values);
@@ -202,7 +219,14 @@ function setup(root) {
       verdictEl.className = 'verdict verdict-bad';
       verdictEl.innerHTML = '<span><strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.</span>';
       resultsEl.innerHTML = '';
+    } else if (bad.length) {
+      for (const key of bad) field(key).closest('details:not([open])')?.setAttribute('open', ''); // e.g. a shared link's junk under Fine-tune fees
+      showPending(`<strong>Check the highlighted ${bad.length > 1 ? 'fields' : 'field'}.</strong> Results update once ${bad.length > 1 ? 'they hold' : 'it holds'} a valid number.`);
+    } else if (needsPrice) {
+      showPending('<strong>Enter a sell price</strong> to see results.');
     } else {
+      resultsEl.classList.remove('is-stale');
+      resultsEl.inert = false;
       const rows = rankedRows(mode, rank(mode, input, ids), input.target);
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;

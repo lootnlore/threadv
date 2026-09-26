@@ -142,7 +142,7 @@ export function evaluate(platform, input, price = input.price, cost = input.cost
 /** Most you can pay for the item and still clear `input.target` profit. */
 export function maxBuy(platform, input) {
   const atZeroCost = evaluate(platform, input, input.price, 0);
-  return { ...atZeroCost, maxCost: atZeroCost.profit - input.target };
+  return { ...atZeroCost, minimum: input.target, maxCost: atZeroCost.profit - input.target };
 }
 
 /**

@@ -18,6 +18,7 @@
   --neg: #b3261e;
   --neg-soft: #fbeae8;
   --ring: #0b6b58;
+  --ring-width: 3px; /* every focus ring */
   --shadow: 0 1px 2px rgb(22 32 29 / 0.06), 0 8px 24px rgb(22 32 29 / 0.06);
   --radius: 14px;
   --logo: 1.75rem; /* header logo: scales with text so the name line always matches it */
@@ -105,7 +106,7 @@ a:hover {
 }
 
 :focus-visible {
-  outline: 3px solid var(--ring);
+  outline: var(--ring-width) solid var(--ring);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -287,7 +288,7 @@ svg {
 
 .site-header .brand:focus-visible svg {
   border-radius: 8px;
-  outline: 3px solid var(--ring);
+  outline: var(--ring-width) solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -875,7 +876,7 @@ select {
 }
 
 .verdict:focus-visible {
-  outline: 3px solid var(--ring);
+  outline: var(--ring-width) solid var(--ring);
 }
 
 /* Icons beside text (verdict, checklist): an icon column sized in rem, so it
@@ -958,9 +959,16 @@ select {
   gap: 8px;
 }
 
+/* Results from numbers that are no longer valid (see showPending in app.js). */
+.results.is-stale {
+  opacity: 0.45;
+}
+
 .result {
+  --row-border: 1px;
+  --best-border: 3px; /* a Best row's border in High Contrast (below) */
   background: var(--surface);
-  border: 1px solid var(--line);
+  border: var(--row-border) solid var(--line);
   border-radius: var(--radius);
 }
 
@@ -1049,6 +1057,12 @@ select {
 .tag-best {
   background: var(--brand-soft);
   color: var(--brand-strong);
+}
+
+.tag-page {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 /* A row's rank as a tag ("Tied 4th"), shown instead of the rank badge when
@@ -1876,9 +1890,9 @@ code {
    line instead, shaped so none can hide or pass for a focus ring and none
    moves the content: the tab and nav states are underlines; a Best row has a
    thick border (its contents pulled out by the difference, so they stay in
-   line with the other rows); the pinned row a dashed line just outside it; a
-   focused row a ring inset well inside its edge. Every focus ring uses the
-   system focus colour. */
+   line with the other rows; a pinned row says so in its "This page" tag); a
+   focused row a ring inset well inside its edge; an invalid field a double
+   line. Every focus ring uses the system focus colour. */
 @media (forced-colors: active) {
   :focus-visible,
   .verdict:focus-visible,
@@ -1886,8 +1900,13 @@ code {
     outline-color: Highlight;
   }
 
+  .input-wrap.is-invalid {
+    outline: 4px double; /* before focus, which wins while typing */
+    outline-offset: 2px;
+  }
+
   .input-wrap:focus-within {
-    outline: 3px solid Highlight; /* its input's own outline is off */
+    outline: var(--ring-width) solid Highlight; /* its input's own outline is off */
     outline-offset: 2px;
   }
 
@@ -1898,20 +1917,16 @@ code {
   }
 
   .result.is-best {
-    border-width: 3px;
+    border-width: var(--best-border);
   }
 
   .result.is-best > * {
-    margin: -2px; /* the 2px of extra border, so the contents don't move */
-  }
-
-  .result.is-focus {
-    outline: 2px dashed;
-    outline-offset: 2px;
+    margin: calc(var(--row-border) - var(--best-border)); /* the extra border, so the contents don't move */
   }
 
   .result summary:focus-visible {
-    outline-offset: -7px; /* clear of a Best row's thick border */
+    /* Inside the summary, 2px clear of a Best row's thick border. */
+    outline-offset: calc(-1 * (var(--ring-width) + var(--best-border) - var(--row-border) + 2px));
   }
 
   .compare .is-current {

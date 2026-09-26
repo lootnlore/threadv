@@ -5,9 +5,14 @@ import { esc, money } from '../engine/render.mjs';
 
 export function home(config) {
   const posh = evaluate(PLATFORM_BY_ID.poshmark, normalizeInputs({ price: 40, taxRate: 0 }));
-  // List prices for the calculator's own example, as "List price" mode shows them.
+  // List prices for the calculator's own example, as "List price" mode shows them
+  // (the example is left out if either can't reach the minimum).
   const example = normalizeInputs(DEFAULTS);
-  const listAt = (id) => money(listPrice(PLATFORM_BY_ID[id], example).price);
+  const [poshList, mercList] = ['poshmark', 'mercari'].map((id) => listPrice(PLATFORM_BY_ID[id], example));
+  const listExample =
+    poshList && mercList && poshList.price !== mercList.price
+      ? ` For the calculator's example (an item bought for ${usdText(DEFAULTS.cost)}, a ${usdText(DEFAULTS.label)} label and a ${usdText(DEFAULTS.target)} minimum profit) that is ${money(poshList.price)} on Poshmark and ${money(mercList.price)} on Mercari: each takes a different cut, and who pays for the label differs.`
+      : '';
 
   const questions = faq([
     {
@@ -28,7 +33,7 @@ export function home(config) {
     },
     {
       q: 'How do I price one item for several marketplaces?',
-      a: `Use "List price" mode. Enter what you paid and the profit you want, and the calculator finds the lowest price on each marketplace that gets you there. For the calculator's example (an item bought for ${usdText(DEFAULTS.cost)}, a ${usdText(DEFAULTS.label)} label and a ${usdText(DEFAULTS.target)} minimum profit) that is ${listAt('poshmark')} on Poshmark but ${listAt('mercari')} on Mercari: each takes a different cut, and who pays for the label differs.`,
+      a: `Use "List price" mode. Enter what you paid and the profit you want, and the calculator finds the lowest price on each marketplace that gets you there.${listExample}`,
     },
     {
       q: 'How current are these fees?',

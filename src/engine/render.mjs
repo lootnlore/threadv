@@ -61,7 +61,7 @@ function breakdown(mode, r) {
   if (r.other) rows.push(line('\u2212 Other costs', -r.other));
   if (mode === 'maxbuy') {
     rows.push(line('= Profit before item cost', r.profit, 'subtotal'));
-    rows.push(line('\u2212 Your minimum profit', -(r.profit - r.maxCost))); // maxBuy: maxCost = profit - minimum
+    rows.push(line('\u2212 Your minimum profit', -r.minimum));
     rows.push(line('= Max buy price', r.maxCost, 'total'));
   } else {
     rows.push(line('= Profit', r.profit, 'total'));
@@ -121,11 +121,13 @@ export function renderResults(mode, ranked, { focus } = {}) {
       // before the name. When very large text hides the badges, a tag after
       // the name says it instead ("Tied 4th"), like the Best tag.
       const badge = rank === null ? '<span class="rank" aria-hidden="true">\u2013</span>' : `<span class="rank">${rank}</span>`;
-      const tag = best
-        ? '<span class="tag tag-best">Best</span>'
-        : rank !== null
-          ? `<span class="tag tag-rank">${rankWords(rank, tied)}</span>`
-          : '';
+      // A fee page's own marketplace says why it comes first, out of rank order.
+      const tag = [
+        best ? '<span class="tag tag-best">Best</span>' : rank !== null ? `<span class="tag tag-rank">${rankWords(rank, tied)}</span>` : '',
+        r.id === focus ? '<span class="tag tag-page">This page</span>' : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
       // Spaces between the parts (not drawn in the grid) keep plain text apart: "4 Mercari $21.00".
       const head = `<span class="result-main">${badge} <span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span> ${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too

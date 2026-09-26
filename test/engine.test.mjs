@@ -505,8 +505,11 @@ test('results: a fee page pins its marketplace first and keeps its real rank', (
   const out = rows(renderResults('profit', results, { focus: 'c', target: 500 }));
   assert.deepEqual(out.map((r) => r.id), ['c', 'a', 'b', 'd', 'e'], 'pinned first, the rest in order');
   assert.deepEqual(out.map((r) => r.rank), [2, 1, 2, 4, 5], 'every badge keeps its true rank');
-  assert.deepEqual(out[0].tags, ['Tied 2nd']);
+  assert.deepEqual(out[0].tags, ['Tied 2nd', 'This page'], 'the pinned row says why it comes first');
   assert.deepEqual(out[1].tags, ['Best'], 'Best stays on the real winner');
+  assert.ok(out.slice(1).every((r) => !r.tags.includes('This page')));
+  const first = rows(renderResults('profit', results, { focus: 'a', target: 500 }));
+  assert.deepEqual(first[0].tags, ['Best', 'This page'], 'also when it is first anyway');
 });
 
 test('verdict names every marketplace tied for the top result', () => {

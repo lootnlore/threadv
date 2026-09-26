@@ -322,16 +322,36 @@ test('the social card lists up to four rows, cutting a tie only when more than f
 
 test('in High Contrast every focus ring uses the system focus colour', () => {
   // Chromium already paints a focused element's ring in Highlight, so this is
-  // checked in the stylesheet: Firefox relies on the rule.
+  // checked in the stylesheet: Firefox relies on the rule. A "ring" is any
+  // :focus, :focus-within or :focus-visible rule that draws an outline (any
+  // outline property but `none`) or a ring-shaped box-shadow (`0 0 0 3px`,
+  // not a drop shadow like the skip link's).
   const css = readFileSync(new URL('../src/assets/styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   const forcedAt = css.indexOf('@media (forced-colors: active)');
   assert.ok(forcedAt > 0, 'a forced-colors block exists');
-  const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sels: sel.split(',').map((x) => x.trim()), body }));
-  const ringRules = rules(css.slice(0, forcedAt)).filter(({ body }) => /outline(-color)?\s*:/.test(body) && !/outline\s*:\s*none/.test(body));
-  const ringSelectors = ringRules.flatMap(({ sels }) => sels).filter((sel) => sel.includes(':focus-visible'));
-  assert.ok(ringSelectors.length >= 3, ringSelectors.join(' | '));
-  const highlighted = rules(css.slice(forcedAt)).filter(({ body }) => /outline(-color)?\s*:[^;]*Highlight/.test(body)).flatMap(({ sels }) => sels);
+  const splitSelectors = (text) => {
+    const out = [''];
+    let depth = 0;
+    for (const ch of text) {
+      if (ch === '(') depth++;
+      if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) out.push('');
+      else out[out.length - 1] += ch;
+    }
+    return out.map((x) => x.trim().replace(/\s+/g, ' ')).filter(Boolean);
+  };
+  const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sels: splitSelectors(sel), body }));
+  const draws = (body) => /(^|;|\s)box-shadow\s*:\s*0\s+0\s+0\s+[\d.]+px/.test(body) || [...body.matchAll(/(?:^|;|\s)outline(-style|-width|-color)?\s*:\s*([^;]+)/g)].some(([, , value]) => value.trim() !== 'none');
+  const ringSelectors = rules(css.slice(0, forcedAt))
+    .filter(({ body }) => draws(body))
+    .flatMap(({ sels }) => sels)
+    .filter((sel) => /:focus(-visible|-within)?\b/.test(sel));
+  assert.ok(ringSelectors.length >= 4, ringSelectors.join(' | '));
+  const highlighted = rules(css.slice(forcedAt))
+    .filter(({ body }) => /outline(-color)?\s*:[^;]*Highlight/.test(body))
+    .flatMap(({ sels }) => sels);
   for (const sel of ringSelectors) assert.ok(highlighted.includes(sel), `${sel} has no Highlight ring in forced colors`);
+  assert.deepEqual(splitSelectors(':is(.a, .b):focus-visible, .c'), [':is(.a, .b):focus-visible', '.c'], 'selectors split at the top level only');
 });
 
 test('fee change dates are machine-readable', () => {

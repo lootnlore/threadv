@@ -263,6 +263,46 @@ if (chromium) {
     await context.close();
   });
 
+  test('no verdict from numbers the form rejects or leaves out', async () => {
+    const { context, page } = await open();
+    const stale = () => page.evaluate(() => {
+      const list = document.querySelector('[data-results]');
+      return list.classList.contains('is-stale') && list.inert;
+    });
+    const before = await page.locator('[data-results]').innerHTML();
+    for (const [id, value, want] of [['#f-cost', '-5', /^Check the highlighted field\./], ['#f-price', '12,5', /^Check the highlighted field\./], ['#f-price', '', /^Enter a sell price/]]) {
+      await page.fill(id, value);
+      await settle(page);
+      assert.match(await verdict(page), want, `${id} = "${value}"`);
+      assert.equal(await stale(), true, 'the old results are dimmed and out of reach');
+      assert.equal(await page.locator('[data-results]').innerHTML(), before, 'and not recomputed from a made-up value');
+      await page.fill('#f-price', '40');
+      await page.fill('#f-cost', '8');
+      await settle(page);
+      assert.match(await verdict(page), /^Worth it\./);
+      assert.equal(await stale(), false);
+    }
+    // Two bad fields, one inside the closed Fine-tune panel: the panel opens.
+    await page.fill('#f-cost', 'abc');
+    await page.evaluate(() => {
+      const rate = document.querySelector('#f-tiktokRate');
+      rate.value = 'x';
+      rate.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await settle(page);
+    assert.match(await verdict(page), /^Check the highlighted fields\./);
+    assert.equal(await page.locator('.tune').getAttribute('open'), '');
+    // A hidden field doesn't hold results back: List price mode doesn't use the sell price.
+    await page.fill('#f-cost', '8');
+    await page.fill('#f-tiktokRate', '6');
+    await page.fill('#f-price', 'junk');
+    await page.getByRole('tab', { name: 'List price' }).click();
+    await settle(page);
+    assert.match(await verdict(page), /^List at /);
+    assert.equal(await stale(), false);
+    await context.close();
+  });
+
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
     // One session crossing the switch both ways: text size up, then a wider window.
     const { context, page } = await open('/', { viewport: { width: 320, height: 800 } });
@@ -502,7 +542,14 @@ if (chromium) {
     // that the plain version of the same element doesn't have.
     const { context, page } = await open(null, { viewport: { width: 1280, height: 900 }, forcedColors: 'active' });
     await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
+    await page.fill('#f-label', 'abc'); // an invalid field, left
     await page.focus('#f-price');
+    await settle(page);
+    const invalid = await get(page, '.input-wrap:has(#f-label)');
+    assert.ok(invalid.outline && invalid.outlineStyle === 'double', `invalid field: a double line, unlike a focus ring: ${JSON.stringify(invalid)}`);
+    await page.fill('#f-label', '7');
+    await page.focus('#f-price');
+    await settle(page);
     const plainRow = '.result:not(.is-best):not(.is-focus)';
     const states = [
       ['focused field', '.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)', 'outline'],
@@ -510,39 +557,50 @@ if (chromium) {
       ['current page link', '.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])', 'underline'],
       ["this page's row in the fee list", '.compare .is-current', '.compare li:not(.is-current)', 'outline'],
       ['Best tag', '.tag-best', '.pname', 'outline'],
+      ["the pinned row's This page tag", '.result.is-focus .tag-page', '.pname', 'outline'],
       ['rank badge', '.rank', '.pname', 'outline'],
     ];
     for (const [state, on, off, line] of states) {
       assert.deepEqual([(await get(page, on))[line], (await get(page, off))[line]], [true, false], state);
     }
-    // Row states, shaped so none passes for a focus ring (a solid ring): Best is
-    // a thick border, the pinned row a dashed line outside it.
+    // Row states, shaped so none passes for a focus ring: Best is a thick
+    // border; the pinned row has only its tag (no line of its own).
     const plain = await get(page, plainRow);
     const best = await get(page, '.result.is-best');
     assert.ok(best.border >= plain.border + 2 && !best.outline, `Best result: a thick border, no ring: ${JSON.stringify(best)}`);
     const pinned = await get(page, '.result.is-focus');
-    assert.ok(pinned.outlineStyle === 'dashed' && pinned.outlineOffset >= 0 && pinned.border === plain.border, `pinned result: a dashed line outside: ${JSON.stringify(pinned)}`);
-    assert.ok(!plain.outline);
-    // ...and neither moves a row's contents.
+    assert.ok(!pinned.outline && !plain.outline && pinned.border === plain.border, `pinned result: no line of its own: ${JSON.stringify(pinned)}`);
+    // ...and neither moves a row, or anything in it.
     const places = await page.evaluate(() =>
       [...document.querySelectorAll('.result')].map((row) => {
         const name = row.querySelector('.pname').getBoundingClientRect();
         const box = row.getBoundingClientRect();
-        return `${Math.round(name.left - box.left)},${Math.round(name.top - box.top)}`;
+        return { inRow: `${Math.round(name.left - box.left)},${Math.round(name.top - box.top)}`, left: Math.round(name.left), width: Math.round(box.width) };
       }),
     );
-    assert.equal(new Set(places).size, 1, `names sit in the same place in every row: ${places}`);
-    // A focused row's ring sits inside, clear of even a Best row's thick border.
+    for (const key of ['inRow', 'left', 'width']) assert.equal(new Set(places.map((p) => p[key])).size, 1, `rows differ in ${key}: ${JSON.stringify(places)}`);
+    // A focused row's ring sits inside on every side, clear of even a Best row's
+    // thick border and within the padding (off the contents).
     await page.keyboard.press('Tab'); // keyboard use, so programmatic focus counts as :focus-visible
     const ring = await page.evaluate(() => {
       const row = document.querySelector('.result.is-best');
       const summary = row.querySelector('summary');
       summary.focus();
       const st = getComputedStyle(summary);
-      const inset = summary.getBoundingClientRect().left - row.getBoundingClientRect().left - parseFloat(st.outlineOffset) - parseFloat(st.outlineWidth);
-      return { visible: summary.matches(':focus-visible'), width: parseFloat(st.outlineWidth), inset, border: parseFloat(getComputedStyle(row).borderLeftWidth) };
+      const r = row.getBoundingClientRect();
+      const b = summary.getBoundingClientRect();
+      const offset = parseFloat(st.outlineOffset);
+      const width = parseFloat(st.outlineWidth);
+      const edges = { top: b.top - r.top, right: r.right - b.right, bottom: r.bottom - b.bottom, left: b.left - r.left };
+      const sides = ['top', 'right', 'bottom', 'left'];
+      return {
+        visible: summary.matches(':focus-visible'),
+        width,
+        clearOfBorder: Math.min(...sides.map((side) => edges[side] - offset - width - parseFloat(getComputedStyle(row)[`border${side[0].toUpperCase()}${side.slice(1)}Width`]))),
+        clearOfContent: Math.min(...sides.map((side) => parseFloat(st[`padding${side[0].toUpperCase()}${side.slice(1)}`]) + offset)),
+      };
     });
-    assert.ok(ring.visible && ring.width >= 3 && ring.inset >= ring.border + 1, `the Best row's focus ring keeps clear of its border: ${JSON.stringify(ring)}`);
+    assert.ok(ring.visible && ring.width >= 3 && ring.clearOfBorder >= 1 && ring.clearOfContent >= 1, `the Best row's focus ring sits between its border and its contents: ${JSON.stringify(ring)}`);
     await page.focus('#f-price');
     // Every focus ring, the field's included, is the system focus colour.
     const fieldRing = (await get(page, '.input-wrap:has(#f-price)')).outlineColor;
@@ -562,7 +620,8 @@ if (chromium) {
     const top = await page.getAttribute('.result.is-best', 'data-id');
     await page.goto(`${base}/fees/${top}/`, { waitUntil: 'networkidle' });
     const both = await get(page, '.result.is-best.is-focus');
-    assert.ok(both.border >= 3 && both.outlineStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
+    assert.ok(both.border >= 3 && !both.outline, `pinned and Best: ${JSON.stringify(both)}`);
+    assert.deepEqual(await page.locator('.result.is-best.is-focus .tag').allInnerTexts(), ['BEST', 'THIS PAGE']);
     await context.close();
 
     // Nothing spills at very large text in forced colors either.
