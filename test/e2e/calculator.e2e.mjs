@@ -40,9 +40,17 @@ try {
  */
 function avoidableSplits(root) {
   const found = [];
-  const probe = document.createElement('span');
-  probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap';
-  document.body.append(probe);
+  // The word's unbroken width, measured in a copy placed inside the same
+  // element so it inherits every font property.
+  const naturalWidth = (el, text) => {
+    const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;text-indent:0';
+    probe.textContent = text;
+    el.append(probe);
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    return width;
+  };
   const sizedByParent = (el) => /flex|grid/.test(getComputedStyle(el.parentElement).display);
   const walker = document.createTreeWalker(document.querySelector(root), NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -54,11 +62,6 @@ function avoidableSplits(root) {
       range.setStart(node, word.index);
       range.setEnd(node, word.index + word[0].length);
       if (new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size < 2) continue;
-      // One by one: the font shorthand reads as "" when a longhand it can't
-      // express is set (tabular-nums).
-      const style = getComputedStyle(el);
-      for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontStretch', 'fontVariantNumeric', 'fontFeatureSettings', 'letterSpacing', 'textTransform']) probe.style[k] = style[k];
-      probe.textContent = word[0];
       // Walk up to that box, keeping the padding and borders of the boxes in
       // between (a card's own padding is room the word never had).
       let box = el;
@@ -70,10 +73,9 @@ function avoidableSplits(root) {
       }
       const boxStyle = getComputedStyle(box);
       const room = box.clientWidth - parseFloat(boxStyle.paddingLeft) - parseFloat(boxStyle.paddingRight) - inset;
-      if (probe.getBoundingClientRect().width <= room) found.push(`split word "${word[0]}"`);
+      if (naturalWidth(el, word[0]) <= room) found.push(`split word "${word[0]}"`);
     }
   }
-  probe.remove();
   return [...new Set(found)];
 }
 
@@ -350,6 +352,80 @@ if (chromium) {
         assert.deepEqual(problems, [], `${width}px, text ${text * 100}%, ${state}`);
       }
       await context.close();
+    }
+  });
+
+  test('icons sit on their first line, ranking rows change together, and details line up, at any text size', async () => {
+    // Pseudo-element icons have no DOM box, so read them through DevTools.
+    const iconMids = async (page, selector, type) => {
+      const cdp = await page.context().newCDPSession(page);
+      const { root } = await cdp.send('DOM.getDocument', { depth: -1 });
+      const { nodeIds } = await cdp.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector });
+      const mids = [];
+      for (const nodeId of nodeIds) {
+        const { node } = await cdp.send('DOM.describeNode', { nodeId });
+        const pseudo = (node.pseudoElements ?? []).find((p) => p.pseudoType === type);
+        const { model } = await cdp.send('DOM.getBoxModel', { backendNodeId: pseudo.backendNodeId });
+        mids.push((model.border[1] + model.border[5]) / 2);
+      }
+      await cdp.detach();
+      return mids;
+    };
+    for (const width of [320, 360, 390, 414, 768, 1280]) {
+      for (const text of [1, 1.25, 1.5, 2, 2.5]) {
+        const { context, page } = await open(null, { viewport: { width, height: 800 } });
+        await setTextSize(page, text);
+        const where = `${width}px, text ${text * 100}%`;
+
+        await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+        await page.locator('.result summary').first().click();
+        // Icons beside text (not the inline fallback in narrow boxes) are centred on the first line.
+        const icons = [['.verdict', 'before'], ['.checklist li', 'before'], ['.faq summary', 'after']];
+        for (const [selector, type] of icons) {
+          const mids = await iconMids(page, selector, type);
+          const lines = await page.evaluate(
+            ([sel, type]) =>
+              [...document.querySelectorAll(sel)].map((el) => {
+                const icon = getComputedStyle(el, `::${type}`);
+                if (icon.position === 'static' && icon.display !== 'grid') return null; // inline: flows with the text
+                const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                let t = walker.nextNode();
+                while (!t.textContent.trim()) t = walker.nextNode();
+                const range = document.createRange();
+                range.setStart(t, t.textContent.search(/\S/));
+                range.setEnd(t, t.textContent.search(/\S/) + 1);
+                const r = range.getClientRects()[0];
+                return r.top + r.height / 2;
+              }),
+            [selector, type],
+          );
+          lines.forEach((line, i) => {
+            if (line !== null) assert.ok(Math.abs(mids[i] - line) <= 1.5, `${where}: ${selector} icon ${(mids[i] - line).toFixed(1)}px off its first line`);
+          });
+        }
+        // The fee breakdown starts where the details line does (and, beside the rank badge, the name).
+        const align = await page.evaluate(() => {
+          const row = document.querySelector('.result');
+          const left = (sel) => row.querySelector(sel).getBoundingClientRect().left;
+          return { sub: left('.result-sub'), bd: left('.breakdown dl'), name: left('.pname'), rankShown: row.querySelector('.rank').offsetWidth > 0, wide: innerWidth / parseFloat(getComputedStyle(document.documentElement).fontSize) > 30 };
+        });
+        assert.ok(Math.abs(align.bd - align.sub) <= 1, `${where}: breakdown at ${align.bd}, details line at ${align.sub}`);
+        if (align.rankShown && align.wide) assert.ok(Math.abs(align.sub - align.name) <= 1, `${where}: details line at ${align.sub}, name at ${align.name}`);
+
+        // Fee-page ranking: every row has its amount beside the name or every row under it,
+        // and a shown rank number shares the name's first line.
+        await page.goto(`${base}/fees/facebook/`, { waitUntil: 'domcontentloaded' });
+        const rows = await page.evaluate(() =>
+          [...document.querySelectorAll('.compare li')].map((li) => {
+            const name = li.querySelector('a, strong').getClientRects()[0];
+            const rank = li.querySelector('.cmp-rank').getBoundingClientRect();
+            return { under: li.querySelector('.num').getBoundingClientRect().top >= name.bottom - 1, rankShown: rank.width > 1, rankTop: rank.top, nameTop: name.top };
+          }),
+        );
+        assert.equal(new Set(rows.map((r) => r.under)).size, 1, `${where}: some amounts beside their names, some under`);
+        for (const r of rows) if (r.rankShown) assert.ok(Math.abs(r.rankTop - r.nameTop) <= 2, `${where}: a rank number off its name's line`);
+        await context.close();
+      }
     }
   });
 

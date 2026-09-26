@@ -1,6 +1,6 @@
 import { PLATFORMS, FEES_VERIFIED, andList } from '../engine/fees.mjs';
 import { normalizeInputs, evaluate, DEFAULTS } from '../engine/calc.mjs';
-import { esc, money, percent } from '../engine/render.mjs';
+import { esc, money, percent, competitionRanks } from '../engine/render.mjs';
 import { calculator, crosslisters, newsletter, feeChanges, faq, breadcrumbs, verifiedLabel } from './components.mjs';
 
 const EXAMPLE_PRICES = [10, 25, 50, 100, 250];
@@ -128,13 +128,16 @@ export function feePage(config, platform) {
     return `<tr><th scope="row" class="num">${money(r.price)}</th><td class="num">${money(r.feeTotal)}</td><td class="num">${percent(r.feeRate)}</td><td class="num">${money(r.payout)}</td></tr>`;
   }).join('');
 
-  const others = PLATFORMS.map((p) => at(p, 50))
-    .sort((a, b) => b.payout - a.payout)
+  // Ranked by payout; equal payouts share a rank (written out, as a CSS
+  // counter can't show a tie).
+  const byPayout = PLATFORMS.map((p) => at(p, 50)).sort((a, b) => b.payout - a.payout);
+  const ranks = competitionRanks(byPayout.map((r) => r.payout));
+  const others = byPayout
     .map(
-      (r) =>
-        `<li${r.id === platform.id ? ' class="is-current"' : ''}><span class="cmp-row">${
+      (r, i) =>
+        `<li${r.id === platform.id ? ' class="is-current"' : ''}><span class="cmp-rank">${ranks[i]}.</span> ${
           r.id === platform.id ? `<strong>${esc(r.name)}</strong>` : `<a href="/fees/${r.id}/">${esc(r.name)}</a>`
-        } <span class="num">${money(r.payout)}</span></span></li>`,
+        } <span class="num">${money(r.payout)}</span></li>`,
     )
     .join('');
 
@@ -209,7 +212,7 @@ ${calculator({ focus: platform.id })}
 <section class="section" aria-labelledby="cmp-title">
 <div class="wrap narrow">
 <h2 id="cmp-title">What you keep from a $50 sale, by marketplace</h2>
-<ol class="compare" role="list">${others}</ol>
+<ul class="compare" role="list">${others}</ul>
 <p class="fineprint">Before shipping labels and item cost. ${buyerPaysNote}</p>
 </div>
 </section>

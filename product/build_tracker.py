@@ -438,8 +438,8 @@ def build_inventory(wb, verify=False):
     ws["L4"].comment = Comment("Estimated from the Fees tab. For exact records, type the fee from your payout in Actual fees.", author)
     ws["M4"].comment = Comment("Optional. When filled, it replaces the estimate for this sale.", author)
     ws["F4"].comment = Comment(
-        "Pick from the list (Settings tab). Turns red when a sale has no marketplace the fees can be worked out for: "
-        "its payout and profit stay blank until you pick one.", author)
+        "Pick from the list (Settings tab). Turns red when a sale has no marketplace from the list: "
+        "its fees, payout and profit stay blank (even with Actual fees) until you pick one.", author)
     ignored = f" Ignored for {buyer_ships_names()}, where the buyer pays the label." if buyer_ships_names() else ""
     taxed = f" {tax_fee_names()} charge part of their fees on it." if tax_fee_names() else ""
     ws["I4"].comment = Comment(f"What the buyer paid you for shipping. Leave blank for free shipping.{ignored}", author)
@@ -458,9 +458,10 @@ def build_inventory(wb, verify=False):
         # Tax is rounded to the cent before fees apply, exactly like the website engine.
         ws[f"T{r}"] = f'=IF(OR($F{r}="",$H{r}=""),"",$H{r}+{ship}+ROUND(($H{r}+{ship})*TaxRate,2))'
         ws[f"L{r}"] = fee_formula(r)
-        ws[f"N{r}"] = f'=IF($H{r}="","",IF($M{r}<>"",$M{r},$L{r}))'
-        # No fee (Sold on blank or not in the Platforms list): payout and profit
-        # stay blank rather than count a fee-free sale. Sold on is highlighted.
+        # No marketplace from the list (Sold on blank or unknown, so no estimate):
+        # no fee either, even with Actual fees, so the sale stays out of every
+        # total (the by-marketplace table couldn't place it). Sold on is highlighted.
+        ws[f"N{r}"] = f'=IF(OR($H{r}="",$L{r}=""),"",IF($M{r}<>"",$M{r},$L{r}))'
         ws[f"O{r}"] = f'=IF(OR($H{r}="",$N{r}=""),"",$H{r}+{ship}-$N{r})'
         ws[f"P{r}"] = f'=IF($O{r}="","",$O{r}-{label}-N($E{r})-N($K{r}))'
         ws[f"Q{r}"] = f'=IF(OR($P{r}="",N($E{r})=0),"",$P{r}/$E{r})'
@@ -485,11 +486,13 @@ def build_inventory(wb, verify=False):
             for col, value in enumerate(row, start=1):
                 ws.cell(row=r, column=col, value=value)
         # Sales whose fee can't be worked out: payout and profit must stay blank.
+        # The unknown one has Actual fees too: without a listed marketplace they don't count either.
         for i, market in enumerate(NO_FEE_CASES):
             r = no_fee_row(i)
-            row = ["VERIFY", "no fee", "Other", as_of(24), VERIFY_COST, market, as_of(5), 45, 5, VERIFY_LABEL]
+            row = ["VERIFY", "no fee", "Other", as_of(24), VERIFY_COST, market, as_of(5), 45, 5, VERIFY_LABEL, None, None, 3 if market else None]
             for col, value in enumerate(row, start=1):
-                ws.cell(row=r, column=col, value=value)
+                if value is not None:  # L is a formula
+                    ws.cell(row=r, column=col, value=value)
         for i, market in enumerate(NO_DATE_CASES):
             row = ["VERIFY", "no date", "Other", as_of(24), VERIFY_COST, market, None, 45, 5, VERIFY_LABEL]
             for col, value in enumerate(row, start=1):
@@ -603,12 +606,22 @@ def build_mileage(wb, verify=False):
 INV = "Inventory!"
 
 
+def inv(col):
+    """The whole data range of one Inventory column, for SUMIFS/COUNTIFS."""
+    return f"{INV}${col}${FIRST}:${col}${RANGE_END}"
+
+
+def between(dates, start, end):
+    """COUNTIFS/SUMIFS criteria pair: a date in `dates` is on or after `start` and before `end`."""
+    return f'{dates},">="&{start},{dates},"<"&{end}'
+
+
 def in_dash_year(dates):
     """COUNTIFS/SUMIFS criteria pair: a date in `dates` falls in the Dashboard year."""
-    return f'{dates},">="&DATE(DashYear,1,1),{dates},"<"&DATE(DashYear+1,1,1)'
+    return between(dates, "DATE(DashYear,1,1)", "DATE(DashYear+1,1,1)")
 
 
-SOLD_IN_YEAR = in_dash_year(f"{INV}$G${FIRST}:$G${RANGE_END}")
+SOLD_IN_YEAR = in_dash_year(inv("G"))
 
 
 def count_text(count, one, many):
@@ -625,16 +638,40 @@ def build_checks(wb):
     style(ws["L8"], f_section).value = "Data checks"
     checks = [
         ("NoMarketplaceSales", "Sales in the Dashboard year with no marketplace from the Settings list",
-         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$N${FIRST}:$N${RANGE_END},"",{SOLD_IN_YEAR})'),
+         f'=COUNTIFS({inv("H")},"<>",{inv("N")},"",{SOLD_IN_YEAR})'),
         ("HalfEnteredSales", "Sales missing a date sold or a price (any year)",
-         f'=COUNTIFS({INV}$H${FIRST}:$H${RANGE_END},"<>",{INV}$G${FIRST}:$G${RANGE_END},"")'
-         f'+COUNTIFS({INV}$G${FIRST}:$G${RANGE_END},"<>",{INV}$H${FIRST}:$H${RANGE_END},"")'),
+         f'=COUNTIFS({inv("H")},"<>",{inv("G")},"")'
+         f'+COUNTIFS({inv("G")},"<>",{inv("H")},"")'),
     ]
     for i, (name, label, formula) in enumerate(checks):
         style(ws[f"L{9 + i}"], f_body, border=BOX).value = label
         style(ws[f"M{9 + i}"], f_calc, CALC_FILL, "0", border=BOX).value = formula  # "0", not "-": the note says both should be 0
         define(wb, name, f"Settings!$M${9 + i}")
     style(ws["L11"], f_note).value = "Both should be 0. The Dashboard warns when they are not."
+
+
+def warning_formula(no_marketplace, half_entered):
+    """Dashboard E3: the sales left out of the totals, in words (blank when there are none)."""
+    n, h = no_marketplace, half_entered
+    return (
+        f'=IF({n}+{h}=0,"",TRIM('
+        f'IF({n}>0,{count_text(n, "sale", "sales")}&" in "&DashYear&IF({n}=1," has"," have")&" no marketplace from the Settings list. ","")'
+        f'&IF({h}>0,{count_text(h, "sale is", "sales are")}&" missing a date sold or a price. ","")'
+        '&"Left out of the totals: see the red cells on Inventory."))'
+    )
+
+
+# Counts (no marketplace, half-entered) the verify build writes the warning for,
+# so singular, plural and blank wording are all checked.
+WARNING_CASES = [(0, 0), (1, 0), (0, 1), (1, 1), (2, 3)]
+
+
+def build_warning_checks(wb):
+    """Verify build only: the Dashboard warning worded for each of WARNING_CASES."""
+    ws = wb.create_sheet("Warning checks")
+    for i, (n, h) in enumerate(WARNING_CASES, start=1):
+        ws[f"A{i}"], ws[f"B{i}"] = n, h
+        ws[f"C{i}"] = warning_formula(f"A{i}", f"B{i}")
 
 
 def build_dashboard(wb, verify=False):
@@ -653,27 +690,21 @@ def build_dashboard(wb, verify=False):
 
     # Totals count only sales whose fee could be worked out (a number in Fees);
     # the others are left out entirely (sales, costs and counts) and flagged in E3.
-    counted = f'{INV}$N${FIRST}:$N${RANGE_END},">=0"'
+    counted = f'{inv("N")},">=0"'
     in_year = f"{SOLD_IN_YEAR},{counted}"
 
     # KPI tiles
     # Sales left out of the totals (counted on Settings > Data checks).
-    style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = (
-        '=IF(NoMarketplaceSales+HalfEnteredSales=0,"",TRIM('
-        f'IF(NoMarketplaceSales>0,{count_text("NoMarketplaceSales", "sale", "sales")}&" in "&DashYear&'
-        f'IF(NoMarketplaceSales=1," has"," have")&" no marketplace from the Settings list. ","")'
-        f'&IF(HalfEnteredSales>0,{count_text("HalfEnteredSales", "sale is", "sales are")}&" missing a date sold or a price. ","")'
-        '&"Left out of the totals: see the red cells on Inventory."))'
-    )
+    style(ws["E3"], Font(name=FONT, size=10, bold=True, color="B3261E")).value = warning_formula("NoMarketplaceSales", "HalfEnteredSales")
     kpis = [
         ("Items sold", f"=COUNTIFS({in_year})", INT),
-        ("Sales incl. shipping", f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{in_year})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
-        ("Marketplace fees", f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{in_year})", USD0),
-        ("Profit", f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{in_year})", USD0),
+        ("Sales incl. shipping", f"=SUMIFS({inv('O')},{in_year})+SUMIFS({inv('N')},{in_year})", USD0),
+        ("Marketplace fees", f"=SUMIFS({inv('N')},{in_year})", USD0),
+        ("Profit", f"=SUMIFS({inv('P')},{in_year})", USD0),
         ("Avg profit per sale", '=IF(A6=0,"",D6/A6)', USD),
-        ("Avg days to sell", f'=IFERROR(AVERAGEIFS({INV}$R${FIRST}:$R${RANGE_END},{in_year}),"")', "0"),
-        ("Sell-through (all time)", f'=IFERROR(COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"Sold")/(COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"Sold")+COUNTIF({INV}$S${FIRST}:$S${RANGE_END},"In stock")),"")', PCT),
-        ("Unsold stock at cost", f'=SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{INV}$S${FIRST}:$S${RANGE_END},"In stock")', USD0),
+        ("Avg days to sell", f'=IFERROR(AVERAGEIFS({inv("R")},{in_year}),"")', "0"),
+        ("Sell-through (all time)", f'=IFERROR(COUNTIF({inv("S")},"Sold")/(COUNTIF({inv("S")},"Sold")+COUNTIF({inv("S")},"In stock")),"")', PCT),
+        ("Unsold stock at cost", f'=SUMIFS({inv("E")},{inv("S")},"In stock")', USD0),
     ]
     # Two rows of four tiles: labels on 5/8, values on 6/9.
     for i, (label, formula, fmt) in enumerate(kpis):
@@ -696,12 +727,12 @@ def build_dashboard(wb, verify=False):
         style(ws[f"{col}13"], f_head, HEAD_FILL, border=BOX, align=Alignment(horizontal="center")).value = text
     for m in range(1, 13):
         r = 13 + m
-        month = f'{INV}$G${FIRST}:$G${RANGE_END},">="&$A{r},{INV}$G${FIRST}:$G${RANGE_END},"<"&DATE(YEAR($A{r}),MONTH($A{r})+1,1),{counted}'
+        month = between(inv("G"), f"$A{r}", f"DATE(YEAR($A{r}),MONTH($A{r})+1,1)") + f",{counted}"
         style(ws[f"A{r}"], f_label, fmt="mmmm", border=BOX, align=Alignment(horizontal="left")).value = f"=DATE(DashYear,{m},1)"
         style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({month})"
-        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{month})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{month})"
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{month})"
-        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{month})"
+        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('O')},{month})+SUMIFS({inv('N')},{month})"
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('N')},{month})"
+        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('P')},{month})"
         style(ws[f"F{r}"], f_calc, fmt=PCT, border=BOX).value = f'=IF(C{r}=0,"",E{r}/C{r})'
     style(ws["A26"], f_label, SOFT_FILL, border=BOX).value = "Year total"
     for col, fmt in zip("BCDE", [INT, USD0, USD0, USD0]):
@@ -734,14 +765,14 @@ def build_dashboard(wb, verify=False):
         style(ws[f"{col}30"], f_head, HEAD_FILL, border=BOX, align=Alignment(horizontal="center", wrap_text=True)).value = text
     for i in range(len(platform_names())):
         r = 31 + i
-        by = f"{INV}$F${FIRST}:$F${RANGE_END},$A{r},{in_year}"
+        by = f"{inv('F')},$A{r},{in_year}"
         style(ws[f"A{r}"], f_label, border=BOX).value = f"=INDEX(Platforms,{i + 1})"
         style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({by})"
-        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$O${FIRST}:$O${RANGE_END},{by})+SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{by})"
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$N${FIRST}:$N${RANGE_END},{by})"
-        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{by})"
+        style(ws[f"C{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('O')},{by})+SUMIFS({inv('N')},{by})"
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('N')},{by})"
+        style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('P')},{by})"
         style(ws[f"F{r}"], f_calc, fmt=USD, border=BOX).value = f'=IF(B{r}=0,"",E{r}/B{r})'
-        style(ws[f"G{r}"], f_calc, fmt="0", border=BOX).value = f'=IFERROR(AVERAGEIFS({INV}$R${FIRST}:$R${RANGE_END},{by}),"")'
+        style(ws[f"G{r}"], f_calc, fmt="0", border=BOX).value = f'=IFERROR(AVERAGEIFS({inv("R")},{by}),"")'
     last_market = 30 + len(platform_names())
 
     # By source (all time)
@@ -753,11 +784,11 @@ def build_dashboard(wb, verify=False):
     for i in range(len(SOURCES)):
         r = top + 2 + i
         style(ws[f"A{r}"], f_label, border=BOX).value = f"=INDEX(Sources,{i + 1})"
-        style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({INV}$C${FIRST}:$C${RANGE_END},$A{r})"
-        style(ws[f"C{r}"], f_calc, fmt=INT, border=BOX).value = f'=COUNTIFS({INV}$C${FIRST}:$C${RANGE_END},$A{r},{INV}$S${FIRST}:$S${RANGE_END},"Sold")'
-        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{INV}$C${FIRST}:$C${RANGE_END},$A{r})"
+        style(ws[f"B{r}"], f_calc, fmt=INT, border=BOX).value = f"=COUNTIFS({inv('C')},$A{r})"
+        style(ws[f"C{r}"], f_calc, fmt=INT, border=BOX).value = f'=COUNTIFS({inv("C")},$A{r},{inv("S")},"Sold")'
+        style(ws[f"D{r}"], f_calc, fmt=USD0, border=BOX).value = f"=SUMIFS({inv('E')},{inv('C')},$A{r})"
         style(ws[f"E{r}"], f_calc, fmt=USD0, border=BOX).value = (
-            f'=SUMIFS({INV}$P${FIRST}:$P${RANGE_END},{INV}$C${FIRST}:$C${RANGE_END},$A{r},{INV}$S${FIRST}:$S${RANGE_END},"Sold")'
+            f'=SUMIFS({inv("P")},{inv("C")},$A{r},{inv("S")},"Sold")'
         )
         style(ws[f"F{r}"], f_calc, fmt=PCT, border=BOX).value = f'=IF(B{r}=0,"",C{r}/B{r})'
     last_source = top + 1 + len(SOURCES)
@@ -784,12 +815,12 @@ def build_dashboard(wb, verify=False):
     rows = [
         ("Gross sales (item + shipping charged)", "=C26"),
         ("Marketplace fees", "=-D26"),
-        ("Cost of items sold", f"=-SUMIFS({INV}$E${FIRST}:$E${RANGE_END},{in_year})"),
+        ("Cost of items sold", f"=-SUMIFS({inv('E')},{in_year})"),
         # Labels on marketplaces where the buyer pays them are ignored, as on each row.
-        ("Shipping labels", f"=-(SUMIFS({INV}$J${FIRST}:$J${RANGE_END},{in_year})" + "".join(
-            f"-SUMIFS({INV}$J${FIRST}:$J${RANGE_END},{INV}$F${FIRST}:$F${RANGE_END},INDEX(Platforms,{i}),{in_year})" for i in buyer_ships()
+        ("Shipping labels", f"=-(SUMIFS({inv('J')},{in_year})" + "".join(
+            f"-SUMIFS({inv('J')},{inv('F')},INDEX(Platforms,{i}),{in_year})" for i in buyer_ships()
         ) + ")"),
-        ("Other per-item costs", f"=-SUMIFS({INV}$K${FIRST}:$K${RANGE_END},{in_year})"),
+        ("Other per-item costs", f"=-SUMIFS({inv('K')},{in_year})"),
         ("Business expenses (Expenses tab)", f"=-B{exp_total}"),
         ("Mileage deduction (Mileage tab)", f'=-SUMIFS(Mileage!$G${FIRST}:$G${RANGE_END},{in_dash_year(f"Mileage!$A${FIRST}:$A${RANGE_END}")})'),
     ]
@@ -867,6 +898,8 @@ def build(verify=False):
     build_settings(wb)
     build_checks(wb)
     build_dashboard(wb, verify)
+    if verify:
+        build_warning_checks(wb)
     wb.calculation.fullCalcOnLoad = True
     for ws in wb.worksheets:
         ws.sheet_properties.tabColor = BRAND if ws.title in ("Start Here", "Dashboard") else "B8C4BF"

@@ -81,6 +81,19 @@ def check_features(path):
     return problems
 
 
+def expected_warning(no_marketplace, half_entered, year):
+    """What Dashboard E3 should say for these counts."""
+    def sales(n, one, many):
+        return f"1 {one}" if n == 1 else f"{n} {many}"
+    parts = []
+    if no_marketplace:
+        verb = "has" if no_marketplace == 1 else "have"
+        parts.append(f"{sales(no_marketplace, 'sale', 'sales')} in {year} {verb} no marketplace from the Settings list.")
+    if half_entered:
+        parts.append(f"{sales(half_entered, 'sale is', 'sales are')} missing a date sold or a price.")
+    return " ".join(parts + ["Left out of the totals: see the red cells on Inventory."]) if parts else ""
+
+
 def main():
     if not shutil.which("soffice"):
         sys.exit("LibreOffice Calc (soffice) is required to calculate the workbook. Install it and re-run.")
@@ -117,7 +130,7 @@ def main():
     before = len(problems)
     for i, market in enumerate(build_tracker.NO_FEE_CASES):
         r = build_tracker.no_fee_row(i)
-        for col in "LOP":
+        for col in "LNOP":
             if inv[f"{col}{r}"].value not in (None, ""):
                 problems.append(f"Sold on {market!r}: {col}{r} should be blank, sheet shows {inv[f'{col}{r}'].value!r}")
     # Half-entered sales are flagged too.
@@ -129,18 +142,19 @@ def main():
             status = inv[f"S{row_of(i)}"].value
             if status != want:
                 problems.append(f"{market} sale: Status reads {status!r}, expected {want!r}")
-    no_fee, half = len(build_tracker.NO_FEE_CASES), len(build_tracker.NO_DATE_CASES) + len(build_tracker.NO_PRICE_CASES)
-    warning = wb["Dashboard"]["E3"].value or ""
-    sales = lambda n, one, many: f"1 {one}" if n == 1 else f"{n} {many}"
-    year = wb["Dashboard"]["B3"].value
-    for part in (f"{sales(no_fee, 'sale', 'sales')} in {year} {'has' if no_fee == 1 else 'have'} no marketplace from the Settings list",
-                 f"{sales(half, 'sale is', 'sales are')} missing a date sold or a price"):
-        if part not in warning:
-            problems.append(f"Dashboard warning reads {warning!r}; expected it to say {part!r}")
-    # ...and they are left out everywhere: counts and every cost line of the tax
-    # summary include exactly the sales with a fee and a date in the Dashboard year.
+    # The Dashboard warning counts them, worded right for any count.
     dash = wb["Dashboard"]
     year = dash["B3"].value
+    no_fee, half = len(build_tracker.NO_FEE_CASES), len(build_tracker.NO_DATE_CASES) + len(build_tracker.NO_PRICE_CASES)
+    checks = wb["Warning checks"]
+    worded = [(dash["E3"].value, no_fee, half)] + [
+        (checks[f"C{i}"].value, n, h) for i, (n, h) in enumerate(build_tracker.WARNING_CASES, start=1)
+    ]
+    for got, n, h in worded:
+        if (got or "") != expected_warning(n, h, year):
+            problems.append(f"Dashboard warning for {n} + {h} sales reads {got!r}; expected {expected_warning(n, h, year)!r}")
+    # ...and they are left out everywhere: counts and every cost line of the tax
+    # summary include exactly the sales with a fee and a date in the Dashboard year.
 
     def in_totals(r):
         sold = inv[f"G{r}"].value

@@ -209,6 +209,7 @@ svg {
 
 .more::after {
   content: ' \2192';
+  content: ' \2192' / ''; /* decorative */
 }
 
 /* ---------- Header & footer ---------- */
@@ -879,17 +880,19 @@ select {
 
 /* Icons beside text (verdict, checklist): an icon column sized in rem, so it
    scales with the text, and a minmax(0) text column that wraps like a
-   paragraph. The icon is centred on the first line (--nudge). When the box is
+   paragraph. Baseline alignment puts the icon's glyph on the first line's
+   baseline, which centres the circle on that line; the glyph is smaller than
+   the text, so it sits a little low, and a nudge of about a third of the
+   size difference (0.35 x (1 - ratio) / ratio, in the glyph's em) lifts it
+   back to the middle. When the box is
    narrow for the text size, the icon goes inline instead: the text runs under
    it, and a word that can't fit beside it moves to the next line whole
    (a line may break after an inline-block) rather than splitting. */
 .verdict {
   --icon: 1.5rem;
-  --line: 1.428rem; /* 1.02rem x 1.4 */
-  --nudge: calc((var(--line) - var(--icon)) / 2);
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
-  align-items: start;
+  align-items: baseline;
   column-gap: 10px;
   margin-bottom: 14px;
   padding: 14px 16px;
@@ -904,10 +907,10 @@ select {
   place-items: center;
   width: var(--icon);
   height: var(--icon);
-  margin-top: var(--nudge);
   border-radius: 50%;
-  font-size: 0.85rem;
+  font-size: 0.83em;
   font-weight: 900;
+  translate: 0 -0.07em;
 }
 
 @container (max-width: 12em) {
@@ -1048,7 +1051,20 @@ select {
   color: var(--brand-strong);
 }
 
+/* A pinned row's rank in words: for screen readers, and on screen only when
+   the rank badge is hidden (very large text, below). Normal case, so it is
+   read as words ("5th", not "5 T H"). */
 .tag-rank {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
   background: var(--surface);
   color: var(--muted);
   box-shadow: inset 0 0 0 1px var(--line-strong);
@@ -1110,6 +1126,21 @@ select {
     display: none;
   }
 
+  .tag-rank {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 2px 8px;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+  }
+
+  .breakdown {
+    padding-left: 14px;
+  }
+
   .result-main > .figure,
   .results.stacked .result-main > .figure {
     grid-column: 1 / -1;
@@ -1160,7 +1191,7 @@ select {
 }
 
 .breakdown {
-  padding: 0 14px 10px 50px;
+  padding: 0 14px 10px calc(14px + var(--rank) + 10px); /* in line with the name */
 }
 
 @media (max-width: 30em) {
@@ -1342,11 +1373,9 @@ select {
 
 .checklist li {
   --icon: 1.375rem;
-  --line: 1.55rem;
-  --nudge: calc((var(--line) - var(--icon)) / 2);
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
-  align-items: start;
+  align-items: baseline;
   column-gap: 10px;
 }
 
@@ -1357,12 +1386,12 @@ select {
   place-items: center;
   width: var(--icon);
   height: var(--icon);
-  margin-top: var(--nudge);
   border-radius: 50%;
   background: var(--brand-soft);
   color: var(--brand-strong);
-  font-size: 0.75rem;
+  font-size: 0.75em;
   font-weight: 900;
+  translate: 0 -0.12em;
 }
 
 @container (max-width: 12em) {
@@ -1452,10 +1481,11 @@ select {
   /* Plain text with the +/− icon out of the flow, so a question wraps like
      any paragraph (and breaks a word only when it can't fit a line). Not a
      grid like the verdict: some browsers ignore display on <summary>. */
+  --pad-y: 13px;
   position: relative;
   display: block;
   min-height: 52px;
-  padding: 13px calc(18px + 1.75rem) 13px 18px; /* right: the icon's room, in rem so it scales */
+  padding: var(--pad-y) calc(18px + 1.75rem) var(--pad-y) 18px; /* right: the icon's room, in rem so it scales */
   font-weight: 700;
   cursor: pointer;
   list-style: none;
@@ -1468,11 +1498,12 @@ select {
 .faq summary::after {
   content: '+';
   content: '+' / ''; /* decorative: the summary already says open or closed */
+  /* At the question's own font size, its box is one line of the question:
+     placed at the padding, it sits on the first line. Scaled up to draw. */
   position: absolute;
-  top: 13px; /* the padding: level with the first line, */
+  top: var(--pad-y);
   right: 18px;
-  line-height: 1.55rem; /* and exactly as tall as it */
-  font-size: 1.4rem;
+  transform: scale(1.4);
   font-weight: 400;
   color: var(--brand);
 }
@@ -1493,6 +1524,8 @@ select {
     content: ' +';
     content: ' +' / '';
     position: static;
+    transform: none;
+    font-size: 1.4rem;
     line-height: 1;
   }
 
@@ -1527,6 +1560,7 @@ select {
 
 .crumbs li + li::before {
   content: '/';
+  content: '/' / ''; /* decorative: the list separates the steps */
   margin-right: 4px;
   color: var(--line-strong);
 }
@@ -1611,47 +1645,36 @@ table.data {
   }
 }
 
+/* Rank, name (wraps between words) and amount. The rank column fits "10.";
+   amounts are right-aligned. The switch points are in em (they scale with
+   the text) and apply to the whole list, so every row changes together.
+   They leave room for the longest name word, "Marketplace" (7em in a wide
+   font; the page tests check it never splits): below 14.5em every amount
+   moves under its name, below 10em the rank number steps aside (still read
+   by screen readers). */
 .compare {
+  container-type: inline-size;
   list-style: none;
   margin: 16px 0;
   padding: 0;
-  counter-reset: cmp;
 }
 
-/* Rank, then name and amount. The name wraps between words; the amount moves
-   under it only when the name's longest word and the amount can't share a
-   line, and the rank stands alone only when that word can't fit beside it. */
 .compare li {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1.75em minmax(0, 1fr) auto;
   align-items: baseline;
-  column-gap: 0.5em;
+  column-gap: 0.6em;
   padding: 10px 4px;
   border-bottom: 1px solid var(--line);
-  counter-increment: cmp;
 }
 
-.compare li::before {
-  content: counter(cmp) '.';
-  min-width: 1.25em;
+.cmp-rank {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
-.cmp-row {
-  flex: 1 1 0%;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 12px;
-}
-
-.cmp-row > :first-child {
-  flex: 1 1 0%;
-}
-
 .compare .num {
-  margin-left: auto;
+  justify-self: end;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -1660,6 +1683,35 @@ table.data {
   background: var(--sunken);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 8px;
+}
+
+@container (max-width: 14.5em) {
+  .compare li {
+    grid-template-columns: 1.75em minmax(0, 1fr);
+  }
+
+  .compare .num {
+    grid-column: 2;
+  }
+}
+
+@container (max-width: 10em) {
+  .compare li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cmp-rank {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .compare .num {
+    grid-column: 1;
+  }
 }
 
 .notes,
