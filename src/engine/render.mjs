@@ -5,25 +5,29 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
+import { MODE_INPUTS } from './calc.mjs';
+
+/** The sale price or item cost a mode doesn't work from (hidden in the form). */
+const unused = (mode) => ['price', 'cost'].filter((key) => !MODE_INPUTS[mode].includes(key));
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
   profit: {
     label: 'Profit',
     hint: 'Enter a price and what you paid to see what you would keep on each marketplace.',
-    hidden: [],
+    hidden: unused('profit'),
     targetHint: 'Worth-it threshold',
   },
   maxbuy: {
     label: 'Max buy',
     hint: 'Enter what it sells for. You will see the most you can pay and still hit your minimum profit.',
-    hidden: ['cost'],
+    hidden: unused('maxbuy'),
     targetHint: 'Profit you want to keep',
   },
   price: {
     label: 'List price',
     hint: 'Enter what you paid. You will see the lowest list price on each marketplace that hits your minimum profit.',
-    hidden: ['price'],
+    hidden: unused('price'),
     targetHint: 'Profit you want to keep',
   },
 };

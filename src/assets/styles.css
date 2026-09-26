@@ -981,13 +981,6 @@ select:focus-visible {
   gap: 8px;
 }
 
-/* Rows for the last valid numbers, while a field is being fixed (the prompt
-   above says so in words; see showPending in app.js): grey, not faded, so
-   every text keeps its contrast. */
-.results.is-stale {
-  filter: grayscale(1);
-}
-
 .result {
   --row-border: 1px;
   --best-border: 3px; /* a Best row's border in High Contrast (below) */

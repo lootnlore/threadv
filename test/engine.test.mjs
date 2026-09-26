@@ -565,6 +565,7 @@ test('inputsUsedBy lists every input a platform reads, in every mode', () => {
     }
   }
   assert.ok(moved > 1000, `the changes really move the figures (${moved})`);
+  assert.deepEqual(inputsUsedBy(P.ebay, 'constructor'), inputsUsedBy(P.ebay, 'profit'), 'an unknown mode, even a built-in name, is profit');
   // Modes: Max buy works out the cost and List price the price, so neither reads it.
   for (const p of PLATFORMS) {
     assert.ok(!inputsUsedBy(p, 'maxbuy').includes('cost') && !inputsUsedBy(p, 'price').includes('price'));

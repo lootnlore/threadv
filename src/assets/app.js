@@ -12,7 +12,7 @@
 //   never reads or writes the visitor's saved settings.
 import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, inputsUsedBy, parseNumber, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
-import { PLATFORMS, PLATFORM_BY_ID, usdText, andList } from '../engine/fees.mjs';
+import { PLATFORMS, PLATFORM_BY_ID, usdText, andList, roundCents } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
 const SHARE_FLAG = 's';
@@ -21,6 +21,7 @@ const TUNE_KEYS = ['taxRate', 'other', ...PLATFORMS.flatMap((p) => p.options ?? 
 const NUMERIC = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => typeof DEFAULTS[key] === 'number');
 const LINK_KEYS = [SHARE_FLAG, 'mode', ...MAIN_KEYS];
 const ALL_IDS = PLATFORMS.map((p) => p.id);
+const PENDING_DELAY = 800; // ms of pause before a half-typed field replaces the results with a prompt
 
 const storage = {
   read() {
@@ -68,7 +69,7 @@ function problemWith(key, raw, { sellPrice = false } = {}) {
   if (!(Number.isFinite(n) && n >= 0 && n <= max)) {
     return isMoney ? `Enter an amount from $0 to ${usdText(max)}.` : `Enter a percentage from 0 to ${max}.`;
   }
-  return sellPrice && Math.round(n * 100) < 1 ? 'Enter a sell price of at least $0.01.' : '';
+  return sellPrice && roundCents(n * 100) === 0 ? 'Enter a sell price of at least $0.01.' : ''; // the engine's rounding
 }
 
 function setup(root) {
@@ -95,8 +96,10 @@ function setup(root) {
   let mode = 'profit';
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
+  let pendingShown = false; // the prompt is up in place of the results
+  let pendingTimer = 0;
+  let openBefore = null; // breakdowns that were open when the results were cleared
   let badBefore = new Set(); // fields flagged at the last render (reset by load)
-  let resultsFor = null; // the mode the rows on screen were worked out for, on this link (null: none, or the page's own example)
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -117,7 +120,9 @@ function setup(root) {
   function readForm() {
     const data = new FormData(form);
     const values = {};
-    for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) values[key] = data.get(key) ?? '';
+    // A setting with no field on the page (say, a new option declared before its
+    // field is added) keeps its default rather than reading as empty (0%).
+    for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) values[key] = field(key) ? (data.get(key) ?? '') : DEFAULTS[key];
     values.depopBoost = data.has('depopBoost');
     return { values, platforms: data.getAll('platform') };
   }
@@ -126,7 +131,7 @@ function setup(root) {
 
   function load() {
     badBefore = new Set(); // a new link's bad fields open Fine-tune again
-    resultsFor = null; // and the rows on screen were for other numbers
+    openBefore = null;
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
@@ -189,8 +194,9 @@ function setup(root) {
   /**
    * Flags each numeric field with what is wrong (its hint says it) and returns
    * what holds the results back, [{ key, problem, missing }]: bad values the
-   * compared marketplaces read in this mode (inputsUsedBy), and a sell price
-   * the mode needs but that isn't typed yet (neutral: not an error yet).
+   * compared marketplaces read in this mode (inputsUsedBy) and that are on
+   * show, and a sell price the mode needs but that isn't typed yet (neutral:
+   * not an error yet).
    */
   function validate(values, ids, input) {
     const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id], mode, input)));
@@ -198,9 +204,10 @@ function setup(root) {
     for (const key of NUMERIC) {
       const el = field(key);
       if (!el) continue;
+      const shown = !el.closest('[hidden]');
       const problem = problemWith(key, values[key], { sellPrice: key === 'price' && used.has('price') });
       const missing = !problem && key === 'price' && used.has('price') && String(values.price).trim() === '';
-      if ((problem || missing) && used.has(key)) blocking.push({ key, problem, missing });
+      if ((problem || missing) && used.has(key) && shown) blocking.push({ key, problem, missing });
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -213,64 +220,73 @@ function setup(root) {
     return blocking;
   }
 
+  const openIds = () => [...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id);
+
   /**
    * While the numbers can't be worked out, the verdict asks for what's
-   * missing, in a neutral tone, and Enter goes to `fix`. Rows worked out for
-   * this mode on this link stay put (open breakdowns and the layout with them),
-   * dimmed, and the prompt says they are for the last valid numbers; any
-   * others would mislead, so the list is hidden. No link to share either.
+   * missing, in a neutral tone, and the results (and the link to share them)
+   * go: rows for other numbers would mislead. The breakdowns that were open
+   * come back with the results.
    */
-  function showPending(html, fix, { keepRows = true } = {}) {
-    const keep = keepRows && resultsFor === mode && resultsEl.children.length > 0;
+  function showPending(html) {
+    if (!pendingShown) openBefore = new Set(openIds());
     verdictEl.className = 'verdict verdict-wait';
-    verdictEl.innerHTML = `<span>${html}${keep ? ' The results below are for your last valid numbers.' : ''}</span>`;
-    if (!keep) resultsEl.innerHTML = '';
-    resultsEl.hidden = !keep;
-    resultsEl.classList.toggle('is-stale', keep);
+    verdictEl.innerHTML = `<span>${html}</span>`;
+    resultsEl.innerHTML = '';
+    resultsEl.hidden = true;
     shareBtn.hidden = true;
-    pendingField = fix;
+    pendingShown = true;
   }
 
-  /** `save` marks the user's own edits: stored (outside a shared link) and mirrored to the URL. */
-  function render({ save = false } = {}) {
+  /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
+  function pendingFor(ids, blocking) {
+    if (ids.length === 0) return ['<strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.', form.querySelector('input[name="platform"]')];
+    const bad = blocking.filter((b) => b.problem);
+    const named = (b) => `“${esc(labelOf(b.key))}”`;
+    if (bad.length === 1) return [`<strong>Check ${named(bad[0])}.</strong> ${esc(bad[0].problem)}`, field(bad[0].key)];
+    if (bad.length) return [`<strong>Check ${bad.length} fields.</strong> ${bad.map((b) => `${named(b)}: ${esc(b.problem)}`).join(' ')}`, field(bad[0].key)];
+    if (blocking.length) return ['<strong>Enter a sell price</strong> to see results.', field('price')]; // only a price not typed yet
+    return null;
+  }
+
+  /**
+   * `save` marks the user's own edits: stored (outside a shared link) and
+   * mirrored to the URL. `typing`: a keystroke may leave a field briefly
+   * empty or half-typed ("" before "45", "12," before "12,50"), so the prompt
+   * waits for a pause before it replaces the results; everything else
+   * (loading, a tab, Enter) shows it at once.
+   */
+  function render({ save = false, typing = false } = {}) {
     const state = readForm();
-    fieldBox('ebayCustomRate').hidden = state.values.ebayCategory !== 'custom';
+    const input = normalizeInputs(state.values);
+    fieldBox('ebayCustomRate').hidden = !PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts);
     // A marketplace's own fee page always shows it, even if the visitor hid it.
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
-    const input = normalizeInputs(state.values);
     const blocking = validate(state.values, ids, input);
-    const bad = blocking.filter((b) => b.problem);
     // A field that has just gone bad inside the closed Fine-tune panel (a shared
     // link's junk, say) opens it, once: closing it again is up to the user.
-    for (const { key } of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
-    badBefore = new Set(bad.map(({ key }) => key));
+    const bad = blocking.filter((b) => b.problem).map(({ key }) => key);
+    for (const key of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
+    badBefore = new Set(bad);
 
-    pendingField = null;
-    if (ids.length === 0) {
-      // (Rows for marketplaces the user just unticked would contradict them.)
-      showPending('<strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.', form.querySelector('input[name="platform"]'), { keepRows: false });
-    } else if (blocking.length === 1 && blocking[0].missing) {
-      showPending('<strong>Enter a sell price</strong> to see results.', field('price'));
-    } else if (blocking.length) {
-      const named = (b) => `“${esc(labelOf(b.key))}”`;
-      const why = (b) => esc(b.problem || 'Enter a sell price.');
-      showPending(
-        blocking.length === 1
-          ? `<strong>Check ${named(blocking[0])}.</strong> ${why(blocking[0])}`
-          : `<strong>Check ${blocking.length} fields.</strong> ${blocking.map((b) => `${named(b)}: ${why(b)}`).join(' ')}`,
-        field(blocking[0].key),
-      );
+    clearTimeout(pendingTimer);
+    const pending = pendingFor(ids, blocking);
+    pendingField = pending?.[1] ?? null; // Enter goes there even before the prompt shows
+    if (pending && typing && !pendingShown) {
+      pendingTimer = setTimeout(() => showPending(pending[0]), PENDING_DELAY);
+    } else if (pending) {
+      showPending(pending[0]);
     } else {
-      const open = new Set([...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id));
+      const open = openBefore ?? new Set(openIds());
+      openBefore = null;
+      pendingShown = false;
       const rows = rankedRows(mode, rank(mode, input, ids), input.target);
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
       verdictEl.innerHTML = verdict.html;
       resultsEl.innerHTML = renderResults(mode, rows, { focus });
       resultsEl.hidden = false;
-      resultsEl.classList.remove('is-stale');
       shareBtn.hidden = !shareSupported;
-      resultsFor = mode;
       for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
       fitResults();
     }
@@ -280,7 +296,7 @@ function setup(root) {
     }
     announce();
   }
-  const renderSoon = debounce(() => render({ save: true }), 60);
+  const renderSoon = debounce(() => render({ save: true, typing: true }), 60);
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
@@ -392,7 +408,6 @@ function setup(root) {
   const SHARE_LABEL = shareBtn.textContent;
   let shareReset;
   if (shareSupported) {
-    shareBtn.hidden = false;
     shareBtn.addEventListener('click', async () => {
       const url = `${location.origin}${location.pathname}${fragment(readForm(), true)}`;
       let message = 'Link copied';

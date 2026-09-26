@@ -239,6 +239,12 @@ export function scoreFor(mode, r) {
 }
 
 /**
+ * Which of the sale price and item cost each mode works from: Max buy works
+ * out the cost, List price the price. The calculator hides the other one.
+ */
+export const MODE_INPUTS = Object.freeze({ profit: ['price', 'cost'], maxbuy: ['price'], price: ['cost'] });
+
+/**
  * The calculator inputs a platform's results depend on in a mode (Max buy
  * works out the cost, List price the price), given the normalized `input`
  * (some options only apply with others). A bad value in any other input can't
@@ -246,7 +252,7 @@ export function scoreFor(mode, r) {
  * points: changing an input left out never changes a result.
  */
 export function inputsUsedBy(platform, mode = 'profit', input) {
-  const own = { maxbuy: ['price'], price: ['cost'] }[mode] ?? ['price', 'cost'];
+  const own = has(MODE_INPUTS, mode) ? MODE_INPUTS[mode] : MODE_INPUTS.profit;
   return [
     ...own,
     'target',

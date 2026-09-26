@@ -265,40 +265,61 @@ if (chromium) {
 
   test('no verdict from numbers the form rejects or leaves out', async () => {
     const { context, page } = await open();
+    const pause = () => page.waitForTimeout(1100); // longer than the calculator waits before its prompt
     const state = () =>
       page.evaluate(() => {
         const list = document.querySelector('[data-results]');
-        return {
-          tone: document.querySelector('[data-verdict]').className,
-          rows: list.hidden ? 0 : list.children.length,
-          stale: list.classList.contains('is-stale'),
-          share: !document.querySelector('[data-share]').hidden,
-          listHeight: Math.round(list.getBoundingClientRect().height), // the rows don't collapse and come back
-        };
+        return { tone: document.querySelector('[data-verdict]').className, rows: list.hidden ? 0 : list.children.length, share: !document.querySelector('[data-share]').hidden };
       });
-    const LAST = ' The results below are for your last valid numbers.';
+    const ebayOpen = () => page.locator('.result[data-id="ebay"] details').getAttribute('open');
     await page.locator('.result[data-id="ebay"] summary').click(); // a breakdown the user opened
     const live = await state();
+    // Retyping a field (a moment empty, or half-typed) never blanks the results.
+    await page.evaluate(() => {
+      window.cleared = 0;
+      const list = document.querySelector('[data-results]');
+      new MutationObserver(() => (window.cleared += list.children.length === 0 || list.hidden)).observe(list, { childList: true, attributes: true });
+    });
+    for (const [field, halfway, done] of [['#f-price', '', '45'], ['#f-price', '12,', '12,500'], ['#f-cost', '-', '8']]) {
+      await page.fill(field, halfway);
+      await page.waitForTimeout(250);
+      await page.fill(field, done);
+      await settle(page);
+    }
+    assert.equal(await page.evaluate(() => window.cleared), 0, 'no flash of an empty list while typing');
+    assert.match(await verdict(page), /^Worth it\./);
+    await page.fill('#f-price', '40');
+    await settle(page);
+    // Left that way, the field is flagged at once and, after a pause, a neutral
+    // prompt replaces the results (no rows for numbers that were never entered).
     const cases = [
-      ['#f-cost', '-5', `Check “You paid”. Enter an amount from $0 to $100,000.${LAST}`, 'true'],
-      ['#f-price', '12,5', `Check “Sell price”. Enter an amount from $0 to $100,000.${LAST}`, 'true'],
-      ['#f-price', '0.004', `Check “Sell price”. Enter a sell price of at least $0.01.${LAST}`, 'true'],
-      ['#f-price', '', `Enter a sell price to see results.${LAST}`, null, 'not typed yet: a prompt, not an error'],
+      ['#f-cost', '-5', 'Check “You paid”. Enter an amount from $0 to $100,000.', 'true'],
+      ['#f-price', '12,5', 'Check “Sell price”. Enter an amount from $0 to $100,000.', 'true'],
+      ['#f-price', '0.004', 'Check “Sell price”. Enter a sell price of at least $0.01.', 'true'],
+      ['#f-price', '', 'Enter a sell price to see results.', null, 'not typed yet: a prompt, not an error'],
     ];
     for (const [id, value, want, invalid, why] of cases) {
       await page.fill(id, value);
       await settle(page);
-      assert.equal(await verdict(page), want, why ?? `${id} = "${value}"`);
-      assert.deepEqual(await state(), { ...live, tone: 'verdict verdict-wait', stale: true, share: false }, 'the last rows stay put (dimmed), nothing jumps, no link to share');
       assert.equal(await page.locator(id).getAttribute('aria-invalid'), invalid);
       if (!invalid) assert.equal(await page.locator('#h-price').innerText(), 'Needed to see results.');
+      await pause();
+      assert.equal(await verdict(page), want, why ?? `${id} = "${value}"`);
+      assert.deepEqual(await state(), { tone: 'verdict verdict-wait', rows: 0, share: false });
       await page.fill('#f-price', '40');
       await page.fill('#f-cost', '8');
       await settle(page);
       assert.match(await verdict(page), /^Worth it\./);
       assert.deepEqual(await state(), live);
-      assert.equal(await page.locator('.result[data-id="ebay"] details').getAttribute('open'), '', 'the open breakdown stays open');
+      assert.equal(await ebayOpen(), '', 'the open breakdown comes back open');
     }
+    // A missing price next to a bad field: only the error is listed.
+    await page.fill('#f-price', '');
+    await page.fill('#f-cost', 'abc');
+    await pause();
+    assert.equal(await verdict(page), 'Check “You paid”. Enter an amount from $0 to $100,000.');
+    await page.fill('#f-price', '40');
+    await page.fill('#f-cost', '8');
     // Enter goes to what needs fixing, not to the verdict (phones scroll there)...
     await page.setViewportSize({ width: 390, height: 844 });
     await page.fill('#f-price', '');
@@ -323,7 +344,7 @@ if (chromium) {
     assert.equal(await page.evaluate(() => document.activeElement.id), 'f-tiktokRate', 'Enter opens it and goes to the field');
     // Several bad fields: each named with its reason.
     await page.fill('#f-cost', 'abc');
-    await settle(page);
+    await pause();
     assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Enter an amount from \$0 to \$100,000\. “TikTok Shop fee”: Enter a percentage from 0 to \d+\./);
     // A bad value no compared marketplace reads doesn't hold results back...
     await page.fill('#f-cost', '8');
@@ -772,8 +793,13 @@ if (chromium) {
         }, [box, label, hintId]);
         assert.ok(Math.min(...gaps) >= 0.5, `forced colors ${forcedColors}, focus on ${focusOn}: ${box} lines ${gaps} from the label and hint`);
       }
-      const radii = await p.evaluate(() => ['#f-ebayCategory', '#f-etsyOffsite'].map((sel) => getComputedStyle(document.querySelector(sel)).borderTopLeftRadius));
-      assert.equal(radii[0], radii[1], `forced colors ${forcedColors}: a focused select keeps its corners`);
+      await p.keyboard.press('Tab');
+      const corners = await p.evaluate(() => {
+        const [focused, other] = ['#f-ebayCategory', '#f-etsyOffsite'].map((sel) => document.querySelector(sel));
+        focused.focus();
+        return { visible: focused.matches(':focus-visible'), radii: [focused, other].map((el) => getComputedStyle(el).borderTopLeftRadius) };
+      });
+      assert.ok(corners.visible && corners.radii[0] === corners.radii[1], `forced colors ${forcedColors}: a focused select keeps its corners ${JSON.stringify(corners)}`);
       await ctx.close();
     }
   });
