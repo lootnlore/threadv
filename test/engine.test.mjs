@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
 import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
-import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
+import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, ETSY_OFFSITE, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
 const input = (raw) => normalizeInputs({ taxRate: 0, ...raw });
@@ -521,4 +521,29 @@ test('verdict names every marketplace tied for the top result', () => {
   assert.match(verdict('price', [4000, 4000, 5000], { target: 5 }), /on A or B, the lowest price/);
   assert.match(verdict('profit', [300, 300], { target: 5 }), /Best case is \$3\.00 on A or B, under/);
   assert.match(verdict('profit', [0, 0], { target: 0 }), /break even on A or B\./);
+});
+
+test('inputsUsedBy lists every input a platform reads', () => {
+  // Change one input at a time: whenever a platform's figures move, the input
+  // must be on its list (so a bad value elsewhere can't hold it back).
+  const base = { price: 40, cost: 8, ship: 5, label: 7, target: 10, other: 1, taxRate: 8, ebayCategory: 'custom', ebayCustomRate: 12, ebayAdRate: 2, depopBoost: false, etsyOffsite: 'none', whatnotRate: 8, tiktokRate: 6 };
+  const other = { price: 55, cost: 3, ship: 9, label: 2, target: 20, other: 4, taxRate: 3, ebayCategory: Object.keys(EBAY_CATEGORIES).find((k) => k !== 'custom'), ebayCustomRate: 20, ebayAdRate: 6, depopBoost: true, etsyOffsite: Object.keys(ETSY_OFFSITE).find((k) => k !== 'none'), whatnotRate: 12, tiktokRate: 9 };
+  const figures = (p, raw) => {
+    const i = normalizeInputs(raw);
+    const r = evaluate(p, i);
+    return JSON.stringify([r.profit, r.payout, r.feeTotal, maxBuy(p, i).maxCost, listPrice(p, i)?.price ?? null]);
+  };
+  let moved = 0;
+  for (const p of PLATFORMS) {
+    for (const key of Object.keys(other)) {
+      if (figures(p, base) === figures(p, { ...base, [key]: other[key] })) continue;
+      moved++;
+      assert.ok(inputsUsedBy(p).includes(key), `${p.id} reads ${key}, but inputsUsedBy leaves it out`);
+    }
+  }
+  assert.ok(moved > 30, 'the perturbations really move the figures');
+  // And each declared option is really read.
+  for (const p of PLATFORMS) {
+    for (const key of p.options ?? []) assert.notEqual(figures(p, base), figures(p, { ...base, [key]: other[key] }), `${p.id} declares ${key} but ignores it`);
+  }
 });

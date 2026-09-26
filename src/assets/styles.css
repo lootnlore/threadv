@@ -757,6 +757,10 @@ select {
   font-size: 0.95rem;
 }
 
+select:focus-visible {
+  outline-offset: 0; /* like the money fields: clear of the label and hint */
+}
+
 .hint {
   margin: 4px 0 0;
   font-size: 0.78rem;
@@ -952,7 +956,8 @@ select {
   color: var(--surface);
 }
 
-/* Waiting for a number (see showPending in app.js): a prompt, not a verdict. */
+/* Waiting for a number or a marketplace (see showPending in app.js): a
+   prompt, not a verdict. */
 .verdict-wait {
   background: var(--sunken);
   color: var(--ink);
@@ -975,15 +980,12 @@ select {
   gap: 8px;
 }
 
-/* Results from numbers that are no longer valid (see showPending in app.js). */
-.results.is-stale {
-  opacity: 0.45;
-}
-
 .result {
   --row-border: 1px;
   --best-border: 3px; /* a Best row's border in High Contrast (below) */
-  --row-ring-inset: 6px; /* past the 4px Best bar (or the High Contrast border), plus 2px */
+  --best-bar: 4px; /* a Best row's edge bar */
+  /* The focus ring's inset: past the Best bar or the High Contrast border, plus 2px. */
+  --row-ring-inset: calc(max(var(--best-bar), var(--best-border) - var(--row-border)) + 2px);
   background: var(--surface);
   border: var(--row-border) solid var(--line);
   border-radius: var(--radius);
@@ -1017,7 +1019,7 @@ select {
 
 .result.is-best {
   border-color: var(--brand);
-  box-shadow: inset 4px 0 0 var(--brand);
+  box-shadow: inset var(--best-bar) 0 0 var(--brand);
 }
 
 .result.is-focus {
@@ -1929,10 +1931,6 @@ code {
     outline-offset: 0;
   }
 
-  .results.is-stale {
-    opacity: 1; /* dimming would undo the contrast; the verdict explains */
-  }
-
   .modes button[aria-selected='true'],
   .site-header nav a[aria-current] {
     text-decoration: underline 2px;
@@ -1953,8 +1951,9 @@ code {
   }
 
   .tag,
-  .rank {
-    outline: 1px solid;
+  .rank,
+  .verdict::before {
+    outline: 1px solid; /* shapes the background would have drawn */
     outline-offset: -1px;
   }
 }

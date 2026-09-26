@@ -10,9 +10,9 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, parseNumber, has } from '../engine/calc.mjs';
-import { renderResults, renderVerdict, MODES } from '../engine/render.mjs';
-import { PLATFORMS, usdText, andList } from '../engine/fees.mjs';
+import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, inputsUsedBy, parseNumber, has } from '../engine/calc.mjs';
+import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
+import { PLATFORMS, PLATFORM_BY_ID, usdText, andList } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
 const SHARE_FLAG = 's';
@@ -114,6 +114,7 @@ function setup(root) {
   const linkParams = () => new URLSearchParams(location.hash.slice(1));
 
   function load() {
+    badBefore = new Set(); // a new link's bad fields open Fine-tune again
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
@@ -172,21 +173,25 @@ function setup(root) {
   // ---- rendering ----
 
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
-  /** The marketplace a fee field belongs to (tiktokRate: tiktok), if any. */
-  const ownerOf = (key) => PLATFORMS.find((p) => key.startsWith(p.id))?.id;
 
   /**
-   * Flags each numeric field; returns the flagged ones that affect the results
-   * now: on show in this mode, and not the rate of a marketplace left out.
+   * Flags each numeric field with what is wrong (its hint says it) and returns
+   * the flagged ones that hold the results back, [{ key, problem }]: on show
+   * in this mode and read by a compared marketplace (inputsUsedBy). A mode that
+   * sells at a price needs one of at least $0.01, as the engine rounds it.
    */
   function validate(values, ids) {
+    const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id])));
     const bad = [];
     for (const key of NUMERIC) {
       const el = field(key);
       if (!el) continue;
-      const problem = problemWith(key, values[key]);
-      const owner = ownerOf(key);
-      if (problem && !el.closest('[hidden]') && (!owner || ids.includes(owner))) bad.push(key);
+      const shown = !el.closest('[hidden]');
+      let problem = problemWith(key, values[key]);
+      if (!problem && key === 'price' && shown && normalizeInputs({ price: values.price }).price === 0) {
+        problem = 'Enter a sell price of at least $0.01.';
+      }
+      if (problem && shown && used.has(key)) bad.push({ key, problem });
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -199,32 +204,20 @@ function setup(root) {
     return bad;
   }
 
-  let renderedMode = null; // the mode the rows on screen were worked out for (null: the page's own example)
-  let pendingField = null; // the field to fix before results can show
-  let badBefore = new Set();
-
-  function setStale(stale) {
-    resultsEl.classList.toggle('is-stale', stale);
-    resultsEl.inert = stale;
-  }
+  let pendingField = null; // what to fix before results can show
+  let badBefore = new Set(); // flagged fields at the last render (reset by load)
 
   /**
-   * While the numbers can't be trusted (a flagged field, or no sell price where
-   * the mode needs one) the verdict asks for them, in a neutral tone, instead
-   * of deciding. The last results stay, dimmed and out of reach (inert), if
-   * they were worked out for this mode; otherwise (another mode, or the page's
-   * example) they would mislead, so they go.
+   * While the numbers can't be worked out (a flagged field, or no marketplace
+   * picked) the verdict asks for what's missing, in a neutral tone, and the
+   * results are cleared: rows for other numbers would mislead. Enter then
+   * goes to `fix`.
    */
   function showPending(html, fix) {
     verdictEl.className = 'verdict verdict-wait';
     verdictEl.innerHTML = `<span>${html}</span>`;
+    resultsEl.innerHTML = '';
     pendingField = fix;
-    if (renderedMode === mode) setStale(true);
-    else {
-      resultsEl.innerHTML = '';
-      renderedMode = null;
-      setStale(false);
-    }
   }
 
   /** `save` marks the user's own edits: stored (outside a shared link) and mirrored to the URL. */
@@ -236,29 +229,21 @@ function setup(root) {
     const bad = validate(state.values, ids);
     // A field that has just gone bad inside the closed Fine-tune panel (a shared
     // link's junk, say) opens it, once: closing it again is up to the user.
-    for (const key of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
-    badBefore = new Set(bad);
+    for (const { key } of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
+    badBefore = new Set(bad.map(({ key }) => key));
 
     const open = new Set([...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id));
-    const input = normalizeInputs(state.values);
-    // The sale price as the engine sees it (to the cent): "0.004" is $0.
-    const needsPrice = !MODES[mode].hidden.includes('price') && input.price === 0;
     pendingField = null;
-
     if (ids.length === 0) {
-      verdictEl.className = 'verdict verdict-bad';
-      verdictEl.innerHTML = '<span><strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.</span>';
-      resultsEl.innerHTML = '';
-      renderedMode = null;
-      setStale(false);
+      showPending('<strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.', form.querySelector('input[name="platform"]'));
     } else if (bad.length) {
-      const names = andList(bad.map((key) => `“${labelOf(key)}”`));
-      showPending(`<strong>Check ${names}.</strong> Results update once ${bad.length > 1 ? 'they hold' : 'it holds'} a valid number.`, bad[0]);
-    } else if (needsPrice) {
-      showPending('<strong>Enter a sell price above $0</strong> to see results.', 'price');
+      const names = bad.map(({ key }) => `“${esc(labelOf(key))}”`);
+      showPending(
+        bad.length === 1 ? `<strong>Check ${names[0]}.</strong> ${esc(bad[0].problem)}` : `<strong>Check ${andList(names)}.</strong> Each says what it needs.`,
+        field(bad[0].key),
+      );
     } else {
-      setStale(false);
-      renderedMode = mode;
+      const input = normalizeInputs(state.values);
       const rows = rankedRows(mode, rank(mode, input, ids), input.target);
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
@@ -362,8 +347,12 @@ function setup(root) {
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     render({ save: true });
-    // Nothing to show yet: go to the field to fix, not away from it.
-    if (pendingField) return field(pendingField).focus();
+    // Nothing to show yet: go to what needs fixing (opening Fine-tune if it's
+    // in there), not away from it.
+    if (pendingField) {
+      pendingField.closest('details:not([open])')?.setAttribute('open', '');
+      return pendingField.focus();
+    }
     if (seeResults.offsetParent === null) return;
     const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     verdictEl.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });

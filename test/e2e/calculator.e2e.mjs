@@ -266,71 +266,85 @@ if (chromium) {
   test('no verdict from numbers the form rejects or leaves out', async () => {
     const { context, page } = await open();
     const state = () =>
-      page.evaluate(() => {
-        const list = document.querySelector('[data-results]');
-        return { tone: document.querySelector('[data-verdict]').className, stale: list.classList.contains('is-stale') && list.inert, rows: list.children.length };
-      });
-    const before = await page.locator('[data-results]').innerHTML();
+      page.evaluate(() => ({ tone: document.querySelector('[data-verdict]').className, rows: document.querySelector('[data-results]').children.length }));
+    const pending = { tone: 'verdict verdict-wait', rows: 0 };
     const cases = [
-      ['#f-cost', '-5', /^Check “You paid”\. Results update once it holds a valid number\./],
-      ['#f-price', '12,5', /^Check “Sell price”\./],
-      ['#f-price', '', /^Enter a sell price above \$0/],
-      ['#f-price', '0.004', /^Enter a sell price above \$0/, 'rounds to $0'],
+      ['#f-cost', '-5', 'Check “You paid”. Enter an amount from $0 to $100,000.'],
+      ['#f-price', '12,5', 'Check “Sell price”. Enter an amount from $0 to $100,000.'],
+      ['#f-price', '', 'Check “Sell price”. Enter a sell price of at least $0.01.'],
+      ['#f-price', '0.004', 'Check “Sell price”. Enter a sell price of at least $0.01.', 'rounds to $0'],
     ];
     for (const [id, value, want, why] of cases) {
       await page.fill(id, value);
       await settle(page);
-      assert.match(await verdict(page), want, why ?? `${id} = "${value}"`);
-      assert.deepEqual(await state(), { tone: 'verdict verdict-wait', stale: true, rows: 9 }, 'a neutral prompt over the dimmed, unreachable rows');
-      assert.equal(await page.locator('[data-results]').innerHTML(), before, 'not recomputed from a made-up value');
+      assert.equal(await verdict(page), want, why ?? `${id} = "${value}"`);
+      assert.deepEqual(await state(), pending, 'a neutral prompt, and no rows for numbers that were never entered');
+      assert.equal(await page.locator(id).getAttribute('aria-invalid'), 'true', 'the field itself says so');
       await page.fill('#f-price', '40');
       await page.fill('#f-cost', '8');
       await settle(page);
       assert.match(await verdict(page), /^Worth it\./);
-      assert.equal((await state()).stale, false);
+      assert.equal((await state()).rows, 9);
     }
-    // Enter goes to the field to fix, not to the verdict (phones scroll there).
+    // Enter goes to what needs fixing, not to the verdict (phones scroll there)...
     await page.setViewportSize({ width: 390, height: 844 });
     await page.fill('#f-price', '');
     await page.locator('#f-cost').press('Enter');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
     await page.fill('#f-price', '40');
-    // Two bad fields, one inside the closed Fine-tune panel: named, and the panel opens once.
-    await page.fill('#f-cost', 'abc');
-    await page.evaluate(() => {
-      const rate = document.querySelector('#f-tiktokRate');
-      rate.value = 'x';
-      rate.dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    // ...even inside the Fine-tune panel after the user closed it.
+    const setRate = (v) =>
+      page.evaluate((value) => {
+        const rate = document.querySelector('#f-tiktokRate');
+        rate.value = value;
+        rate.dispatchEvent(new Event('input', { bubbles: true }));
+      }, v);
+    await setRate('x');
     await settle(page);
-    assert.match(await verdict(page), /^Check “You paid” and “TikTok Shop fee”\. Results update once they hold/);
-    assert.equal(await page.locator('.tune').getAttribute('open'), '');
-    await page.locator('.tune > summary').click(); // the user closes it...
-    await page.fill('#f-price', '41'); // ...and keeps typing elsewhere
-    await settle(page);
-    assert.equal(await page.locator('.tune').getAttribute('open'), null, 'it stays closed');
-    // A marketplace left out doesn't hold the others back.
-    await page.fill('#f-cost', '8');
+    assert.equal(await page.locator('.tune').getAttribute('open'), '', 'a field going bad in Fine-tune opens it');
     await page.locator('.tune > summary').click();
+    await page.fill('#f-price', '41');
+    await settle(page);
+    assert.equal(await page.locator('.tune').getAttribute('open'), null, 'closed by the user, it stays closed while they type');
+    await page.locator('#f-price').press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'f-tiktokRate', 'Enter opens it and goes to the field');
+    // Several bad fields are all named.
+    await page.fill('#f-cost', 'abc');
+    await settle(page);
+    assert.equal(await verdict(page), 'Check “You paid” and “TikTok Shop fee”. Each says what it needs.');
+    // A bad value no compared marketplace reads doesn't hold results back.
+    await page.fill('#f-cost', '8');
     await page.locator('input[name="platform"][value="tiktok"]').uncheck();
     await settle(page);
     assert.match(await verdict(page), /^Worth it\./, 'a bad TikTok rate with TikTok unticked');
     await page.locator('input[name="platform"][value="tiktok"]').check();
-    await page.fill('#f-tiktokRate', '6');
-    // Rows from another mode are cleared, not dimmed: cost is hidden in Max buy and
-    // shown (bad) in List price.
-    await page.fill('#f-cost', 'abc');
-    await page.getByRole('tab', { name: 'Max buy' }).click();
+    await setRate('6');
+    for (const box of await page.locator('input[name="platform"]').all()) if ((await box.getAttribute('value')) !== 'poshmark') await box.uncheck();
+    await page.fill('#f-label', 'junk');
     await settle(page);
-    assert.match(await verdict(page), /^Pay up to /, 'Max buy ignores the hidden cost');
-    await page.getByRole('tab', { name: 'List price' }).click();
+    assert.match(await verdict(page), /^Worth it\. Best on Poshmark/, 'Poshmark buyers pay the label, so a bad label cost is ignored');
+    await page.fill('#f-label', '7');
+    // No marketplace picked: a prompt too, and Enter goes to the first box.
+    await page.locator('input[name="platform"][value="poshmark"]').uncheck();
     await settle(page);
-    assert.deepEqual(await state(), { tone: 'verdict verdict-wait', stale: false, rows: 0 });
+    assert.deepEqual(await state(), pending);
+    assert.match(await verdict(page), /^No marketplaces selected\./);
+    await page.locator('#f-price').press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute('name')), 'platform');
     await context.close();
-    // Nor are the page's own example rows shown for a link that can't be worked out.
+
+    // A link that can't be worked out shows no rows (not the page's own example),
+    // and a new link's bad Fine-tune field opens the panel again.
     const link = await open('/#mode=maxbuy&price=');
-    assert.match(await verdict(link.page), /^Enter a sell price above \$0/);
+    assert.equal(await verdict(link.page), 'Check “Sell price”. Enter a sell price of at least $0.01.');
     assert.equal(await link.page.locator('[data-results] > li').count(), 0);
+    await link.page.goto(`${base}/#s=1&tiktokRate=abc`);
+    await settle(link.page);
+    assert.equal(await link.page.locator('.tune').getAttribute('open'), '');
+    await link.page.locator('.tune > summary').click();
+    await link.page.evaluate(() => (location.hash = '#s=1&tiktokRate=xyz&price=50'));
+    await settle(link.page);
+    assert.equal(await link.page.locator('.tune').getAttribute('open'), '', 'reopened for the new link');
     await link.context.close();
   });
 
@@ -599,6 +613,8 @@ if (chromium) {
     const plain = await get(page, plainRow);
     const best = await get(page, '.result.is-best');
     assert.ok(best.border >= plain.border + 2 && !best.outline, `Best result: a thick border, no ring: ${JSON.stringify(best)}`);
+    const icon = await page.evaluate(() => getComputedStyle(document.querySelector('.verdict'), '::before').outlineStyle);
+    assert.equal(icon, 'solid', 'the verdict icon keeps its circle');
     const pinned = await get(page, '.result.is-focus');
     assert.ok(!pinned.outline && !plain.outline && pinned.border === plain.border, `pinned result: no line of its own: ${JSON.stringify(pinned)}`);
     // ...and neither moves a row, or anything in it.
@@ -688,7 +704,7 @@ if (chromium) {
         const st = getComputedStyle(summary);
         return summary.getBoundingClientRect().left - row.getBoundingClientRect().left - parseFloat(st.outlineOffset) - parseFloat(st.outlineWidth);
       });
-      assert.ok(clear >= 5, `forced colors ${forcedColors}: Best row ring ${clear}px from the row's edge`);
+      assert.ok(clear >= 6, `forced colors ${forcedColors}: Best row ring ${clear}px from the row's edge (border 1px + 4px bar, or the 3px High Contrast border, + 1px)`);
       // A focused invalid field shows the focus ring (its red border or double
       // line waits until focus leaves).
       await p.fill('#f-cost', '-5');
@@ -696,17 +712,26 @@ if (chromium) {
       await settle(p);
       const invalidFocused = await get(p, '.input-wrap:has(#f-cost)');
       assert.ok(invalidFocused.outlineStyle === 'solid' && invalidFocused.outlineWidth >= 3, `forced colors ${forcedColors}: focused invalid field ${JSON.stringify(invalidFocused)}`);
-      // Its lines, focused or not, stay off the label and the hint.
-      for (const focusOn of ['#f-cost', '#f-price']) {
-        await p.focus(focusOn);
-        const gaps = await p.evaluate(() => {
-          const wrap = document.querySelector('.input-wrap:has(#f-cost)');
-          const st = getComputedStyle(wrap);
+      // Field lines, focused or not, stay off the label and the hint: a money
+      // field (invalid) and a select.
+      await p.locator('.tune > summary').click();
+      for (const [box, focusOn, label, hintId] of [
+        ['.input-wrap:has(#f-cost)', '#f-cost', 'f-cost', 'h-cost'],
+        ['.input-wrap:has(#f-cost)', '#f-price', 'f-cost', 'h-cost'],
+        ['#f-ebayCategory', '#f-ebayCategory', 'f-ebayCategory', null],
+      ]) {
+        await p.keyboard.press('Tab');
+        await p.evaluate((sel) => document.querySelector(sel).focus(), focusOn);
+        const gaps = await p.evaluate(([sel, forId, hint]) => {
+          const el = document.querySelector(sel);
+          const st = getComputedStyle(el);
           const reach = st.outlineStyle === 'none' ? 0 : parseFloat(st.outlineWidth) + parseFloat(st.outlineOffset);
-          const w = wrap.getBoundingClientRect();
-          return [w.top - reach - document.querySelector('label[for="f-cost"]').getBoundingClientRect().bottom, document.querySelector('#h-cost').getBoundingClientRect().top - w.bottom - reach];
-        });
-        assert.ok(Math.min(...gaps) >= 0.5, `forced colors ${forcedColors}, focus on ${focusOn}: field lines ${gaps} from the label and hint`);
+          const r = el.getBoundingClientRect();
+          const out = [r.top - reach - document.querySelector(`label[for="${forId}"]`).getBoundingClientRect().bottom];
+          if (hint) out.push(document.getElementById(hint).getBoundingClientRect().top - r.bottom - reach);
+          return out;
+        }, [box, label, hintId]);
+        assert.ok(Math.min(...gaps) >= 0.5, `forced colors ${forcedColors}, focus on ${focusOn}: ${box} lines ${gaps} from the label and hint`);
       }
       await ctx.close();
     }

@@ -11,6 +11,7 @@
  *   fees(order)         -> [{ label, cents }]      line items charged by the platform
  *   breakpoints(order)  -> [cents]                 sale prices where a fee jumps (only if any)
  *   sellerPaysShipping  -> whether the shipping inputs apply on this platform
+ *   options             -> its own Fine-tune settings (keys of the calculator input's opts)
  *   feesIncludeTax      -> whether any fee is charged on the buyer's sales tax
  *   company             -> the owner, where it differs from the name (legal notices)
  *   rows                -> [fee, rate, charged on] for the fee table and FAQ. "Charged on" is
@@ -143,6 +144,7 @@ const ebayTotal = (o) => o.price + o.ship + o.tax;
 export const PLATFORMS = [
   {
     id: 'ebay',
+    options: ['ebayCategory', 'ebayCustomRate', 'ebayAdRate'], // its Fine-tune settings
     feesIncludeTax: true,
     name: 'eBay',
     sellerPaysShipping: true,
@@ -234,6 +236,7 @@ export const PLATFORMS = [
   },
   {
     id: 'depop',
+    options: ['depopBoost'], // its Fine-tune settings
     feesIncludeTax: true,
     name: 'Depop',
     sellerPaysShipping: true,
@@ -257,6 +260,7 @@ export const PLATFORMS = [
   },
   {
     id: 'etsy',
+    options: ['etsyOffsite'], // its Fine-tune settings
     feesIncludeTax: true,
     name: 'Etsy',
     sellerPaysShipping: true,
@@ -292,6 +296,7 @@ export const PLATFORMS = [
   },
   {
     id: 'whatnot',
+    options: ['whatnotRate'], // its Fine-tune settings
     feesIncludeTax: true,
     name: 'Whatnot',
     sellerPaysShipping: true,
@@ -368,6 +373,7 @@ export const PLATFORMS = [
   },
   {
     id: 'tiktok',
+    options: ['tiktokRate'], // its Fine-tune settings
     name: 'TikTok Shop',
     company: 'TikTok',
     sellerPaysShipping: true,

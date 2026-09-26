@@ -239,6 +239,23 @@ export function scoreFor(mode, r) {
 }
 
 /**
+ * The calculator inputs a platform's results depend on, so a bad value in any
+ * other can't hold its results back. Tested against the engine: changing an
+ * input left out never changes a result.
+ */
+export function inputsUsedBy(platform) {
+  return [
+    'price',
+    'cost',
+    'target',
+    'other',
+    ...(platform.sellerPaysShipping ? ['ship', 'label'] : []),
+    ...(platform.feesIncludeTax ? ['taxRate'] : []),
+    ...(platform.options ?? []),
+  ];
+}
+
+/**
  * Competition ranks ("1, 2, 2, 4") for scores where higher is better: equal
  * scores share a rank. A null score (can't be reached) gets no rank.
  */

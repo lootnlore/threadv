@@ -330,19 +330,28 @@ test('in High Contrast every focus ring uses the system focus colour', () => {
   const css = readFileSync(new URL('../src/assets/styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   const forcedAt = css.indexOf('@media (forced-colors: active)');
   assert.ok(forcedAt > 0, 'a forced-colors block exists');
-  const splitSelectors = (text) => {
+  // Split at top-level separators only (not inside parentheses).
+  const topLevel = (text, sep) => {
     const out = [''];
     let depth = 0;
     for (const ch of text) {
       if (ch === '(') depth++;
       if (ch === ')') depth--;
-      if (ch === ',' && depth === 0) out.push('');
+      if (depth === 0 && sep.test(ch)) out.push('');
       else out[out.length - 1] += ch;
     }
-    return out.map((x) => x.trim().replace(/\s+/g, ' ')).filter(Boolean);
+    return out.map((x) => x.trim()).filter(Boolean);
   };
+  const splitSelectors = (text) => topLevel(text, /,/).map((x) => x.replace(/\s+/g, ' '));
   const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sels: splitSelectors(sel), body }));
-  const ringShadow = /(^|;|\s)box-shadow\s*:\s*(inset\s+)?(0(px|r?em)?\s+){3}([\d.]+(px|r?em)|var\()/;
+  // A shadow layer is a ring when three zero lengths (x, y, blur) are followed
+  // by a spread, wherever the colour and `inset` sit and whichever layer it is.
+  const isRing = (layer) => {
+    const tokens = topLevel(layer, /\s/);
+    const zero = (t) => /^0(px|r?em)?$/.test(t);
+    return tokens.some((t, i) => zero(t) && zero(tokens[i + 1] ?? '') && zero(tokens[i + 2] ?? '') && /^([\d.]+(px|r?em)|calc\(|var\()/.test(tokens[i + 3] ?? '') && !zero(tokens[i + 3]));
+  };
+  const ringShadow = { test: (body) => [...body.matchAll(/(?:^|;|\s)box-shadow\s*:\s*([^;]+)/g)].some(([, value]) => topLevel(value, /,/).some(isRing)) };
   const draws = (body) => ringShadow.test(body) || [...body.matchAll(/(?:^|;|\s)outline(-style|-width|-color)?\s*:\s*([^;]+)/g)].some(([, , value]) => value.trim() !== 'none');
   const ringSelectors = rules(css.slice(0, forcedAt))
     .filter(({ body }) => draws(body))
@@ -354,7 +363,14 @@ test('in High Contrast every focus ring uses the system focus colour', () => {
     .flatMap(({ sels }) => sels);
   for (const sel of ringSelectors) assert.ok(highlighted.includes(sel), `${sel} has no Highlight ring in forced colors`);
   assert.deepEqual(splitSelectors(':is(.a, .b):focus-visible, .c'), [':is(.a, .b):focus-visible', '.c'], 'selectors split at the top level only');
-  for (const ring of ['box-shadow: 0 0 0 3px red', 'box-shadow: inset 0px 0px 0px 0.2rem red', 'box-shadow: 0 0 0 var(--ring-width) red']) assert.ok(draws(ring), ring);
+  for (const ring of [
+    'box-shadow: 0 0 0 3px red',
+    'box-shadow: inset 0px 0px 0px 0.2rem red',
+    'box-shadow: 0 0 0 var(--ring-width) red',
+    'box-shadow: var(--ring) 0 0 0 3px',
+    'box-shadow: var(--shadow), 0 0 0 3px var(--ring)',
+    'box-shadow: 0 0 0 calc(var(--ring-width) + 1px) red',
+  ]) assert.ok(draws(ring), ring);
   for (const other of ['box-shadow: var(--shadow)', 'box-shadow: 0 1px 3px rgb(0 0 0 / 0.12)', 'outline: none']) assert.ok(!draws(other), other);
 });
 
