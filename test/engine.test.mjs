@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, competitionRanks, scoreFor, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
 import { percent, money, renderResults, renderVerdict, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
@@ -371,113 +371,104 @@ test('ordinal numbers', () => {
   ]);
 });
 
-/** The rendered rows as plain data: id, rank badge, tags and the text a reader without CSS sees. */
+/** The rendered rows as plain data: id, rank badge (and whether it is read aloud), tags, name. */
 const rows = (html) =>
   html.split('<li ').slice(1).map((li) => ({
     id: li.match(/data-id="([^"]+)"/)[1],
     best: li.includes('class="result is-best'),
-    rank: ((n) => (n === '\u2013' ? null : Number(n)))(li.match(/<span class="rank" aria-hidden="true">([^<]+)<\/span>/)[1]),
-    tags: [...li.matchAll(/<span class="tag [^"]+"[^>]*>([^<]+)<\/span>/g)].map((m) => m[1]),
-    spoken: li.match(/<span class="visually-hidden">([^<]*)<\/span>/)?.[1] ?? '',
+    rank: ((n) => (n === '–' ? null : Number(n)))(li.match(/<span class="rank"[^>]*>([^<]+)<\/span>/)[1]),
+    rankRead: !li.includes('<span class="rank" aria-hidden="true">'),
+    tags: [...li.matchAll(/<span class="tag [^"]+">([^<]+)<\/span>/g)].map((m) => m[1]),
     name: li.match(/<span class="pname">(.*?)<\/span><span class="figure/)[1].replace(/<[^>]+>/g, ''),
   }));
 
-test('results: the Best badge only on a top result the verdict would recommend', () => {
-  const run = (mode, raw) => rows(renderResults(mode, rank(mode, input(raw)), { target: input(raw).target }));
-  const good = run('profit', { price: 40, cost: 5, target: 5 });
-  assert.deepEqual(good.map((r) => r.best), good.map((_, i) => i === 0), 'profit: only the top row');
-  assert.deepEqual(good[0].tags, ['Best']);
-  assert.ok(run('profit', { price: 40, cost: 5, target: 500 }).every((r) => !r.best), 'profit under the minimum');
-  assert.ok(run('profit', { price: 10, cost: 50 }).every((r) => !r.best), 'a loss everywhere');
-  assert.equal(run('maxbuy', { price: 40, target: 5 })[0].best, true);
-  assert.ok(run('maxbuy', { price: 5, target: 50 }).every((r) => !r.best), 'max buy below zero');
-  assert.equal(run('price', { cost: 5, target: 10 })[0].best, true);
-  const out = renderResults('price', rank('price', input({ cost: MAX_CENTS, target: MAX_CENTS })), { target: MAX_CENTS });
-  assert.ok(rows(out).every((r) => !r.best) && out.includes('Out of range'), 'unreachable list price');
-});
-
-test('results: a fee page pins its marketplace first and keeps its real rank, in words too', () => {
-  const i = input({ price: 40, cost: 5 });
-  const ranked = rank('profit', i);
-  const ranks = competitionRanks(ranked.map((r) => r.profit));
-  const last = ranked.at(-1).id;
-  const out = rows(renderResults('profit', ranked, { focus: last, target: i.target }));
-  assert.equal(out[0].id, last, 'pinned first');
-  assert.equal(out[0].rank, ranks.at(-1), 'badge keeps the true rank');
-  assert.deepEqual(out[0].tags, [`${ordinal(ranks.at(-1))} of ${ranked.length}`], 'rank in words for screen readers and narrow screens');
-  assert.deepEqual(out.slice(1).map((r) => r.id), ranked.slice(0, -1).map((r) => r.id), 'the rest in rank order');
-  assert.deepEqual(out.slice(1).map((r) => r.rank), ranks.slice(0, -1));
-  assert.deepEqual(out[1].tags, ['Best'], 'Best stays on the real winner');
-  // Already on top: no rank tag (the Best badge says it).
-  const top = rows(renderResults('profit', ranked, { focus: ranked[0].id, target: i.target }));
-  assert.deepEqual(top[0].tags, ['Best']);
-  assert.ok(top.every((r) => !r.tags.some((t) => t.includes(' of '))));
-});
-
-test('results: names and tags read correctly without CSS', () => {
-  const i = input({ price: 40, cost: 5 });
-  const ranked = rank('profit', i);
-  const out = rows(renderResults('profit', ranked, { focus: ranked[1].id, target: i.target }));
-  assert.equal(out[1].name, `1st: ${ranked[0].short} Best`, 'rank words, then a space before the tag');
-  assert.equal(out[0].name, `2nd: ${ranked[1].short} 2nd of ${ranked.length}`);
-});
-
-test('results: screen readers hear each rank in words, ties included', () => {
-  const i = input({ price: 40, cost: 5 });
-  const ranked = rank('profit', i);
-  const ranks = competitionRanks(ranked.map((r) => scoreFor('profit', r)));
-  const out = rows(renderResults('profit', ranked, { target: i.target }));
-  out.forEach((row, n) => {
-    const tied = ranks.filter((x) => x === ranks[n]).length > 1;
-    assert.equal(row.spoken, `${tied ? 'Tied ' : ''}${ordinal(ranks[n])}: `);
+/**
+ * Real results (every field the renderer needs) with a mode's score set by
+ * hand, so ties and gaps don't depend on today's fee rates. Named A, B, C...
+ */
+const made = (mode, scores) => {
+  const i = input({ price: 40, cost: 5, target: 5 });
+  const base = rank(mode, i);
+  const field = { profit: 'profit', maxbuy: 'maxCost', price: 'price' }[mode];
+  return scores.map((score, n) => {
+    const name = String.fromCharCode(65 + n);
+    const r = { ...base[n], id: name.toLowerCase(), name, short: name };
+    return score === null ? { ...r, unreachable: true } : { ...r, [field]: score };
   });
-  assert.ok(out.some((row) => row.spoken.startsWith('Tied ')), 'the example has a tie');
-});
-
-test('rank() orders by scoreFor in every mode, unreachable last', () => {
-  for (const [mode, raw] of [['profit', { price: 40, cost: 5 }], ['maxbuy', { price: 40, target: 5 }], ['price', { cost: 5, target: 10 }], ['price', { cost: 5, target: 9_000_000 }]]) {
-    const scores = rank(mode, input(raw)).map((r) => scoreFor(mode, r) ?? -Infinity);
-    assert.deepEqual(scores, [...scores].sort((a, b) => b - a), mode);
-  }
-});
-
-test('verdict names every marketplace tied for the top result', () => {
-  // Mercari and Facebook take the same 10%; eBay takes more.
-  const ids = ['mercari', 'facebook', 'ebay'];
-  const verdictFor = (mode, raw) => {
-    const i = input(raw);
-    return renderVerdict(mode, rank(mode, i, ids), i).html;
-  };
-  assert.match(verdictFor('profit', { price: 40, cost: 8 }), /Best on Mercari and Facebook Marketplace: /);
-  assert.match(verdictFor('maxbuy', { price: 40, target: 5 }), /selling on Mercari or Facebook Marketplace at /);
-  assert.match(verdictFor('price', { cost: 5, target: 10 }), /on Mercari or Facebook Marketplace, the lowest price/);
-  assert.match(verdictFor('profit', { price: 40, cost: 38 }), /Best case is .* on Mercari or Facebook Marketplace, under/);
-  const i = input({ price: 40, cost: 8 });
-  const both = rows(renderResults('profit', rank('profit', i, ids), { target: i.target })).filter((r) => r.best);
-  assert.deepEqual(both.map((r) => r.id).sort(), ['facebook', 'mercari'], 'both carry the Best badge');
-});
+};
 
 test('competition ranks: ties share a rank, the next rank skips, unreachable gets none', () => {
   assert.deepEqual(competitionRanks([5, 3, 3, 1, null]), [1, 2, 2, 4, null]);
   assert.deepEqual(competitionRanks([2, 2]), [1, 1]);
   assert.deepEqual(competitionRanks([]), []);
+  assert.deepEqual(ranksWithTies([5, 3, 3, null]), [
+    { rank: 1, tied: false },
+    { rank: 2, tied: true },
+    { rank: 2, tied: true },
+    { rank: null, tied: false },
+  ]);
 });
 
-test('results: tied marketplaces share a rank, and the pinned one says so', () => {
-  // Mercari and Facebook both take 10% of item + shipping: same profit.
-  const i = input({ price: 40, cost: 5 });
-  const ranked = rank('profit', i);
-  const out = rows(renderResults('profit', ranked, { focus: 'facebook', target: i.target }));
-  const [mercari, facebook] = ['mercari', 'facebook'].map((id) => out.find((r) => r.id === id));
-  assert.equal(ranked.find((r) => r.id === 'mercari').profit, ranked.find((r) => r.id === 'facebook').profit, 'the example really is a tie');
-  assert.equal(mercari.rank, facebook.rank);
-  assert.deepEqual(facebook.tags, [`Tied ${ordinal(facebook.rank)} of ${ranked.length}`]);
-  assert.equal(out.filter((r) => r.rank === facebook.rank).length, 2);
-  assert.equal(out.some((r) => r.rank === facebook.rank + 1), false, 'the next rank is skipped');
+test('byScore sorts best first and unreachable last in every mode', () => {
+  const order = (mode, scores) => made(mode, scores).sort(byScore(mode)).map((r) => r.name).join('');
+  assert.equal(order('profit', [100, 300, 200]), 'BCA');
+  assert.equal(order('maxbuy', [-50, 20, 0]), 'BCA');
+  assert.equal(order('price', [null, 500, 300, null]), 'CBAD', 'lowest price first, out of range last, ties in order');
+  // And rank() uses it, with real fees.
+  for (const [mode, raw] of [['profit', { price: 40, cost: 5 }], ['maxbuy', { price: 40, target: 5 }], ['price', { cost: 5, target: 10 }], ['price', { target: 96_000 }]]) {
+    const scores = rank(mode, input(raw)).map((r) => scoreFor(mode, r) ?? -Infinity);
+    assert.deepEqual(scores, [...scores].sort((a, b) => b - a), mode);
+  }
+  assert.equal(rank('toString', input({ price: 40 }))[0].profit, rank('profit', input({ price: 40 }))[0].profit, 'unknown modes are profit');
 });
 
-test('results: a result that cannot be reached has no rank', () => {
-  const i = input({ cost: MAX_CENTS, target: MAX_CENTS });
-  const out = rows(renderResults('price', rank('price', i), { focus: 'ebay', target: i.target }));
-  assert.ok(out.every((r) => r.rank === null && r.tags.length === 0));
+test('results: shared ranks on the badges (read aloud), and a rank tag for very large text', () => {
+  const out = rows(renderResults('profit', made('profit', [3000, 2500, 2500, 2000]), { target: 500 }));
+  assert.deepEqual(out.map((r) => r.rank), [1, 2, 2, 4], 'ties share a rank, the next is skipped');
+  assert.ok(out.every((r) => r.rankRead));
+  assert.deepEqual(out.map((r) => r.tags), [['Best'], ['Tied 2nd'], ['Tied 2nd'], ['4th']]);
+  assert.deepEqual(out.map((r) => r.name), ['A Best', 'B Tied 2nd', 'C Tied 2nd', 'D 4th'], 'a space before each tag');
+  const tiedTop = rows(renderResults('profit', made('profit', [3000, 3000, 100]), { target: 500 }));
+  assert.deepEqual(tiedTop.map((r) => r.best), [true, true, false], 'Best on every result tied for first');
+});
+
+test('results: the Best badge only on a top result the verdict recommends', () => {
+  const best = (mode, scores, target) => rows(renderResults(mode, made(mode, scores), { target })).map((r) => r.best);
+  assert.deepEqual(best('profit', [900, 400], 500), [true, false]);
+  assert.deepEqual(best('profit', [400, 300], 500), [false, false], 'under the minimum');
+  assert.deepEqual(best('profit', [0, -100], 0), [false, false], 'no profit');
+  assert.deepEqual(best('maxbuy', [0, -100], 500), [true, false], 'a $0 max buy still counts');
+  assert.deepEqual(best('maxbuy', [-1, -100], 500), [false, false]);
+  assert.deepEqual(best('price', [4000, 5000], 500), [true, false]);
+  const out = rows(renderResults('price', made('price', [null, null]), { target: 500 }));
+  assert.deepEqual(out.map((r) => [r.best, r.rank, r.rankRead, r.tags.length]), [[false, null, false, 0], [false, null, false, 0]], 'out of range: no rank, badge not read');
+  // With real fees and random inputs, the badge and the verdict always agree.
+  for (let n = 0; n < 300; n++) {
+    const mode = ['profit', 'maxbuy', 'price'][n % 3];
+    const i = input({ price: 1 + ((n * 37) % 120), cost: (n * 13) % 60, target: (n * 7) % 40, label: n % 9 });
+    const results = rank(mode, i);
+    const anyBest = rows(renderResults(mode, results, { target: i.target })).some((r) => r.best);
+    assert.equal(anyBest, renderVerdict(mode, results, i).tone === 'good', `${mode} ${JSON.stringify(i)}`);
+    assert.equal(anyBest, results.some((r) => recommends(mode, r, i.target) && scoreFor(mode, r) === scoreFor(mode, results[0])));
+  }
+});
+
+test('results: a fee page pins its marketplace first and keeps its real rank', () => {
+  const results = made('profit', [3000, 2500, 2500, 2000, 1000]);
+  const out = rows(renderResults('profit', results, { focus: 'c', target: 500 }));
+  assert.deepEqual(out.map((r) => r.id), ['c', 'a', 'b', 'd', 'e'], 'pinned first, the rest in order');
+  assert.deepEqual(out.map((r) => r.rank), [2, 1, 2, 4, 5], 'every badge keeps its true rank');
+  assert.deepEqual(out[0].tags, ['Tied 2nd']);
+  assert.deepEqual(out[1].tags, ['Best'], 'Best stays on the real winner');
+});
+
+test('verdict names every marketplace tied for the top result', () => {
+  const verdict = (mode, scores, raw) => renderVerdict(mode, made(mode, scores), input(raw)).html;
+  assert.match(verdict('profit', [2100, 2100, 900], { target: 5 }), /Best on A and B: \$21\.00 profit/);
+  assert.match(verdict('profit', [2100, 900], { target: 5 }), /Best on A: /);
+  assert.match(verdict('profit', [2100, 2100, 2100], { target: 5 }), /Best on A, B and C: /);
+  assert.match(verdict('maxbuy', [1500, 1500], { price: 40, target: 5 }), /selling on A or B at /);
+  assert.match(verdict('price', [4000, 4000, 5000], { target: 5 }), /on A or B, the lowest price/);
+  assert.match(verdict('profit', [300, 300], { target: 5 }), /Best case is \$3\.00 on A or B, under/);
+  assert.match(verdict('profit', [0, 0], { target: 0 }), /break even on A or B\./);
 });

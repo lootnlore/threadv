@@ -5,7 +5,7 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
-import { scoreFor, competitionRanks } from './calc.mjs';
+import { scoreFor, ranksWithTies, recommends } from './calc.mjs';
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
@@ -111,30 +111,24 @@ function subFor(mode, r) {
  */
 export function renderResults(mode, results, { focus, target = 0 } = {}) {
   // Equal results share a rank; one that can't be reached has none.
-  const ranks = competitionRanks(results.map((r) => scoreFor(mode, r)));
-  const rows = results.map((r, i) => ({ r, rank: ranks[i], tied: ranks[i] !== null && ranks.filter((n) => n === ranks[i]).length > 1 }));
+  const rows = ranksWithTies(results.map((r) => scoreFor(mode, r))).map((ranked, i) => ({ r: results[i], ...ranked }));
   // On a platform's own fee page, pin it first but keep its true rank.
   const pinned = rows.findIndex(({ r }) => r.id === focus);
   if (pinned > 0) rows.unshift(...rows.splice(pinned, 1));
   return rows
     .map(({ r, rank, tied }) => {
-      // Matches renderVerdict: no "Best" badge on a result the verdict rejects.
-      const best =
-        rank === 1 &&
-        (mode !== 'maxbuy' || r.maxCost >= 0) &&
-        (mode !== 'profit' || (r.profit > 0 && r.profit >= target));
+      const best = rank === 1 && recommends(mode, r, target);
       const cls = ['result', best && 'is-best', r.id === focus && 'is-focus'].filter(Boolean).join(' ');
-      // The rank: a badge on screen, words for screen readers ("Tied 4th:"; the
-      // list's own item numbers can't show ties). A pinned row also gets the
-      // words as a tag, shown only when very large text hides the badge.
-      const words = rank === null ? '' : rankWords(rank, tied);
-      const spoken = words && `<span class="visually-hidden">${words}: </span>`;
+      // The rank is the badge's number (tied results share it), read aloud
+      // before the name. When very large text hides the badges, a tag after
+      // the name says it instead ("Tied 4th"), like the Best tag.
+      const badge = rank === null ? '<span class="rank" aria-hidden="true">\u2013</span>' : `<span class="rank">${rank}</span>`;
       const tag = best
         ? '<span class="tag tag-best">Best</span>'
-        : r.id === focus && pinned > 0 && words
-          ? `<span class="tag tag-rank" aria-hidden="true">${words} of ${results.length}</span>`
+        : rank !== null
+          ? `<span class="tag tag-rank">${rankWords(rank, tied)}</span>`
           : '';
-      const head = `<span class="result-main"><span class="rank" aria-hidden="true">${rank ?? '\u2013'}</span><span class="pname">${spoken}${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
+      const head = `<span class="result-main">${badge}<span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable
         ? `<div class="result-head">${head}</div>`
@@ -152,26 +146,26 @@ export function renderVerdict(mode, results, input) {
   const out = (tone, html) => ({ tone, html: `<span>${html}</span>` });
   const target = money(input.target);
   const top = results.find((r) => !r.unreachable);
-  // Every platform tied for the top result is named.
-  const best = results.filter((r) => top && scoreFor(mode, r) === scoreFor(mode, top)).map((r) => esc(r.name));
   if (!top) {
     return out('bad', `<strong>Out of range.</strong> No platform reaches ${target} profit with these costs.`);
   }
+  // Every platform tied for the top result is named.
+  const names = results.filter((r) => scoreFor(mode, r) === scoreFor(mode, top)).map((r) => esc(r.name));
+  const good = recommends(mode, top, input.target); // the same test as the Best badge
   if (mode === 'maxbuy') {
-    if (top.maxCost < 0) {
-      return out('bad', `<strong>Pass.</strong> At a ${money(input.price)} sale you can’t clear ${target} on any platform, even if the item is free.`);
-    }
-    return out('good', `<strong>Pay up to ${money(top.maxCost)}</strong> to make ${target} selling on ${orList(best)} at ${money(input.price)}.`);
+    return good
+      ? out('good', `<strong>Pay up to ${money(top.maxCost)}</strong> to make ${target} selling on ${orList(names)} at ${money(input.price)}.`)
+      : out('bad', `<strong>Pass.</strong> At a ${money(input.price)} sale you can’t clear ${target} on any platform, even if the item is free.`);
   }
   if (mode === 'price') {
-    return out('good', `<strong>List at ${money(top.price)}</strong> on ${orList(best)}, the lowest price that clears ${target} after fees and costs.`);
+    return out('good', `<strong>List at ${money(top.price)}</strong> on ${orList(names)}, the lowest price that clears ${target} after fees and costs.`);
+  }
+  if (good) {
+    const roi = top.roi === null ? '' : ` (${percent(top.roi)} ROI)`;
+    return out('good', `<strong>Worth it.</strong> Best on ${andList(names)}: ${money(top.profit)} profit${roi}.`);
   }
   if (top.profit < input.target) {
-    return out('bad', `<strong>Pass.</strong> Best case is ${money(top.profit)} on ${orList(best)}, under your ${target} minimum.`);
+    return out('bad', `<strong>Pass.</strong> Best case is ${money(top.profit)} on ${orList(names)}, under your ${target} minimum.`);
   }
-  if (top.profit <= 0) {
-    return out('bad', `<strong>No profit.</strong> At best you break even on ${orList(best)}.`);
-  }
-  const roi = top.roi === null ? '' : ` (${percent(top.roi)} ROI)`;
-  return out('good', `<strong>Worth it.</strong> Best on ${andList(best)}: ${money(top.profit)} profit${roi}.`);
+  return out('bad', `<strong>No profit.</strong> At best you break even on ${orList(names)}.`);
 }

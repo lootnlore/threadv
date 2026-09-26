@@ -246,20 +246,42 @@ export function competitionRanks(scores) {
   return scores.map((s) => (s === null ? null : 1 + scores.filter((t) => t !== null && t > s).length));
 }
 
+/** competitionRanks, with whether each rank is shared: [{ rank, tied }]. */
+export function ranksWithTies(scores) {
+  const ranks = competitionRanks(scores);
+  return ranks.map((rank) => ({ rank, tied: rank !== null && ranks.filter((n) => n === rank).length > 1 }));
+}
+
+/**
+ * Whether the verdict would recommend this result: reachable, a max buy of
+ * at least $0, or a profit above zero that meets the minimum. The Best badge
+ * and the verdict both ask this.
+ */
+export function recommends(mode, r, target) {
+  if (r.unreachable) return false;
+  if (mode === 'maxbuy') return r.maxCost >= 0;
+  if (mode === 'price') return true;
+  return r.profit > 0 && r.profit >= target;
+}
+
 /**
  * Run a calculator mode across platforms and rank the results best-first
  * (see scoreFor; unreachable last, ties in platform order).
  */
 export function rank(mode, input, ids) {
-  const run = {
+  const runs = {
     profit: (p) => evaluate(p, input),
     maxbuy: (p) => maxBuy(p, input),
     price: (p) => listPrice(p, input) ?? { id: p.id, name: p.name, short: p.short ?? p.name, unreachable: true },
-  }[mode] ?? ((p) => evaluate(p, input)); // like scoreFor: anything else is profit
+  };
+  const run = has(runs, mode) ? runs[mode] : runs.profit; // like scoreFor: anything else is profit
+  return pick(ids).map(run).sort(byScore(mode));
+}
+
+/** Sort comparator: best scoreFor first, unreachable last, ties keep their order. */
+export function byScore(mode) {
   const key = (r) => scoreFor(mode, r) ?? -Infinity;
-  return pick(ids)
-    .map(run)
-    .sort((a, b) => (key(a) === key(b) ? 0 : key(b) > key(a) ? 1 : -1));
+  return (a, b) => (key(a) === key(b) ? 0 : key(b) > key(a) ? 1 : -1);
 }
 
 export { PLATFORMS, PLATFORM_BY_ID, MAX_CENTS };

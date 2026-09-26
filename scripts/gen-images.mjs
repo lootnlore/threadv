@@ -54,7 +54,7 @@ await writeFile(join(ROOT, 'src/assets/favicon.ico'), Buffer.concat([header, png
 // Social card with real numbers from the engine at the calculator defaults.
 const data = ogData();
 const rows = data.rows
-  .map((r, i) => `<div class="row${i === 0 ? ' best' : ''}"><span class="n">${i + 1}</span><span class="p">${r.name}</span><span class="v">${r.profit}</span></div>`)
+  .map((r) => `<div class="row${r.rank === 1 ? ' best' : ''}"><span class="n">${r.rank}</span><span class="p">${r.name}</span><span class="v">${r.profit}</span></div>`)
   .join('');
 const og = `
 <style>

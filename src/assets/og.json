@@ -8,20 +8,19 @@
   "marketplaces": 9,
   "rows": [
     {
+      "rank": 1,
       "name": "Poshmark",
       "profit": "$24.00"
     },
     {
+      "rank": 2,
       "name": "Depop",
       "profit": "$23.13"
     },
     {
+      "rank": 3,
       "name": "TikTok Shop",
       "profit": "$21.80"
-    },
-    {
-      "name": "Mercari",
-      "profit": "$21.00"
     }
   ]
 }

@@ -881,23 +881,13 @@ select {
 /* Icons beside text (verdict, checklist): an icon column sized in rem, so it
    scales with the text, and a minmax(0) text column that wraps like a
    paragraph. The icon is centred on the text's first line box, measured in
-   the text's own line height (--text-line, 1lh of the text), so it holds for
-   any font. When the box is narrow for the text size, the icon goes inline
+   the text's own line height (see @supports below), so it holds for any
+   font. When the box is narrow for the text size, the icon goes inline
    instead: the text runs under it, and a word that can't fit beside it moves
    to the next line whole (a line may break after an inline-block) rather
-   than splitting.
-
-   Registered so 1lh is computed on the text, not on the smaller icon glyph
-   that inherits it. */
-@property --text-line {
-  syntax: '<length>';
-  inherits: true;
-  initial-value: 0px;
-}
-
+   than splitting. */
 .verdict {
   --icon: 1.5rem;
-  --text-line: 1lh;
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
   align-items: baseline;
@@ -1061,9 +1051,9 @@ select {
   color: var(--brand-strong);
 }
 
-/* A pinned row's rank as a tag ("5th of 9"), shown only when very large text
-   hides the rank badge (below). Screen readers hear every row's rank in words
-   instead, so the tag is aria-hidden. */
+/* A row's rank as a tag ("Tied 4th"), shown instead of the rank badge when
+   very large text hides the badges (below). Hidden (and so not read) while
+   the badge shows. */
 .tag-rank {
   display: none;
   text-transform: none;
@@ -1370,7 +1360,6 @@ select {
 
 .checklist li {
   --icon: 1.375rem;
-  --text-line: 1lh;
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
   align-items: baseline;
@@ -1403,14 +1392,18 @@ select {
   }
 }
 
-/* With lh: the icon's top is half the difference between the line and the
-   icon below the line's top, beside the text (grid) or inline with it. */
+/* With lh: the icon takes the text's line height (in line-height, lh means
+   the parent's line), so its own 1lh is one line of the text, whatever the
+   icon's smaller font. Its top then sits half the difference between that
+   line and the icon below the line's top, beside the text (grid) or inline
+   with it. */
 @supports (height: 1lh) {
   .verdict::before,
   .checklist li::before {
+    line-height: 1lh;
     align-self: start;
     vertical-align: top;
-    margin-top: calc((var(--text-line) - var(--icon)) / 2);
+    margin-top: calc((1lh - var(--icon)) / 2);
     translate: none;
   }
 }
@@ -1660,8 +1653,8 @@ table.data {
    the text) and apply to the whole list, so every row changes together.
    They leave room for the longest name word, "Marketplace" (7em in a wide
    font; the page tests check it never splits): below 14.5em every amount
-   moves under its name, below 10em the rank number steps aside (screen
-   readers hear the rank in words either way). */
+   moves under its name, below 10em the rank numbers step aside (the order
+   and the amounts still show the ranking). */
 .compare {
   container-type: inline-size;
   list-style: none;

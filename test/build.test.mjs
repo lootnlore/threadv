@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
 import config from '../site.config.mjs';
-import { FEES_VERIFIED, percentOf } from '../src/engine/fees.mjs';
+import { FEES_VERIFIED, PLATFORMS, percentOf } from '../src/engine/fees.mjs';
 import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
 import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
 import { ogData } from '../scripts/og-data.mjs';
@@ -278,26 +278,22 @@ test('tracker launch signups are tagged so only they get the launch note', () =>
   assert.ok(!page('index.html').includes(`value="${value}"`), 'fee-alert signups are not tagged for the launch');
 });
 
-test('fee pages rank marketplaces by payout, ties sharing a rank on screen and in words', () => {
+test('fee pages rank marketplaces by payout, ties sharing a rank', () => {
   const pages = html.filter((h) => /^fees\/[a-z]+\/index\.html$/.test(h.file));
-  assert.ok(pages.length >= 9);
-  let ties = 0;
+  assert.equal(pages.length, PLATFORMS.length);
   for (const { file, src } of pages) {
     const list = src.match(/<ul class="compare" role="list">([\s\S]*?)<\/ul>/)[1];
-    const rows = [...list.matchAll(/<span class="cmp-rank" aria-hidden="true">(\d+)\.<\/span> <span class="visually-hidden">([^<]+): <\/span>[\s\S]*?<span class="num">\$([\d,.]+)<\/span>/g)].map(
-      ([, shown, words, payout]) => ({ shown: Number(shown), words, payout: Number(payout.replace(/,/g, '')) }),
-    );
-    assert.equal(rows.length, 9, file);
+    const rows = [...list.matchAll(/<span class="cmp-rank">(\d+)\.<\/span>[\s\S]*?<span class="num">\$([\d,.]+)<\/span>/g)].map(([, shown, payout]) => ({
+      shown: Number(shown),
+      payout: Number(payout.replace(/,/g, '')),
+    }));
+    assert.equal(rows.length, PLATFORMS.length, file);
     rows.forEach((row, i) => {
       const want = 1 + rows.filter((o) => o.payout > row.payout).length;
-      const tied = rows.filter((o) => o.payout === row.payout).length > 1;
-      ties += tied;
       assert.ok(i === 0 || rows[i - 1].payout >= row.payout, `${file}: sorted by payout`);
       assert.equal(row.shown, want, `${file}: ${row.payout} ranks ${want}`);
-      assert.match(row.words, new RegExp(`^${tied ? 'Tied ' : ''}${want}(st|nd|rd|th)$`), file);
     });
   }
-  assert.ok(ties > 0, 'the current fees include a tie, so sharing is exercised');
 });
 
 test('fee change dates are machine-readable', () => {

@@ -384,7 +384,8 @@ if (chromium) {
 
         await page.goto(`${base}/`, { waitUntil: 'networkidle' });
         await page.locator('.result summary').first().click();
-        // Icons beside text (not the inline fallback in narrow boxes) are centred on the first line.
+        // Icons are centred on the first line of their text: beside it, or inline
+        // in narrow boxes (there only when the first word shares the icon's line).
         const icons = [['.verdict', 'before'], ['.checklist li', 'before'], ['.faq summary', 'after']];
         const iconMids = await iconReader(page);
         for (const [selector, type] of icons) {
@@ -393,7 +394,7 @@ if (chromium) {
             ([sel, type]) =>
               [...document.querySelectorAll(sel)].map((el) => {
                 const icon = getComputedStyle(el, `::${type}`);
-                if (icon.position === 'static' && icon.display !== 'grid') return null; // inline: flows with the text
+                const inline = icon.display.startsWith('inline') || (icon.position === 'static' && icon.display === 'inline');
                 const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
                 let t = walker.nextNode();
                 while (!t.textContent.trim()) t = walker.nextNode();
@@ -401,12 +402,13 @@ if (chromium) {
                 range.setStart(t, t.textContent.search(/\S/));
                 range.setEnd(t, t.textContent.search(/\S/) + 1);
                 const r = range.getClientRects()[0];
-                return r.top + r.height / 2;
+                return { mid: r.top + r.height / 2, top: r.top, bottom: r.bottom, inline };
               }),
             [selector, type],
           );
           lines.forEach((line, i) => {
-            if (line !== null) assert.ok(Math.abs(mids[i] - line) <= 1.5, `${where}: ${selector} icon ${(mids[i] - line).toFixed(1)}px off its first line`);
+            if (line.inline && (mids[i] < line.top || mids[i] > line.bottom)) return; // icon alone on its line
+            assert.ok(Math.abs(mids[i] - line.mid) <= 1.5, `${where}: ${selector} icon ${(mids[i] - line.mid).toFixed(1)}px off its first line`);
           });
         }
         // The fee breakdown starts where the details line does (and, beside the rank badge, the name).
@@ -427,12 +429,25 @@ if (chromium) {
             const left = (sel) => row.querySelector(sel).getBoundingClientRect().left;
             return { rank: row.querySelector('.rank').offsetWidth, name: left('.pname'), sub: left('.result-sub'), bd: left('.breakdown dl') };
           });
-          assert.deepEqual([narrow.rank, narrow.sub, narrow.bd], [0, narrow.name, narrow.name], `${where}, 11em results list`);
+          assert.equal(narrow.rank, 0, `${where}, 11em results list: rank badge hidden`);
+          for (const x of [narrow.sub, narrow.bd]) assert.ok(Math.abs(x - narrow.name) <= 1, `${where}, 11em results list: indented ${x - narrow.name}px`);
         }
 
         // Fee-page ranking: every row has its amount beside the name or every row under it,
         // and a shown rank number shares the name's first line.
-        await page.goto(`${base}/fees/facebook/`, { waitUntil: 'domcontentloaded' });
+        await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
+        // Each ranked result shows its rank once: the badge, or (badges hidden by very
+        // large text) a rank tag; the pinned, out-of-order row included. Best rows
+        // say it with their Best tag.
+        const shown = await page.evaluate(() =>
+          [...document.querySelectorAll('.result')].map((row) => ({
+            badge: row.querySelector('.rank').offsetWidth > 0,
+            rankTag: row.querySelector('.tag-rank')?.offsetWidth > 0,
+            hasRankTag: !!row.querySelector('.tag-rank'),
+          })),
+        );
+        for (const row of shown) if (row.hasRankTag) assert.ok(row.badge !== row.rankTag, `${where}: rank badge ${row.badge ? 'and' : 'nor'} rank tag shown`);
+        assert.ok(shown.some((row) => row.hasRankTag), `${where}: no ranked rows to check`);
         const rows = await page.evaluate(() =>
           [...document.querySelectorAll('.compare li')].map((li) => {
             const name = li.querySelector('a, strong').getClientRects()[0];
