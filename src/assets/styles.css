@@ -759,6 +759,7 @@ select {
 
 select:focus-visible {
   outline-offset: 0; /* like the money fields: clear of the label and hint */
+  border-radius: var(--radius-sm); /* keep its corners (the generic ring rounds to 4px) */
 }
 
 .hint {
@@ -978,6 +979,13 @@ select:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr); /* cards never outgrow the calculator */
   gap: 8px;
+}
+
+/* Rows for the last valid numbers, while a field is being fixed (the prompt
+   above says so in words; see showPending in app.js): grey, not faded, so
+   every text keeps its contrast. */
+.results.is-stale {
+  filter: grayscale(1);
 }
 
 .result {
@@ -1952,7 +1960,9 @@ code {
 
   .tag,
   .rank,
-  .verdict::before {
+  .verdict::before,
+  .checklist li::before,
+  .steps .card h3::before {
     outline: 1px solid; /* shapes the background would have drawn */
     outline-offset: -1px;
   }

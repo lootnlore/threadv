@@ -239,19 +239,21 @@ export function scoreFor(mode, r) {
 }
 
 /**
- * The calculator inputs a platform's results depend on, so a bad value in any
- * other can't hold its results back. Tested against the engine: changing an
- * input left out never changes a result.
+ * The calculator inputs a platform's results depend on in a mode (Max buy
+ * works out the cost, List price the price), given the normalized `input`
+ * (some options only apply with others). A bad value in any other input can't
+ * hold its results back. Tested against the engine from random starting
+ * points: changing an input left out never changes a result.
  */
-export function inputsUsedBy(platform) {
+export function inputsUsedBy(platform, mode = 'profit', input) {
+  const own = { maxbuy: ['price'], price: ['cost'] }[mode] ?? ['price', 'cost'];
   return [
-    'price',
-    'cost',
+    ...own,
     'target',
     'other',
     ...(platform.sellerPaysShipping ? ['ship', 'label'] : []),
     ...(platform.feesIncludeTax ? ['taxRate'] : []),
-    ...(platform.options ?? []),
+    ...(platform.options ?? []).filter((key) => !input || !platform.usesOption || platform.usesOption(key, input.opts)),
   ];
 }
 

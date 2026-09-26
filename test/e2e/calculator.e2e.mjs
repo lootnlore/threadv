@@ -266,25 +266,38 @@ if (chromium) {
   test('no verdict from numbers the form rejects or leaves out', async () => {
     const { context, page } = await open();
     const state = () =>
-      page.evaluate(() => ({ tone: document.querySelector('[data-verdict]').className, rows: document.querySelector('[data-results]').children.length }));
-    const pending = { tone: 'verdict verdict-wait', rows: 0 };
+      page.evaluate(() => {
+        const list = document.querySelector('[data-results]');
+        return {
+          tone: document.querySelector('[data-verdict]').className,
+          rows: list.hidden ? 0 : list.children.length,
+          stale: list.classList.contains('is-stale'),
+          share: !document.querySelector('[data-share]').hidden,
+          listHeight: Math.round(list.getBoundingClientRect().height), // the rows don't collapse and come back
+        };
+      });
+    const LAST = ' The results below are for your last valid numbers.';
+    await page.locator('.result[data-id="ebay"] summary').click(); // a breakdown the user opened
+    const live = await state();
     const cases = [
-      ['#f-cost', '-5', 'Check “You paid”. Enter an amount from $0 to $100,000.'],
-      ['#f-price', '12,5', 'Check “Sell price”. Enter an amount from $0 to $100,000.'],
-      ['#f-price', '', 'Check “Sell price”. Enter a sell price of at least $0.01.'],
-      ['#f-price', '0.004', 'Check “Sell price”. Enter a sell price of at least $0.01.', 'rounds to $0'],
+      ['#f-cost', '-5', `Check “You paid”. Enter an amount from $0 to $100,000.${LAST}`, 'true'],
+      ['#f-price', '12,5', `Check “Sell price”. Enter an amount from $0 to $100,000.${LAST}`, 'true'],
+      ['#f-price', '0.004', `Check “Sell price”. Enter a sell price of at least $0.01.${LAST}`, 'true'],
+      ['#f-price', '', `Enter a sell price to see results.${LAST}`, null, 'not typed yet: a prompt, not an error'],
     ];
-    for (const [id, value, want, why] of cases) {
+    for (const [id, value, want, invalid, why] of cases) {
       await page.fill(id, value);
       await settle(page);
       assert.equal(await verdict(page), want, why ?? `${id} = "${value}"`);
-      assert.deepEqual(await state(), pending, 'a neutral prompt, and no rows for numbers that were never entered');
-      assert.equal(await page.locator(id).getAttribute('aria-invalid'), 'true', 'the field itself says so');
+      assert.deepEqual(await state(), { ...live, tone: 'verdict verdict-wait', stale: true, share: false }, 'the last rows stay put (dimmed), nothing jumps, no link to share');
+      assert.equal(await page.locator(id).getAttribute('aria-invalid'), invalid);
+      if (!invalid) assert.equal(await page.locator('#h-price').innerText(), 'Needed to see results.');
       await page.fill('#f-price', '40');
       await page.fill('#f-cost', '8');
       await settle(page);
       assert.match(await verdict(page), /^Worth it\./);
-      assert.equal((await state()).rows, 9);
+      assert.deepEqual(await state(), live);
+      assert.equal(await page.locator('.result[data-id="ebay"] details').getAttribute('open'), '', 'the open breakdown stays open');
     }
     // Enter goes to what needs fixing, not to the verdict (phones scroll there)...
     await page.setViewportSize({ width: 390, height: 844 });
@@ -308,11 +321,11 @@ if (chromium) {
     assert.equal(await page.locator('.tune').getAttribute('open'), null, 'closed by the user, it stays closed while they type');
     await page.locator('#f-price').press('Enter');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'f-tiktokRate', 'Enter opens it and goes to the field');
-    // Several bad fields are all named.
+    // Several bad fields: each named with its reason.
     await page.fill('#f-cost', 'abc');
     await settle(page);
-    assert.equal(await verdict(page), 'Check “You paid” and “TikTok Shop fee”. Each says what it needs.');
-    // A bad value no compared marketplace reads doesn't hold results back.
+    assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Enter an amount from \$0 to \$100,000\. “TikTok Shop fee”: Enter a percentage from 0 to \d+\./);
+    // A bad value no compared marketplace reads doesn't hold results back...
     await page.fill('#f-cost', '8');
     await page.locator('input[name="platform"][value="tiktok"]').uncheck();
     await settle(page);
@@ -324,20 +337,44 @@ if (chromium) {
     await settle(page);
     assert.match(await verdict(page), /^Worth it\. Best on Poshmark/, 'Poshmark buyers pay the label, so a bad label cost is ignored');
     await page.fill('#f-label', '7');
-    // No marketplace picked: a prompt too, and Enter goes to the first box.
+    // No marketplace picked: a prompt without the old rows, and Enter goes to the first box.
     await page.locator('input[name="platform"][value="poshmark"]').uncheck();
     await settle(page);
-    assert.deepEqual(await state(), pending);
     assert.match(await verdict(page), /^No marketplaces selected\./);
+    assert.equal((await state()).rows, 0);
     await page.locator('#f-price').press('Enter');
     assert.equal(await page.evaluate(() => document.activeElement.getAttribute('name')), 'platform');
+    for (const box of await page.locator('input[name="platform"]').all()) await box.check();
+    // ...nor does a field the mode doesn't use (cost in Max buy, price in List price).
+    await page.fill('#f-cost', 'abc');
+    await page.getByRole('tab', { name: 'Max buy' }).click();
+    await settle(page);
+    assert.match(await verdict(page), /^Pay up to /, 'Max buy ignores the cost');
+    // Rows for another mode are never kept: List price reads the bad cost.
+    await page.getByRole('tab', { name: 'List price' }).click();
+    await settle(page);
+    assert.equal(await verdict(page), 'Check “You paid”. Enter an amount from $0 to $100,000.');
+    assert.equal((await state()).rows, 0);
+    await page.fill('#f-cost', '8');
+    await page.evaluate(() => {
+      const price = document.querySelector('#f-price'); // hidden in this mode, as if left from before
+      price.value = 'junk';
+      price.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await settle(page);
+    assert.match(await verdict(page), /^List at /, 'List price ignores the sell price');
     await context.close();
 
-    // A link that can't be worked out shows no rows (not the page's own example),
-    // and a new link's bad Fine-tune field opens the panel again.
+    // A link that can't be worked out shows no rows (not the page's own example,
+    // nor the previous link's), and a new link's bad Fine-tune field opens the panel again.
     const link = await open('/#mode=maxbuy&price=');
-    assert.equal(await verdict(link.page), 'Check “Sell price”. Enter a sell price of at least $0.01.');
-    assert.equal(await link.page.locator('[data-results] > li').count(), 0);
+    assert.equal(await verdict(link.page), 'Enter a sell price to see results.');
+    assert.equal(await link.page.locator('[data-results]').isHidden(), true);
+    await link.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await link.page.evaluate(() => (location.hash = '#s=1&mode=profit&price='));
+    await settle(link.page);
+    assert.equal(await verdict(link.page), 'Enter a sell price to see results.');
+    assert.equal(await link.page.locator('[data-results]').isHidden(), true);
     await link.page.goto(`${base}/#s=1&tiktokRate=abc`);
     await settle(link.page);
     assert.equal(await link.page.locator('.tune').getAttribute('open'), '');
@@ -664,6 +701,8 @@ if (chromium) {
     assert.deepEqual([fieldRing, logoRing], [tabRing, tabRing], 'focus rings share one colour');
     // A result both pinned and Best keeps both edges (the top marketplace's own page).
     await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    const circles = await page.evaluate(() => ['.checklist li', '.steps .card h3'].map((sel) => getComputedStyle(document.querySelector(sel), '::before').outlineStyle));
+    assert.deepEqual(circles, ['solid', 'solid'], 'the checklist ticks and step numbers keep their circles');
     const top = await page.getAttribute('.result.is-best', 'data-id');
     await page.goto(`${base}/fees/${top}/`, { waitUntil: 'networkidle' });
     const both = await get(page, '.result.is-best.is-focus');
@@ -733,6 +772,8 @@ if (chromium) {
         }, [box, label, hintId]);
         assert.ok(Math.min(...gaps) >= 0.5, `forced colors ${forcedColors}, focus on ${focusOn}: ${box} lines ${gaps} from the label and hint`);
       }
+      const radii = await p.evaluate(() => ['#f-ebayCategory', '#f-etsyOffsite'].map((sel) => getComputedStyle(document.querySelector(sel)).borderTopLeftRadius));
+      assert.equal(radii[0], radii[1], `forced colors ${forcedColors}: a focused select keeps its corners`);
       await ctx.close();
     }
   });

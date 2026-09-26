@@ -12,6 +12,7 @@
  *   breakpoints(order)  -> [cents]                 sale prices where a fee jumps (only if any)
  *   sellerPaysShipping  -> whether the shipping inputs apply on this platform
  *   options             -> its own Fine-tune settings (keys of the calculator input's opts)
+ *   usesOption          -> optional: whether an option is read with these opts (default: always)
  *   feesIncludeTax      -> whether any fee is charged on the buyer's sales tax
  *   company             -> the owner, where it differs from the name (legal notices)
  *   rows                -> [fee, rate, charged on] for the fee table and FAQ. "Charged on" is
@@ -145,6 +146,7 @@ export const PLATFORMS = [
   {
     id: 'ebay',
     options: ['ebayCategory', 'ebayCustomRate', 'ebayAdRate'], // its Fine-tune settings
+    usesOption: (key, opts) => key !== 'ebayCustomRate' || opts.ebayCategory === 'custom', // the custom rate only for the custom category
     feesIncludeTax: true,
     name: 'eBay',
     sellerPaysShipping: true,

@@ -523,27 +523,58 @@ test('verdict names every marketplace tied for the top result', () => {
   assert.match(verdict('profit', [0, 0], { target: 0 }), /break even on A or B\./);
 });
 
-test('inputsUsedBy lists every input a platform reads', () => {
-  // Change one input at a time: whenever a platform's figures move, the input
-  // must be on its list (so a bad value elsewhere can't hold it back).
-  const base = { price: 40, cost: 8, ship: 5, label: 7, target: 10, other: 1, taxRate: 8, ebayCategory: 'custom', ebayCustomRate: 12, ebayAdRate: 2, depopBoost: false, etsyOffsite: 'none', whatnotRate: 8, tiktokRate: 6 };
-  const other = { price: 55, cost: 3, ship: 9, label: 2, target: 20, other: 4, taxRate: 3, ebayCategory: Object.keys(EBAY_CATEGORIES).find((k) => k !== 'custom'), ebayCustomRate: 20, ebayAdRate: 6, depopBoost: true, etsyOffsite: Object.keys(ETSY_OFFSITE).find((k) => k !== 'none'), whatnotRate: 12, tiktokRate: 9 };
-  const figures = (p, raw) => {
-    const i = normalizeInputs(raw);
-    const r = evaluate(p, i);
-    return JSON.stringify([r.profit, r.payout, r.feeTotal, maxBuy(p, i).maxCost, listPrice(p, i)?.price ?? null]);
+test('inputsUsedBy lists every input a platform reads, in every mode', () => {
+  // From random starting points (thresholds, categories, boosts all vary),
+  // change one input at a time: whenever a mode's figures move, the input must
+  // be on that platform's list for the mode (so a bad value elsewhere can't
+  // hold its results back).
+  const random = seeded(3);
+  const pick = (list) => list[Math.floor(random() * list.length)];
+  const amount = (max) => Math.round(random() * max * 100) / 100;
+  const categories = Object.keys(EBAY_CATEGORIES);
+  const offsite = Object.keys(ETSY_OFFSITE);
+  const randomInput = () => ({
+    price: 1 + amount(200), cost: amount(100), ship: amount(20), label: amount(15), target: amount(50), other: amount(5), taxRate: amount(15),
+    ebayCategory: pick(categories), ebayCustomRate: amount(30), ebayAdRate: amount(15), depopBoost: random() < 0.5,
+    etsyOffsite: pick(offsite), whatnotRate: amount(20), tiktokRate: amount(15),
+  });
+  const nudge = (key, value) =>
+    key === 'ebayCategory' ? pick(categories.filter((c) => c !== value))
+      : key === 'etsyOffsite' ? pick(offsite.filter((o) => o !== value))
+        : key === 'depopBoost' ? !value
+          : value + 1 + amount(20);
+  const figures = {
+    profit: (p, i) => { const r = evaluate(p, i); return [r.profit, r.payout, r.feeTotal]; },
+    maxbuy: (p, i) => { const r = maxBuy(p, i); return [r.maxCost, r.payout, r.feeTotal]; },
+    price: (p, i) => [listPrice(p, i)?.price ?? null],
   };
   let moved = 0;
-  for (const p of PLATFORMS) {
-    for (const key of Object.keys(other)) {
-      if (figures(p, base) === figures(p, { ...base, [key]: other[key] })) continue;
-      moved++;
-      assert.ok(inputsUsedBy(p).includes(key), `${p.id} reads ${key}, but inputsUsedBy leaves it out`);
+  for (let n = 0; n < 25; n++) {
+    const base = randomInput();
+    for (const p of PLATFORMS) {
+      for (const [mode, figure] of Object.entries(figures)) {
+        const i = normalizeInputs(base);
+        const before = JSON.stringify(figure(p, i));
+        const used = inputsUsedBy(p, mode, i);
+        for (const key of Object.keys(base)) {
+          if (JSON.stringify(figure(p, normalizeInputs({ ...base, [key]: nudge(key, base[key]) }))) === before) continue;
+          moved++;
+          assert.ok(used.includes(key), `${p.id}, ${mode} mode, from ${JSON.stringify(base)}: reads ${key}, but inputsUsedBy leaves it out`);
+        }
+      }
     }
   }
-  assert.ok(moved > 30, 'the perturbations really move the figures');
-  // And each declared option is really read.
+  assert.ok(moved > 1000, `the changes really move the figures (${moved})`);
+  // Modes: Max buy works out the cost and List price the price, so neither reads it.
   for (const p of PLATFORMS) {
-    for (const key of p.options ?? []) assert.notEqual(figures(p, base), figures(p, { ...base, [key]: other[key] }), `${p.id} declares ${key} but ignores it`);
+    assert.ok(!inputsUsedBy(p, 'maxbuy').includes('cost') && !inputsUsedBy(p, 'price').includes('price'));
   }
+  // Each declared option is really read (the eBay custom rate with the custom category).
+  const base = { price: 40, cost: 8, ship: 5, label: 7, target: 10, other: 1, taxRate: 8, ebayCategory: 'custom', ebayCustomRate: 12, ebayAdRate: 2, depopBoost: false, etsyOffsite: 'none', whatnotRate: 8, tiktokRate: 6 };
+  for (const p of PLATFORMS) {
+    for (const key of p.options ?? []) {
+      assert.notDeepEqual(figures.profit(p, normalizeInputs(base)), figures.profit(p, normalizeInputs({ ...base, [key]: nudge(key, base[key]) })), `${p.id} declares ${key} but ignores it`);
+    }
+  }
+  assert.ok(!inputsUsedBy(P.ebay, 'profit', normalizeInputs({ ...base, ebayCategory: 'most' })).includes('ebayCustomRate'), 'the custom rate only with the custom category');
 });
