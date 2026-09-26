@@ -109,15 +109,28 @@ function subFor(mode, r) {
  * headline, so tapping anywhere on a result opens its fee breakdown.
  * `focus` pins and highlights one platform (fee pages).
  */
+/**
+ * The results as the site ranks them: [{ r, rank, tied, best }]. Equal
+ * results share a rank, one that can't be reached has none, and Best marks
+ * each first-ranked result the verdict recommends. The results list and the
+ * social card both use it.
+ */
+export function rankedRows(mode, results, target = 0) {
+  return ranksWithTies(results.map((r) => scoreFor(mode, r))).map(({ rank, tied }, i) => ({
+    r: results[i],
+    rank,
+    tied,
+    best: rank === 1 && recommends(mode, results[i], target),
+  }));
+}
+
 export function renderResults(mode, results, { focus, target = 0 } = {}) {
-  // Equal results share a rank; one that can't be reached has none.
-  const rows = ranksWithTies(results.map((r) => scoreFor(mode, r))).map((ranked, i) => ({ r: results[i], ...ranked }));
+  const rows = rankedRows(mode, results, target);
   // On a platform's own fee page, pin it first but keep its true rank.
   const pinned = rows.findIndex(({ r }) => r.id === focus);
   if (pinned > 0) rows.unshift(...rows.splice(pinned, 1));
   return rows
-    .map(({ r, rank, tied }) => {
-      const best = rank === 1 && recommends(mode, r, target);
+    .map(({ r, rank, tied, best }) => {
       const cls = ['result', best && 'is-best', r.id === focus && 'is-focus'].filter(Boolean).join(' ');
       // The rank is the badge's number (tied results share it), read aloud
       // before the name. When very large text hides the badges, a tag after

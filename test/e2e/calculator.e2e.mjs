@@ -448,13 +448,17 @@ if (chromium) {
               bestTag: row.querySelector('.tag-best')?.offsetWidth > 0,
             })),
           );
-          for (const row of shown.filter((r) => r.ranked)) {
+          const ranked = shown.filter((r) => r.ranked);
+          assert.ok(ranked.length > 0, `${where}, ${state}: no ranked results to check`);
+          for (const row of ranked) {
             assert.ok(row.badge ? !row.rankTag : row.rankTag || row.bestTag, `${where}, ${state}: rank shown ${row.badge ? 'twice' : 'nowhere'}`);
           }
         };
         await rankShown('fee page');
         // Pinned rows aside, the top row without a Best badge (a loss) needs its rank tag too.
         await page.goto(`${base}/fees/facebook/#price=10&cost=50`, { waitUntil: 'networkidle' });
+        assert.match(await verdict(page), /^Pass\./, `${where}: the loss state was reached`);
+        assert.equal(await page.locator('.result.is-best').count(), 0);
         await rankShown('a loss everywhere');
         await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
         const rows = await page.evaluate(() =>
@@ -469,6 +473,32 @@ if (chromium) {
         await context.close();
       }
     }
+  });
+
+  test('Windows High Contrast keeps every state visible', async () => {
+    // Forced colors drop backgrounds and shadows; each state keeps an outline
+    // that the plain version of the same element doesn't have.
+    const { context, page } = await open(null, { viewport: { width: 1280, height: 900 }, forcedColors: 'active' });
+    await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
+    await page.focus('#f-price');
+    const outlines = await page.evaluate(() => {
+      const drawn = (el) => {
+        const st = getComputedStyle(el);
+        return st.outlineStyle !== 'none' && parseFloat(st.outlineWidth) > 0 && !/rgba\(.*, 0\)$/.test(st.outlineColor);
+      };
+      const pair = (on, off) => [drawn(document.querySelector(on)), drawn(document.querySelector(off))];
+      return {
+        'focused field': pair('.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)'),
+        'selected tab': pair('[role=tab][aria-selected=true]', '[role=tab][aria-selected=false]'),
+        'Best result': pair('.result.is-best', '.result:not(.is-best):not(.is-focus)'),
+        'pinned result': pair('.result.is-focus', '.result:not(.is-best):not(.is-focus)'),
+        'current page link': pair('.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])'),
+        'Best tag': [drawn(document.querySelector('.tag-best')), false],
+        'rank badge': [drawn(document.querySelector('.rank')), false],
+      };
+    });
+    for (const [state, [on, off]] of Object.entries(outlines)) assert.deepEqual([on, off], [true, false], state);
+    await context.close();
   });
 
   test('results stack their figures only when a name would be squeezed, all rows together', async () => {

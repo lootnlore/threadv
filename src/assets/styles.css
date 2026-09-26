@@ -104,6 +104,9 @@ a:hover {
   color: var(--brand-strong);
 }
 
+/* States shown only by colour or shadow also carry a transparent outline
+   ("forced colors" below): invisible normally, but Windows High Contrast
+   draws it, as it drops backgrounds and shadows. Outlines never move layout. */
 :focus-visible {
   outline: 3px solid var(--ring);
   outline-offset: 2px;
@@ -344,6 +347,8 @@ svg {
 .site-header nav a[aria-current] {
   background: var(--brand-soft);
   color: var(--brand-strong);
+  outline: 2px solid transparent; /* forced colors */
+  outline-offset: -2px;
 }
 
 /* Below this the three links and the logo no longer share a row: the logo
@@ -634,6 +639,8 @@ summary,
   background: var(--surface);
   color: var(--ink);
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+  outline: 2px solid transparent; /* forced colors */
+  outline-offset: -2px;
 }
 
 /* Too narrow for three tabs side by side at this text size (measured: below
@@ -702,6 +709,8 @@ summary,
   border-color: var(--brand);
   box-shadow: 0 0 0 3px var(--brand-soft);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent);
+  outline: 3px solid transparent; /* forced colors: the input's own outline is off */
+  outline-offset: 2px;
 }
 
 .input-wrap.is-invalid {
@@ -991,6 +1000,8 @@ select {
 .result.is-best {
   border-color: var(--brand);
   box-shadow: inset 4px 0 0 var(--brand);
+  outline: 3px solid transparent; /* forced colors: a thick edge */
+  outline-offset: -3px;
 }
 
 .result.is-focus {
@@ -998,6 +1009,8 @@ select {
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  outline: 2px dashed transparent; /* forced colors: a dashed edge */
+  outline-offset: -2px;
 }
 
 .result-main {
@@ -1018,6 +1031,8 @@ select {
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 800;
+  outline: 1px solid transparent; /* forced colors */
+  outline-offset: -1px;
 }
 
 .is-best .rank {
@@ -1026,8 +1041,8 @@ select {
 }
 
 .pname {
-  /* Name and Best tag: the gap spaces them, and a tag that has to wrap goes
-     under the name with no indent (a space would hang and look squeezed). */
+  /* Name and its tag (Best, or the rank at very large text): the gap spaces
+     them, and a tag that has to wrap goes under the name with no indent. */
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1044,24 +1059,13 @@ select {
   font-weight: 800;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  outline: 1px solid transparent; /* forced colors */
+  outline-offset: -1px;
 }
 
 .tag-best {
   background: var(--brand-soft);
   color: var(--brand-strong);
-}
-
-/* Windows High Contrast (forced colors) drops backgrounds and shadows: keep
-   the tags and rank badges outlined, and the Best row's edge thicker. */
-@media (forced-colors: active) {
-  .tag,
-  .rank {
-    border: 1px solid;
-  }
-
-  .result.is-best {
-    border-width: 3px;
-  }
 }
 
 /* A row's rank as a tag ("Tied 4th"), shown instead of the rank badge when
@@ -1120,7 +1124,6 @@ select {
 
 .figure.zero {
   color: var(--muted);
-  font-size: 1rem;
 }
 
 .result-sub {

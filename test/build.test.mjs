@@ -10,7 +10,8 @@ import config from '../site.config.mjs';
 import { FEES_VERIFIED, PLATFORMS, percentOf } from '../src/engine/fees.mjs';
 import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
 import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
-import { ogData, rowsToShow } from '../scripts/og-data.mjs';
+import { ogData, rowsToShow, CARD_ROWS } from '../scripts/og-data.mjs';
+import { DEFAULTS } from '../src/engine/calc.mjs';
 
 const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
 const tempDirs = [OUT];
@@ -296,7 +297,7 @@ test('fee pages rank marketplaces by payout, ties sharing a rank', () => {
   }
 });
 
-test('the social card lists up to four rows and never cuts a tie in half', () => {
+test('the social card lists up to four rows, cutting a tie only when more than four share first place', () => {
   const cases = [
     [[1, 2, 3, 4], 4],
     [[1, 2, 3, 4, 5], 4],
@@ -309,9 +310,12 @@ test('the social card lists up to four rows and never cuts a tie in half', () =>
     [[], 0],
     [[1, 1, 1, 1, 1], 4, 'more than four tied for first: the first four'],
   ];
-  for (const [ranks, want, why] of cases) assert.equal(rowsToShow(ranks, 4), want, why ?? JSON.stringify(ranks));
-  const card = ogData();
-  assert.deepEqual(card.rows.map((r) => r.best), card.rows.map((r) => r.rank === 1), 'Best as on the site at the defaults');
+  for (const [ranks, want, why] of cases) assert.equal(rowsToShow(ranks, CARD_ROWS), want, why ?? JSON.stringify(ranks));
+  // Best as on the site: on the top row at the defaults, and nowhere when the
+  // verdict would reject the top result (a minimum above every profit).
+  assert.equal(ogData().rows[0].best, true);
+  const rejected = ogData({ ...DEFAULTS, target: 1000 }).rows;
+  assert.ok(rejected.length > 0 && rejected.every((r) => !r.best), JSON.stringify(rejected));
 });
 
 test('fee change dates are machine-readable', () => {

@@ -7,6 +7,14 @@ import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPr
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
 const input = (raw) => normalizeInputs({ taxRate: 0, ...raw });
 const fees = (id, raw) => evaluate(P[id], input(raw)).feeTotal;
+/** A seeded random number generator in [0, 1) (mulberry32: exact 32-bit integer math). */
+const seeded = (seed) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+};
+
 /** Lowest clearing price by trying every cent up to `max`: the reference for listPrice. */
 const bruteList = (platform, i, max = 1_000_000) => {
   for (let p = 1; p <= max; p++) if (evaluate(platform, i, p).profit >= i.target) return p;
@@ -226,8 +234,7 @@ test('listPrice: returns null when the target is unreachable', () => {
 });
 
 test('listPrice: is exactly the lowest clearing price (brute force, random inputs)', () => {
-  let seed = 42;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const rnd = seeded(42);
   const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
   for (let n = 0; n < 40; n++) {
     const raw = {
@@ -267,8 +274,7 @@ test('listPrice: exact next to fee cliffs, where rounding dips hit segment edges
     assert.equal(listPrice(P.ebay, i).price, bruteList(P.ebay, i), JSON.stringify(raw));
   }
   // Sweep small targets across every cliff: eBay $10, Poshmark $15, Grailed $120.
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const rnd = seeded(7);
   for (let n = 0; n < 150; n++) {
     const raw = {
       target: Math.floor(rnd() * 12000) / 100,
@@ -452,8 +458,8 @@ test('results: the Best badge only on a top result the verdict recommends', () =
   // With real fees and random inputs, the badge and the verdict always agree
   // (a guard against either bypassing recommends(); its thresholds are
   // checked at their exact boundaries in the next test).
-  let seed = 11;
-  const rnd = (max) => Math.floor(((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31) * max);
+  const random = seeded(11);
+  const rnd = (max) => Math.floor(random() * max);
   for (let n = 0; n < 300; n++) {
     const mode = ['profit', 'maxbuy', 'price'][n % 3];
     const i = input({ price: 1 + rnd(150), cost: rnd(80), target: rnd(50), label: rnd(12), ship: rnd(10) });
