@@ -253,6 +253,21 @@ export function ranksWithTies(scores) {
 }
 
 /**
+ * The results as the site ranks them: [{ r, rank, tied, best }]. Equal
+ * results share a rank, one that can't be reached has none, and Best marks
+ * each first-ranked result the verdict recommends. The results list, the
+ * verdict and the social card all use it.
+ */
+export function rankedRows(mode, results, target = 0) {
+  return ranksWithTies(results.map((r) => scoreFor(mode, r))).map(({ rank, tied }, i) => ({
+    r: results[i],
+    rank,
+    tied,
+    best: rank === 1 && recommends(mode, results[i], target),
+  }));
+}
+
+/**
  * Whether the verdict would recommend this result: reachable, a max buy of
  * at least $0, or a profit above zero that meets the minimum. The Best badge
  * and the verdict both ask this.

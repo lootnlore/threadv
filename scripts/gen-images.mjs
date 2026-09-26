@@ -10,6 +10,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ogData } from './og-data.mjs';
+import { esc } from '../src/engine/render.mjs';
 
 const { chromium } = await import(process.env.PLAYWRIGHT_CORE || 'playwright-core');
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,7 +55,7 @@ await writeFile(join(ROOT, 'src/assets/favicon.ico'), Buffer.concat([header, png
 // Social card with real numbers from the engine at the calculator defaults.
 const data = ogData();
 const rows = data.rows
-  .map((r) => `<div class="row${r.best ? ' best' : ''}"><span class="n">${r.rank}</span><span class="p">${r.name}</span><span class="v">${r.profit}</span></div>`)
+  .map((r) => `<div class="row${r.best ? ' best' : ''}"><span class="n">${r.rank}</span><span class="p">${esc(r.name)}</span><span class="v">${esc(r.profit)}</span></div>`)
   .join('');
 const og = `
 <style>
@@ -76,7 +77,7 @@ p{font-size:27px;color:#56615d;margin:0;line-height:1.35}
 </style>
 <div class="card">
 <div class="left">
-<div class="brand">${svg.replace('<svg ', '<svg width="56" height="56" ')}${data.name}</div>
+<div class="brand">${svg.replace('<svg ', '<svg width="56" height="56" ')}${esc(data.name)}</div>
 <h1>Know your real profit before you buy.</h1>
 <p>Free calculator for resellers: fees, payout and profit on ${data.marketplaces} marketplaces.</p>
 </div>

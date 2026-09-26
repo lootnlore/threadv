@@ -104,9 +104,6 @@ a:hover {
   color: var(--brand-strong);
 }
 
-/* States shown only by colour or shadow also carry a transparent outline
-   ("forced colors" below): invisible normally, but Windows High Contrast
-   draws it, as it drops backgrounds and shadows. Outlines never move layout. */
 :focus-visible {
   outline: 3px solid var(--ring);
   outline-offset: 2px;
@@ -347,8 +344,6 @@ svg {
 .site-header nav a[aria-current] {
   background: var(--brand-soft);
   color: var(--brand-strong);
-  outline: 2px solid transparent; /* forced colors */
-  outline-offset: -2px;
 }
 
 /* Below this the three links and the logo no longer share a row: the logo
@@ -639,8 +634,6 @@ summary,
   background: var(--surface);
   color: var(--ink);
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
-  outline: 2px solid transparent; /* forced colors */
-  outline-offset: -2px;
 }
 
 /* Too narrow for three tabs side by side at this text size (measured: below
@@ -709,8 +702,6 @@ summary,
   border-color: var(--brand);
   box-shadow: 0 0 0 3px var(--brand-soft);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent);
-  outline: 3px solid transparent; /* forced colors: the input's own outline is off */
-  outline-offset: 2px;
 }
 
 .input-wrap.is-invalid {
@@ -1000,8 +991,6 @@ select {
 .result.is-best {
   border-color: var(--brand);
   box-shadow: inset 4px 0 0 var(--brand);
-  outline: 3px solid transparent; /* forced colors: a thick edge */
-  outline-offset: -3px;
 }
 
 .result.is-focus {
@@ -1009,8 +998,6 @@ select {
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
-  outline: 2px dashed transparent; /* forced colors: a dashed edge */
-  outline-offset: -2px;
 }
 
 .result-main {
@@ -1031,8 +1018,6 @@ select {
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 800;
-  outline: 1px solid transparent; /* forced colors */
-  outline-offset: -1px;
 }
 
 .is-best .rank {
@@ -1059,8 +1044,6 @@ select {
   font-weight: 800;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  outline: 1px solid transparent; /* forced colors */
-  outline-offset: -1px;
 }
 
 .tag-best {
@@ -1884,5 +1867,39 @@ code {
   *::after {
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Windows High Contrast (forced colors) ---------- */
+
+/* Forced colors drop backgrounds and shadows, so states shown that way get a
+   line instead: none of these can hide or mimic a focus ring (the tab and
+   nav states are underlines; the Best edge is a border, inside the row's
+   focus ring; the pinned edge sits outside the row). */
+@media (forced-colors: active) {
+  .input-wrap:focus-within {
+    outline: 3px solid; /* its input's own outline is off */
+    outline-offset: 2px;
+  }
+
+  .modes button[aria-selected='true'],
+  .site-header nav a[aria-current] {
+    text-decoration: underline 2px;
+    text-underline-offset: 0.25em;
+  }
+
+  .result.is-best {
+    border-width: 3px;
+  }
+
+  .result.is-focus {
+    outline: 2px dashed;
+    outline-offset: 2px;
+  }
+
+  .tag,
+  .rank {
+    outline: 1px solid;
+    outline-offset: -1px;
   }
 }

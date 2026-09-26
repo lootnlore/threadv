@@ -475,30 +475,62 @@ if (chromium) {
     }
   });
 
-  test('Windows High Contrast keeps every state visible', async () => {
-    // Forced colors drop backgrounds and shadows; each state keeps an outline
+  test('Windows High Contrast keeps every state visible, and focus rings win over states', async () => {
+    const styleOf = (page, selector) =>
+      page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const st = getComputedStyle(el);
+        const outline = st.outlineStyle !== 'none' && parseFloat(st.outlineWidth) > 0 && !/rgba\(.*, 0\)$/.test(st.outlineColor);
+        return { outline, outlineStyle: st.outlineStyle, outlineWidth: parseFloat(st.outlineWidth), underline: st.textDecorationLine.includes('underline'), border: parseFloat(st.borderTopWidth) };
+      }, selector);
+    const get = async (page, selector) => {
+      const st = await styleOf(page, selector);
+      assert.ok(st, `no element matches ${selector}`);
+      return st;
+    };
+    // Forced colors drop backgrounds and shadows: each state is drawn with a line
     // that the plain version of the same element doesn't have.
     const { context, page } = await open(null, { viewport: { width: 1280, height: 900 }, forcedColors: 'active' });
     await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
     await page.focus('#f-price');
-    const outlines = await page.evaluate(() => {
-      const drawn = (el) => {
-        const st = getComputedStyle(el);
-        return st.outlineStyle !== 'none' && parseFloat(st.outlineWidth) > 0 && !/rgba\(.*, 0\)$/.test(st.outlineColor);
-      };
-      const pair = (on, off) => [drawn(document.querySelector(on)), drawn(document.querySelector(off))];
-      return {
-        'focused field': pair('.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)'),
-        'selected tab': pair('[role=tab][aria-selected=true]', '[role=tab][aria-selected=false]'),
-        'Best result': pair('.result.is-best', '.result:not(.is-best):not(.is-focus)'),
-        'pinned result': pair('.result.is-focus', '.result:not(.is-best):not(.is-focus)'),
-        'current page link': pair('.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])'),
-        'Best tag': [drawn(document.querySelector('.tag-best')), false],
-        'rank badge': [drawn(document.querySelector('.rank')), false],
-      };
-    });
-    for (const [state, [on, off]] of Object.entries(outlines)) assert.deepEqual([on, off], [true, false], state);
+    const plainRow = '.result:not(.is-best):not(.is-focus)';
+    const states = [
+      ['focused field', '.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)', 'outline'],
+      ['selected tab', '[role=tab][aria-selected=true]', '[role=tab][aria-selected=false]', 'underline'],
+      ['current page link', '.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])', 'underline'],
+      ['pinned result', '.result.is-focus', plainRow, 'outline'],
+      ['Best tag', '.tag-best', '.pname', 'outline'],
+      ['rank badge', '.rank', '.pname', 'outline'],
+    ];
+    for (const [state, on, off, line] of states) {
+      assert.deepEqual([(await get(page, on))[line], (await get(page, off))[line]], [true, false], state);
+    }
+    assert.ok((await get(page, '.result.is-best')).border >= 3 && (await get(page, plainRow)).border < 2, 'Best result: a thick edge');
+    // A result both pinned and Best keeps both edges.
+    await page.goto(`${base}/fees/poshmark/`, { waitUntil: 'networkidle' });
+    const both = await get(page, '.result.is-best.is-focus');
+    assert.ok(both.border >= 3 && both.outlineStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
     await context.close();
+
+    // Focus rings, normal and forced colors: a focused state element shows the
+    // focus ring, not its state line.
+    for (const forcedColors of ['none', 'active']) {
+      const { context: ctx, page: p } = await open(null, { viewport: { width: 1280, height: 900 }, forcedColors });
+      await p.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
+      await p.keyboard.press('Tab'); // keyboard use, so programmatic focus counts as :focus-visible
+      for (const selector of ['[role=tab][aria-selected=true]', '.site-header nav a[aria-current]', '.result.is-best summary']) {
+        const visible = await p.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          el.focus();
+          return el.matches(':focus-visible');
+        }, selector);
+        assert.ok(visible, `${selector} takes keyboard focus`);
+        const ring = await get(p, selector);
+        assert.ok(ring.outline && ring.outlineStyle === 'solid' && ring.outlineWidth >= 3, `forced colors ${forcedColors}: ${selector} focus ring ${JSON.stringify(ring)}`);
+      }
+      await ctx.close();
+    }
   });
 
   test('results stack their figures only when a name would be squeezed, all rows together', async () => {

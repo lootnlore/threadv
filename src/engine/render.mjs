@@ -5,7 +5,7 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
-import { scoreFor, ranksWithTies, recommends } from './calc.mjs';
+import { rankedRows } from './calc.mjs';
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
@@ -109,21 +109,6 @@ function subFor(mode, r) {
  * headline, so tapping anywhere on a result opens its fee breakdown.
  * `focus` pins and highlights one platform (fee pages).
  */
-/**
- * The results as the site ranks them: [{ r, rank, tied, best }]. Equal
- * results share a rank, one that can't be reached has none, and Best marks
- * each first-ranked result the verdict recommends. The results list and the
- * social card both use it.
- */
-export function rankedRows(mode, results, target = 0) {
-  return ranksWithTies(results.map((r) => scoreFor(mode, r))).map(({ rank, tied }, i) => ({
-    r: results[i],
-    rank,
-    tied,
-    best: rank === 1 && recommends(mode, results[i], target),
-  }));
-}
-
 export function renderResults(mode, results, { focus, target = 0 } = {}) {
   const rows = rankedRows(mode, results, target);
   // On a platform's own fee page, pin it first but keep its true rank.
@@ -159,13 +144,14 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
 export function renderVerdict(mode, results, input) {
   const out = (tone, html) => ({ tone, html: `<span>${html}</span>` });
   const target = money(input.target);
-  const top = results.find((r) => !r.unreachable);
-  if (!top) {
+  // The top results, as the list ranks them: every platform tied for first is named.
+  const winners = rankedRows(mode, results, input.target).filter((row) => row.rank === 1);
+  if (!winners.length) {
     return out('bad', `<strong>Out of range.</strong> No platform reaches ${target} profit with these costs.`);
   }
-  // Every platform tied for the top result is named.
-  const names = results.filter((r) => scoreFor(mode, r) === scoreFor(mode, top)).map((r) => esc(r.name));
-  const good = recommends(mode, top, input.target); // the same test as the Best badge
+  const top = winners[0].r;
+  const names = winners.map((row) => esc(row.r.name));
+  const good = winners[0].best; // the Best badge's own test
   if (mode === 'maxbuy') {
     return good
       ? out('good', `<strong>Pay up to ${money(top.maxCost)}</strong> to make ${target} selling on ${orList(names)} at ${money(input.price)}.`)

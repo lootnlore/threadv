@@ -311,6 +311,7 @@ test('the social card lists up to four rows, cutting a tie only when more than f
     [[1, 1, 1, 1, 1], 4, 'more than four tied for first: the first four'],
   ];
   for (const [ranks, want, why] of cases) assert.equal(rowsToShow(ranks, CARD_ROWS), want, why ?? JSON.stringify(ranks));
+  assert.throws(() => rowsToShow([2, 1, 3], CARD_ROWS), /best-first/, 'ranks out of order are refused, not miscounted');
   // Best as on the site: on the top row at the defaults, and nowhere when the
   // verdict would reject the top result (a minimum above every profit).
   assert.equal(ogData().rows[0].best, true);
