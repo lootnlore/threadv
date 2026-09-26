@@ -508,7 +508,6 @@ if (chromium) {
       ['focused field', '.input-wrap:has(#f-price)', '.input-wrap:has(#f-cost)', 'outline'],
       ['selected tab', '[role=tab][aria-selected=true]', '[role=tab][aria-selected=false]', 'underline'],
       ['current page link', '.site-header nav a[aria-current]', '.site-header nav a:not([aria-current])', 'underline'],
-      ['Best result', '.result.is-best', plainRow, 'outline'],
       ["this page's row in the fee list", '.compare .is-current', '.compare li:not(.is-current)', 'outline'],
       ['Best tag', '.tag-best', '.pname', 'outline'],
       ['rank badge', '.rank', '.pname', 'outline'],
@@ -516,24 +515,35 @@ if (chromium) {
     for (const [state, on, off, line] of states) {
       assert.deepEqual([(await get(page, on))[line], (await get(page, off))[line]], [true, false], state);
     }
-    const pinnedRow = await get(page, '.result.is-focus');
-    assert.equal(pinnedRow.borderStyle, 'dashed', 'pinned result: a dashed edge');
-    assert.equal((await get(page, plainRow)).borderStyle, 'solid');
-    // State lines keep clear of the rows' focus rings: the Best edge is outside
-    // the row, the ring inside its summary, and neither changes the row's size.
+    // Row states, shaped so none passes for a focus ring (a solid ring): Best is
+    // a thick border, the pinned row a dashed line outside it.
+    const plain = await get(page, plainRow);
     const best = await get(page, '.result.is-best');
-    assert.ok(best.outlineOffset >= 0 && best.border === pinnedRow.border, `Best edge outside the row, same border: ${JSON.stringify(best)}`);
+    assert.ok(best.border >= plain.border + 2 && !best.outline, `Best result: a thick border, no ring: ${JSON.stringify(best)}`);
+    const pinned = await get(page, '.result.is-focus');
+    assert.ok(pinned.outlineStyle === 'dashed' && pinned.outlineOffset >= 0 && pinned.border === plain.border, `pinned result: a dashed line outside: ${JSON.stringify(pinned)}`);
+    assert.ok(!plain.outline);
+    // ...and neither moves a row's contents.
+    const places = await page.evaluate(() =>
+      [...document.querySelectorAll('.result')].map((row) => {
+        const name = row.querySelector('.pname').getBoundingClientRect();
+        const box = row.getBoundingClientRect();
+        return `${Math.round(name.left - box.left)},${Math.round(name.top - box.top)}`;
+      }),
+    );
+    assert.equal(new Set(places).size, 1, `names sit in the same place in every row: ${places}`);
+    // A focused row's ring sits inside, clear of even a Best row's thick border.
     await page.keyboard.press('Tab'); // keyboard use, so programmatic focus counts as :focus-visible
     const ring = await page.evaluate(() => {
-      const summary = document.querySelector('.result.is-best summary');
+      const row = document.querySelector('.result.is-best');
+      const summary = row.querySelector('summary');
       summary.focus();
       const st = getComputedStyle(summary);
-      return { visible: summary.matches(':focus-visible'), offset: parseFloat(st.outlineOffset), width: parseFloat(st.outlineWidth) };
+      const inset = summary.getBoundingClientRect().left - row.getBoundingClientRect().left - parseFloat(st.outlineOffset) - parseFloat(st.outlineWidth);
+      return { visible: summary.matches(':focus-visible'), width: parseFloat(st.outlineWidth), inset, border: parseFloat(getComputedStyle(row).borderLeftWidth) };
     });
-    assert.ok(ring.visible && ring.width >= 3 && ring.offset + ring.width <= 0, `the Best row's focus ring is inside its summary: ${JSON.stringify(ring)}`);
+    assert.ok(ring.visible && ring.width >= 3 && ring.inset >= ring.border + 1, `the Best row's focus ring keeps clear of its border: ${JSON.stringify(ring)}`);
     await page.focus('#f-price');
-    const lefts = await page.evaluate(() => [...document.querySelectorAll('.result .pname')].map((n) => Math.round(n.getBoundingClientRect().left)));
-    assert.equal(new Set(lefts).size, 1, `names line up in every row: ${lefts}`);
     // Every focus ring, the field's included, is the system focus colour.
     const fieldRing = (await get(page, '.input-wrap:has(#f-price)')).outlineColor;
     await page.keyboard.press('Tab');
@@ -552,7 +562,7 @@ if (chromium) {
     const top = await page.getAttribute('.result.is-best', 'data-id');
     await page.goto(`${base}/fees/${top}/`, { waitUntil: 'networkidle' });
     const both = await get(page, '.result.is-best.is-focus');
-    assert.ok(both.outlineStyle === 'solid' && both.outlineWidth >= 3 && both.borderStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
+    assert.ok(both.border >= 3 && both.outlineStyle === 'dashed', `pinned and Best: ${JSON.stringify(both)}`);
     await context.close();
 
     // Nothing spills at very large text in forced colors either.

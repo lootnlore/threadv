@@ -112,7 +112,7 @@ ${pctField('tiktokRate', 'TikTok Shop fee', `${pctText(RATES.tiktok.referral)} r
 <p class="shared-note" data-shared-note hidden>Viewing a shared result. Your saved settings are untouched. <a href="./">Use my settings</a></p>
 <div class="verdict verdict-${verdict.tone}" data-verdict tabindex="-1">${verdict.html}</div>
 <p class="visually-hidden" role="status" data-verdict-live></p>
-<ul class="results" role="list" data-results aria-label="Results by marketplace">${renderResults('profit', rows, { focus, target: input.target })}</ul>
+<ul class="results" role="list" data-results aria-label="Results by marketplace">${renderResults('profit', rows, { focus })}</ul>
 <div class="calc-foot">
 <p>Fees verified ${verifiedLabel}. <a href="/fees/">How each fee is calculated</a></p>
 <button type="button" class="btn btn-ghost btn-small" data-share hidden>Copy link to this result</button>

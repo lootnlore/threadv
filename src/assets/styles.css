@@ -1873,10 +1873,11 @@ code {
 /* ---------- Windows High Contrast (forced colors) ---------- */
 
 /* Forced colors drop backgrounds and shadows, so states shown that way get a
-   line instead, placed so none can hide or mimic a focus ring and none moves
-   layout: the tab and nav states are underlines, the Best edge an outline
-   outside the row (the row's focus ring is inside its summary), the pinned
-   edge a dashed border in place of the plain one. Every focus ring uses the
+   line instead, shaped so none can hide or pass for a focus ring and none
+   moves the content: the tab and nav states are underlines; a Best row has a
+   thick border (its contents pulled out by the difference, so they stay in
+   line with the other rows); the pinned row a dashed line just outside it; a
+   focused row a ring inset well inside its edge. Every focus ring uses the
    system focus colour. */
 @media (forced-colors: active) {
   :focus-visible,
@@ -1897,12 +1898,20 @@ code {
   }
 
   .result.is-best {
-    outline: 3px solid;
-    outline-offset: 2px;
+    border-width: 3px;
+  }
+
+  .result.is-best > * {
+    margin: -2px; /* the 2px of extra border, so the contents don't move */
   }
 
   .result.is-focus {
-    border-style: dashed;
+    outline: 2px dashed;
+    outline-offset: 2px;
+  }
+
+  .result summary:focus-visible {
+    outline-offset: -7px; /* clear of a Best row's thick border */
   }
 
   .compare .is-current {

@@ -320,6 +320,20 @@ test('the social card lists up to four rows, cutting a tie only when more than f
   assert.ok(rejected.length > 0 && rejected.every((r) => !r.best), JSON.stringify(rejected));
 });
 
+test('in High Contrast every focus ring uses the system focus colour', () => {
+  // Chromium already paints a focused element's ring in Highlight, so this is
+  // checked in the stylesheet: Firefox relies on the rule.
+  const css = readFileSync(new URL('../src/assets/styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const forcedAt = css.indexOf('@media (forced-colors: active)');
+  assert.ok(forcedAt > 0, 'a forced-colors block exists');
+  const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sels: sel.split(',').map((x) => x.trim()), body }));
+  const ringRules = rules(css.slice(0, forcedAt)).filter(({ body }) => /outline(-color)?\s*:/.test(body) && !/outline\s*:\s*none/.test(body));
+  const ringSelectors = ringRules.flatMap(({ sels }) => sels).filter((sel) => sel.includes(':focus-visible'));
+  assert.ok(ringSelectors.length >= 3, ringSelectors.join(' | '));
+  const highlighted = rules(css.slice(forcedAt)).filter(({ body }) => /outline(-color)?\s*:[^;]*Highlight/.test(body)).flatMap(({ sels }) => sels);
+  for (const sel of ringSelectors) assert.ok(highlighted.includes(sel), `${sel} has no Highlight ring in forced colors`);
+});
+
 test('fee change dates are machine-readable', () => {
   const home = html.find((h) => h.file === 'index.html').src;
   const times = [...home.matchAll(/<time datetime="([^"]+)">([^<]+)<\/time>/g)];

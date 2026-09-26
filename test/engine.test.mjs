@@ -493,6 +493,13 @@ test('recommends: exact thresholds, and the verdict that goes with each side', (
   assert.match(verdict('maxbuy', [-1, -100], { price: 40, target: 5 }).html, /<strong>Pass\.<\/strong> At a \$40\.00 sale/);
 });
 
+test('results: the max-buy breakdown takes the minimum profit from the result itself', () => {
+  const i = input({ price: 40, target: 12.5 });
+  const html = renderRows('maxbuy', rankedRows('maxbuy', rank('maxbuy', i), i.target)); // no separate target option
+  const minimum = [...html.matchAll(/<dt>\u2212 Your minimum profit<\/dt><dd>([^<]+)<\/dd>/g)].map((m) => m[1]);
+  assert.ok(minimum.length > 0 && minimum.every((m) => m === '\u2212$12.50'), minimum.join(', '));
+});
+
 test('results: a fee page pins its marketplace first and keeps its real rank', () => {
   const results = made('profit', [3000, 2500, 2500, 2000, 1000]);
   const out = rows(renderResults('profit', results, { focus: 'c', target: 500 }));

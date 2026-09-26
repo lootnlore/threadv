@@ -207,7 +207,7 @@ function setup(root) {
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
       verdictEl.innerHTML = verdict.html;
-      resultsEl.innerHTML = renderResults(mode, rows, { focus, target: input.target });
+      resultsEl.innerHTML = renderResults(mode, rows, { focus });
       for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
       fitResults();
     }

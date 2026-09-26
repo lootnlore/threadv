@@ -49,7 +49,7 @@ export function percent(ratio) {
 
 const tone = (cents) => (cents > 0 ? 'pos' : cents < 0 ? 'neg' : 'zero');
 
-function breakdown(mode, r, target) {
+function breakdown(mode, r) {
   const line = (label, cents, cls = '') =>
     `<div class="bd-row${cls ? ` ${cls}` : ''}"><dt>${esc(label)}</dt><dd>${money(cents)}</dd></div>`;
   const rows = [line('Sale price', r.price)];
@@ -61,7 +61,7 @@ function breakdown(mode, r, target) {
   if (r.other) rows.push(line('\u2212 Other costs', -r.other));
   if (mode === 'maxbuy') {
     rows.push(line('= Profit before item cost', r.profit, 'subtotal'));
-    rows.push(line('\u2212 Your minimum profit', -target));
+    rows.push(line('\u2212 Your minimum profit', -(r.profit - r.maxCost))); // maxBuy: maxCost = profit - minimum
     rows.push(line('= Max buy price', r.maxCost, 'total'));
   } else {
     rows.push(line('= Profit', r.profit, 'total'));
@@ -109,7 +109,7 @@ function subFor(mode, r) {
  * whose summary is the headline, so tapping anywhere on a result opens its
  * fee breakdown. `focus` pins and highlights one platform (fee pages).
  */
-export function renderResults(mode, ranked, { focus, target = 0 } = {}) {
+export function renderResults(mode, ranked, { focus } = {}) {
   const rows = [...ranked];
   // On a platform's own fee page, pin it first but keep its true rank.
   const pinned = rows.findIndex(({ r }) => r.id === focus);
@@ -131,7 +131,7 @@ export function renderResults(mode, ranked, { focus, target = 0 } = {}) {
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable
         ? `<div class="result-head">${head}</div>`
-        : `<details><summary>${head}</summary><div class="breakdown">${breakdown(mode, r, target)}</div></details>`;
+        : `<details><summary>${head}</summary><div class="breakdown">${breakdown(mode, r)}</div></details>`;
       return `<li class="${cls}" data-id="${esc(r.id)}">${body}</li>`;
     })
     .join('');

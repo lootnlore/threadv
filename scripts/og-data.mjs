@@ -28,9 +28,9 @@ export function rowsToShow(ranks, max) {
   return ranks[0] == null ? 0 : max; // nothing ranked, or more than `max` tied for first
 }
 
-/** The card's content; `raw` is the calculator input (the defaults). */
 const usd = (cents) => usdText(cents / 100);
 
+/** The card's content; `raw` is the calculator input (the defaults). */
 export function ogData(raw = DEFAULTS) {
   const input = normalizeInputs(raw);
   const rows = rankedRows('profit', rank('profit', input), input.target);
