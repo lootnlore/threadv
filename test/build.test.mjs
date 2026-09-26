@@ -10,7 +10,7 @@ import config from '../site.config.mjs';
 import { FEES_VERIFIED, PLATFORMS, percentOf } from '../src/engine/fees.mjs';
 import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
 import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
-import { ogData } from '../scripts/og-data.mjs';
+import { ogData, rowsToShow } from '../scripts/og-data.mjs';
 
 const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
 const tempDirs = [OUT];
@@ -294,6 +294,24 @@ test('fee pages rank marketplaces by payout, ties sharing a rank', () => {
       assert.equal(row.shown, want, `${file}: ${row.payout} ranks ${want}`);
     });
   }
+});
+
+test('the social card lists up to four rows and never cuts a tie in half', () => {
+  const cases = [
+    [[1, 2, 3, 4], 4],
+    [[1, 2, 3, 4, 5], 4],
+    [[1, 2, 3, 4, 4, 6], 3, 'a tie for 4th would make five: stop at 3rd'],
+    [[1, 2, 2, 2, 2], 1],
+    [[1, 1, 2, 3, 4], 4],
+    [[1, 2, 3], 3],
+    [[1, null, null], 1, 'never an out-of-range result'],
+    [[null, null], 0],
+    [[], 0],
+    [[1, 1, 1, 1, 1], 4, 'more than four tied for first: the first four'],
+  ];
+  for (const [ranks, want, why] of cases) assert.equal(rowsToShow(ranks, 4), want, why ?? JSON.stringify(ranks));
+  const card = ogData();
+  assert.deepEqual(card.rows.map((r) => r.best), card.rows.map((r) => r.rank === 1), 'Best as on the site at the defaults');
 });
 
 test('fee change dates are machine-readable', () => {

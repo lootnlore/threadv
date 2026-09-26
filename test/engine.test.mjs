@@ -379,7 +379,9 @@ const rows = (html) =>
     rank: ((n) => (n === '–' ? null : Number(n)))(li.match(/<span class="rank"[^>]*>([^<]+)<\/span>/)[1]),
     rankRead: !li.includes('<span class="rank" aria-hidden="true">'),
     tags: [...li.matchAll(/<span class="tag [^"]+">([^<]+)<\/span>/g)].map((m) => m[1]),
-    name: li.match(/<span class="pname">(.*?)<\/span><span class="figure/)[1].replace(/<[^>]+>/g, ''),
+    name: li.match(/<span class="pname">(.*?)<\/span> <span class="figure/)[1].replace(/<[^>]+>/g, ''),
+    // The headline as plain text (no CSS): badge, name, tags, figure.
+    text: li.match(/<span class="result-main">(.*?)<\/span>\n/)[1].replace(/<[^>]+>/g, ''),
   }));
 
 /**
@@ -428,6 +430,11 @@ test('results: shared ranks on the badges (read aloud), and a rank tag for very 
   assert.ok(out.every((r) => r.rankRead));
   assert.deepEqual(out.map((r) => r.tags), [['Best'], ['Tied 2nd'], ['Tied 2nd'], ['4th']]);
   assert.deepEqual(out.map((r) => r.name), ['A Best', 'B Tied 2nd', 'C Tied 2nd', 'D 4th'], 'a space before each tag');
+  assert.deepEqual(out.map((r) => r.text), ['1 A Best $30.00', '2 B Tied 2nd $25.00', '2 C Tied 2nd $25.00', '4 D 4th $20.00'], 'plain text keeps the parts apart');
+  // A top result the verdict rejects has no Best tag, so it keeps a rank tag.
+  const rejected = (scores) => rows(renderResults('profit', made('profit', scores), { target: 500 })).map((r) => r.tags);
+  assert.deepEqual(rejected([400, 300]), [['1st'], ['2nd']]);
+  assert.deepEqual(rejected([400, 400]), [['Tied 1st'], ['Tied 1st']]);
   const tiedTop = rows(renderResults('profit', made('profit', [3000, 3000, 100]), { target: 500 }));
   assert.deepEqual(tiedTop.map((r) => r.best), [true, true, false], 'Best on every result tied for first');
 });
@@ -442,15 +449,37 @@ test('results: the Best badge only on a top result the verdict recommends', () =
   assert.deepEqual(best('price', [4000, 5000], 500), [true, false]);
   const out = rows(renderResults('price', made('price', [null, null]), { target: 500 }));
   assert.deepEqual(out.map((r) => [r.best, r.rank, r.rankRead, r.tags.length]), [[false, null, false, 0], [false, null, false, 0]], 'out of range: no rank, badge not read');
-  // With real fees and random inputs, the badge and the verdict always agree.
+  // With real fees and random inputs, the badge and the verdict always agree
+  // (a guard against either bypassing recommends(); its thresholds are
+  // checked at their exact boundaries in the next test).
+  let seed = 11;
+  const rnd = (max) => Math.floor(((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31) * max);
   for (let n = 0; n < 300; n++) {
     const mode = ['profit', 'maxbuy', 'price'][n % 3];
-    const i = input({ price: 1 + ((n * 37) % 120), cost: (n * 13) % 60, target: (n * 7) % 40, label: n % 9 });
+    const i = input({ price: 1 + rnd(150), cost: rnd(80), target: rnd(50), label: rnd(12), ship: rnd(10) });
     const results = rank(mode, i);
     const anyBest = rows(renderResults(mode, results, { target: i.target })).some((r) => r.best);
     assert.equal(anyBest, renderVerdict(mode, results, i).tone === 'good', `${mode} ${JSON.stringify(i)}`);
     assert.equal(anyBest, results.some((r) => recommends(mode, r, i.target) && scoreFor(mode, r) === scoreFor(mode, results[0])));
   }
+});
+
+test('recommends: exact thresholds, and the verdict that goes with each side', () => {
+  const r = (fields) => ({ unreachable: false, ...fields });
+  assert.equal(recommends('profit', r({ profit: 500 }), 500), true, 'profit equal to the minimum');
+  assert.equal(recommends('profit', r({ profit: 499 }), 500), false, 'a cent under');
+  assert.equal(recommends('profit', r({ profit: 0 }), 0), false, 'break-even is not a profit');
+  assert.equal(recommends('profit', r({ profit: 1 }), 0), true);
+  assert.equal(recommends('maxbuy', r({ maxCost: 0 }), 500), true, 'a $0 max buy still clears the minimum');
+  assert.equal(recommends('maxbuy', r({ maxCost: -1 }), 500), false);
+  assert.equal(recommends('price', r({ price: 100 }), 500), true);
+  assert.equal(recommends('price', { unreachable: true }, 500), false);
+  const verdict = (mode, scores, raw) => renderVerdict(mode, made(mode, scores), input(raw));
+  assert.equal(verdict('profit', [500, 100], { target: 5 }).tone, 'good');
+  assert.match(verdict('profit', [499, 100], { target: 5 }).html, /^<span><strong>Pass\.<\/strong> Best case is \$4\.99/);
+  assert.match(verdict('profit', [0, -100], { target: 0 }).html, /No profit\./);
+  assert.match(verdict('maxbuy', [0, -100], { price: 40, target: 5 }).html, /Pay up to \$0\.00/);
+  assert.match(verdict('maxbuy', [-1, -100], { price: 40, target: 5 }).html, /<strong>Pass\.<\/strong> At a \$40\.00 sale/);
 });
 
 test('results: a fee page pins its marketplace first and keeps its real rank', () => {

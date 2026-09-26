@@ -1051,6 +1051,19 @@ select {
   color: var(--brand-strong);
 }
 
+/* Windows High Contrast (forced colors) drops backgrounds and shadows: keep
+   the tags and rank badges outlined, and the Best row's edge thicker. */
+@media (forced-colors: active) {
+  .tag,
+  .rank {
+    border: 1px solid;
+  }
+
+  .result.is-best {
+    border-width: 3px;
+  }
+}
+
 /* A row's rank as a tag ("Tied 4th"), shown instead of the rank badge when
    very large text hides the badges (below). Hidden (and so not read) while
    the badge shows. */
@@ -1158,9 +1171,9 @@ select {
    and the details line and breakdown use the full width. After the rules it
    overrides, which have the same specificity. */
 @container (max-width: 12em) {
-  /* The name gets the full width: the rank badge steps aside (rows are in
-     rank order; a fee page's pinned row names its rank in a tag) and every
-     figure goes under its name. */
+  /* The name gets the full width: the rank badges step aside and every
+     ranked row shows its rank as a tag after the name instead ("Tied 4th";
+     Best rows keep their Best tag), and every figure goes under its name. */
   .result-main {
     grid-template-columns: minmax(0, 1fr);
   }

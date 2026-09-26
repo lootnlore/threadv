@@ -9,16 +9,19 @@
   "rows": [
     {
       "rank": 1,
+      "best": true,
       "name": "Poshmark",
       "profit": "$24.00"
     },
     {
       "rank": 2,
+      "best": false,
       "name": "Depop",
       "profit": "$23.13"
     },
     {
       "rank": 3,
+      "best": false,
       "name": "TikTok Shop",
       "profit": "$21.80"
     }

@@ -78,7 +78,7 @@ export function ordinal(n) {
 }
 
 /** A rank in words: "4th", or "Tied 4th" when another result shares it. */
-export const rankWords = (rank, tied) => `${tied ? 'Tied ' : ''}${ordinal(rank)}`;
+const rankWords = (rank, tied) => `${tied ? 'Tied ' : ''}${ordinal(rank)}`;
 
 function figureFor(mode, r) {
   if (mode === 'maxbuy') {
@@ -128,7 +128,8 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
         : rank !== null
           ? `<span class="tag tag-rank">${rankWords(rank, tied)}</span>`
           : '';
-      const head = `<span class="result-main">${badge}<span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
+      // Spaces between the parts (not drawn in the grid) keep plain text apart: "4 Mercari $21.00".
+      const head = `<span class="result-main">${badge} <span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span> ${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable
         ? `<div class="result-head">${head}</div>`

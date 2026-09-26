@@ -394,7 +394,7 @@ if (chromium) {
             ([sel, type]) =>
               [...document.querySelectorAll(sel)].map((el) => {
                 const icon = getComputedStyle(el, `::${type}`);
-                const inline = icon.display.startsWith('inline') || (icon.position === 'static' && icon.display === 'inline');
+                const inline = icon.display.startsWith('inline');
                 const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
                 let t = walker.nextNode();
                 while (!t.textContent.trim()) t = walker.nextNode();
@@ -436,18 +436,27 @@ if (chromium) {
         // Fee-page ranking: every row has its amount beside the name or every row under it,
         // and a shown rank number shares the name's first line.
         await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
-        // Each ranked result shows its rank once: the badge, or (badges hidden by very
-        // large text) a rank tag; the pinned, out-of-order row included. Best rows
-        // say it with their Best tag.
-        const shown = await page.evaluate(() =>
-          [...document.querySelectorAll('.result')].map((row) => ({
-            badge: row.querySelector('.rank').offsetWidth > 0,
-            rankTag: row.querySelector('.tag-rank')?.offsetWidth > 0,
-            hasRankTag: !!row.querySelector('.tag-rank'),
-          })),
-        );
-        for (const row of shown) if (row.hasRankTag) assert.ok(row.badge !== row.rankTag, `${where}: rank badge ${row.badge ? 'and' : 'nor'} rank tag shown`);
-        assert.ok(shown.some((row) => row.hasRankTag), `${where}: no ranked rows to check`);
+        // Every ranked result shows its rank: the badge, or (badges hidden by very
+        // large text) a rank tag or its Best tag, never the badge and a rank tag;
+        // the pinned, out-of-order row included.
+        const rankShown = async (state) => {
+          const shown = await page.evaluate(() =>
+            [...document.querySelectorAll('.result')].map((row) => ({
+              ranked: row.querySelector('.rank').textContent !== '\u2013',
+              badge: row.querySelector('.rank').offsetWidth > 0,
+              rankTag: row.querySelector('.tag-rank')?.offsetWidth > 0,
+              bestTag: row.querySelector('.tag-best')?.offsetWidth > 0,
+            })),
+          );
+          for (const row of shown.filter((r) => r.ranked)) {
+            assert.ok(row.badge ? !row.rankTag : row.rankTag || row.bestTag, `${where}, ${state}: rank shown ${row.badge ? 'twice' : 'nowhere'}`);
+          }
+        };
+        await rankShown('fee page');
+        // Pinned rows aside, the top row without a Best badge (a loss) needs its rank tag too.
+        await page.goto(`${base}/fees/facebook/#price=10&cost=50`, { waitUntil: 'networkidle' });
+        await rankShown('a loss everywhere');
+        await page.goto(`${base}/fees/facebook/`, { waitUntil: 'networkidle' });
         const rows = await page.evaluate(() =>
           [...document.querySelectorAll('.compare li')].map((li) => {
             const name = li.querySelector('a, strong').getClientRects()[0];

@@ -128,8 +128,8 @@ export function feePage(config, platform) {
     return `<tr><th scope="row" class="num">${money(r.price)}</th><td class="num">${money(r.feeTotal)}</td><td class="num">${percent(r.feeRate)}</td><td class="num">${money(r.payout)}</td></tr>`;
   }).join('');
 
-  // Ranked by payout; equal payouts share a rank, written out (a list's own
-  // numbers can't show a tie).
+  // Ranked by payout; equal payouts share a rank. The numbers are written in
+  // the markup, as a list's own numbering can't repeat a number for a tie.
   const byPayout = PLATFORMS.map((p) => at(p, 50)).sort((a, b) => b.payout - a.payout);
   const ranks = competitionRanks(byPayout.map((r) => r.payout));
   const others = byPayout
