@@ -41,10 +41,12 @@ try {
 function avoidableSplits(root) {
   const found = [];
   // The word's unbroken width, measured in a copy placed inside the same
-  // element so it inherits every font property.
+  // element so it inherits every font property. An element no stylesheet
+  // targets, with every property reset (inherited ones then inherit), so a
+  // rule like `.x span { width: 10px }` can't reshape it.
   const naturalWidth = (el, text) => {
-    const probe = document.createElement('span');
-    probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;text-indent:0';
+    const probe = document.createElement('x-probe');
+    probe.style.cssText = 'all:unset;position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;text-indent:0';
     probe.textContent = text;
     el.append(probe);
     const width = probe.getBoundingClientRect().width;
@@ -356,20 +358,23 @@ if (chromium) {
   });
 
   test('icons sit on their first line, ranking rows change together, and details line up, at any text size', async () => {
-    // Pseudo-element icons have no DOM box, so read them through DevTools.
-    const iconMids = async (page, selector, type) => {
+    // Pseudo-element icons have no DOM box, so read them through DevTools
+    // (one session and one document fetch per page).
+    const iconReader = async (page) => {
       const cdp = await page.context().newCDPSession(page);
-      const { root } = await cdp.send('DOM.getDocument', { depth: -1 });
-      const { nodeIds } = await cdp.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector });
-      const mids = [];
-      for (const nodeId of nodeIds) {
-        const { node } = await cdp.send('DOM.describeNode', { nodeId });
-        const pseudo = (node.pseudoElements ?? []).find((p) => p.pseudoType === type);
-        const { model } = await cdp.send('DOM.getBoxModel', { backendNodeId: pseudo.backendNodeId });
-        mids.push((model.border[1] + model.border[5]) / 2);
-      }
-      await cdp.detach();
-      return mids;
+      const { root } = await cdp.send('DOM.getDocument', { depth: 0 });
+      return async (selector, type) => {
+        const { nodeIds } = await cdp.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector });
+        const mids = [];
+        for (const nodeId of nodeIds) {
+          const { node } = await cdp.send('DOM.describeNode', { nodeId });
+          const pseudo = (node.pseudoElements ?? []).find((p) => p.pseudoType === type);
+          assert.ok(pseudo, `${selector} has no ::${type} icon`);
+          const { model } = await cdp.send('DOM.getBoxModel', { backendNodeId: pseudo.backendNodeId });
+          mids.push((model.border[1] + model.border[5]) / 2);
+        }
+        return mids;
+      };
     };
     for (const width of [320, 360, 390, 414, 768, 1280]) {
       for (const text of [1, 1.25, 1.5, 2, 2.5]) {
@@ -381,8 +386,9 @@ if (chromium) {
         await page.locator('.result summary').first().click();
         // Icons beside text (not the inline fallback in narrow boxes) are centred on the first line.
         const icons = [['.verdict', 'before'], ['.checklist li', 'before'], ['.faq summary', 'after']];
+        const iconMids = await iconReader(page);
         for (const [selector, type] of icons) {
-          const mids = await iconMids(page, selector, type);
+          const mids = await iconMids(selector, type);
           const lines = await page.evaluate(
             ([sel, type]) =>
               [...document.querySelectorAll(sel)].map((el) => {
@@ -411,6 +417,18 @@ if (chromium) {
         });
         assert.ok(Math.abs(align.bd - align.sub) <= 1, `${where}: breakdown at ${align.bd}, details line at ${align.sub}`);
         if (align.rankShown && align.wide) assert.ok(Math.abs(align.sub - align.name) <= 1, `${where}: details line at ${align.sub}, name at ${align.name}`);
+        if (!align.rankShown) assert.ok(Math.abs(align.sub - align.name) <= 1, `${where}: no rank badge, yet the details line is indented`);
+        if (width === 1280 && text === 1) {
+          // A results list narrow for its text on a wide screen (the narrow
+          // rules must not depend on the phone-width ones): no badge, no indent.
+          const narrow = await page.evaluate(() => {
+            document.querySelector('.results').style.width = '11em';
+            const row = document.querySelector('.result');
+            const left = (sel) => row.querySelector(sel).getBoundingClientRect().left;
+            return { rank: row.querySelector('.rank').offsetWidth, name: left('.pname'), sub: left('.result-sub'), bd: left('.breakdown dl') };
+          });
+          assert.deepEqual([narrow.rank, narrow.sub, narrow.bd], [0, narrow.name, narrow.name], `${where}, 11em results list`);
+        }
 
         // Fee-page ranking: every row has its amount beside the name or every row under it,
         // and a shown rank number shares the name's first line.

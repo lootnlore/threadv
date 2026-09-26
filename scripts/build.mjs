@@ -29,8 +29,8 @@ const quiet = process.argv.includes('--quiet');
 // Each is published as <name>.<content hash>.js with its imports rewritten.
 const MODULES = [
   ['src/engine/fees.mjs', 'fees'],
-  ['src/engine/render.mjs', 'render'],
   ['src/engine/calc.mjs', 'calc'],
+  ['src/engine/render.mjs', 'render'],
   ['src/assets/app.js', 'app'],
 ];
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
-import { percent, money, renderResults, ordinal, competitionRanks } from '../src/engine/render.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, parseNumber, competitionRanks, scoreFor, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { percent, money, renderResults, renderVerdict, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
@@ -377,7 +377,8 @@ const rows = (html) =>
     id: li.match(/data-id="([^"]+)"/)[1],
     best: li.includes('class="result is-best'),
     rank: ((n) => (n === '\u2013' ? null : Number(n)))(li.match(/<span class="rank" aria-hidden="true">([^<]+)<\/span>/)[1]),
-    tags: [...li.matchAll(/<span class="tag [^"]+">([^<]+)<\/span>/g)].map((m) => m[1]),
+    tags: [...li.matchAll(/<span class="tag [^"]+"[^>]*>([^<]+)<\/span>/g)].map((m) => m[1]),
+    spoken: li.match(/<span class="visually-hidden">([^<]*)<\/span>/)?.[1] ?? '',
     name: li.match(/<span class="pname">(.*?)<\/span><span class="figure/)[1].replace(/<[^>]+>/g, ''),
   }));
 
@@ -417,8 +418,43 @@ test('results: names and tags read correctly without CSS', () => {
   const i = input({ price: 40, cost: 5 });
   const ranked = rank('profit', i);
   const out = rows(renderResults('profit', ranked, { focus: ranked[1].id, target: i.target }));
-  assert.equal(out[1].name, `${ranked[0].short} Best`, 'a space before the tag');
-  assert.equal(out[0].name, `${ranked[1].short} 2nd of ${ranked.length}`);
+  assert.equal(out[1].name, `1st: ${ranked[0].short} Best`, 'rank words, then a space before the tag');
+  assert.equal(out[0].name, `2nd: ${ranked[1].short} 2nd of ${ranked.length}`);
+});
+
+test('results: screen readers hear each rank in words, ties included', () => {
+  const i = input({ price: 40, cost: 5 });
+  const ranked = rank('profit', i);
+  const ranks = competitionRanks(ranked.map((r) => scoreFor('profit', r)));
+  const out = rows(renderResults('profit', ranked, { target: i.target }));
+  out.forEach((row, n) => {
+    const tied = ranks.filter((x) => x === ranks[n]).length > 1;
+    assert.equal(row.spoken, `${tied ? 'Tied ' : ''}${ordinal(ranks[n])}: `);
+  });
+  assert.ok(out.some((row) => row.spoken.startsWith('Tied ')), 'the example has a tie');
+});
+
+test('rank() orders by scoreFor in every mode, unreachable last', () => {
+  for (const [mode, raw] of [['profit', { price: 40, cost: 5 }], ['maxbuy', { price: 40, target: 5 }], ['price', { cost: 5, target: 10 }], ['price', { cost: 5, target: 9_000_000 }]]) {
+    const scores = rank(mode, input(raw)).map((r) => scoreFor(mode, r) ?? -Infinity);
+    assert.deepEqual(scores, [...scores].sort((a, b) => b - a), mode);
+  }
+});
+
+test('verdict names every marketplace tied for the top result', () => {
+  // Mercari and Facebook take the same 10%; eBay takes more.
+  const ids = ['mercari', 'facebook', 'ebay'];
+  const verdictFor = (mode, raw) => {
+    const i = input(raw);
+    return renderVerdict(mode, rank(mode, i, ids), i).html;
+  };
+  assert.match(verdictFor('profit', { price: 40, cost: 8 }), /Best on Mercari and Facebook Marketplace: /);
+  assert.match(verdictFor('maxbuy', { price: 40, target: 5 }), /selling on Mercari or Facebook Marketplace at /);
+  assert.match(verdictFor('price', { cost: 5, target: 10 }), /on Mercari or Facebook Marketplace, the lowest price/);
+  assert.match(verdictFor('profit', { price: 40, cost: 38 }), /Best case is .* on Mercari or Facebook Marketplace, under/);
+  const i = input({ price: 40, cost: 8 });
+  const both = rows(renderResults('profit', rank('profit', i, ids), { target: i.target })).filter((r) => r.best);
+  assert.deepEqual(both.map((r) => r.id).sort(), ['facebook', 'mercari'], 'both carry the Best badge');
 });
 
 test('competition ranks: ties share a rank, the next rank skips, unreachable gets none', () => {

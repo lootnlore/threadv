@@ -1,6 +1,6 @@
 import { PLATFORMS, FEES_VERIFIED, andList } from '../engine/fees.mjs';
-import { normalizeInputs, evaluate, DEFAULTS } from '../engine/calc.mjs';
-import { esc, money, percent, competitionRanks } from '../engine/render.mjs';
+import { normalizeInputs, evaluate, competitionRanks, DEFAULTS } from '../engine/calc.mjs';
+import { esc, money, percent, rankWords } from '../engine/render.mjs';
 import { calculator, crosslisters, newsletter, feeChanges, faq, breadcrumbs, verifiedLabel } from './components.mjs';
 
 const EXAMPLE_PRICES = [10, 25, 50, 100, 250];
@@ -128,14 +128,15 @@ export function feePage(config, platform) {
     return `<tr><th scope="row" class="num">${money(r.price)}</th><td class="num">${money(r.feeTotal)}</td><td class="num">${percent(r.feeRate)}</td><td class="num">${money(r.payout)}</td></tr>`;
   }).join('');
 
-  // Ranked by payout; equal payouts share a rank (written out, as a CSS
-  // counter can't show a tie).
+  // Ranked by payout; equal payouts share a rank (written out, as a list's
+  // own numbers can't show a tie): a number on screen, words for screen readers.
   const byPayout = PLATFORMS.map((p) => at(p, 50)).sort((a, b) => b.payout - a.payout);
   const ranks = competitionRanks(byPayout.map((r) => r.payout));
+  const tied = (i) => ranks.filter((n) => n === ranks[i]).length > 1;
   const others = byPayout
     .map(
       (r, i) =>
-        `<li${r.id === platform.id ? ' class="is-current"' : ''}><span class="cmp-rank">${ranks[i]}.</span> ${
+        `<li${r.id === platform.id ? ' class="is-current"' : ''}><span class="cmp-rank" aria-hidden="true">${ranks[i]}.</span> <span class="visually-hidden">${rankWords(ranks[i], tied(i))}: </span>${
           r.id === platform.id ? `<strong>${esc(r.name)}</strong>` : `<a href="/fees/${r.id}/">${esc(r.name)}</a>`
         } <span class="num">${money(r.payout)}</span></li>`,
     )

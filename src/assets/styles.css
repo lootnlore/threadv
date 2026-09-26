@@ -880,16 +880,24 @@ select {
 
 /* Icons beside text (verdict, checklist): an icon column sized in rem, so it
    scales with the text, and a minmax(0) text column that wraps like a
-   paragraph. Baseline alignment puts the icon's glyph on the first line's
-   baseline, which centres the circle on that line; the glyph is smaller than
-   the text, so it sits a little low, and a nudge of about a third of the
-   size difference (0.35 x (1 - ratio) / ratio, in the glyph's em) lifts it
-   back to the middle. When the box is
-   narrow for the text size, the icon goes inline instead: the text runs under
-   it, and a word that can't fit beside it moves to the next line whole
-   (a line may break after an inline-block) rather than splitting. */
+   paragraph. The icon is centred on the text's first line box, measured in
+   the text's own line height (--text-line, 1lh of the text), so it holds for
+   any font. When the box is narrow for the text size, the icon goes inline
+   instead: the text runs under it, and a word that can't fit beside it moves
+   to the next line whole (a line may break after an inline-block) rather
+   than splitting.
+
+   Registered so 1lh is computed on the text, not on the smaller icon glyph
+   that inherits it. */
+@property --text-line {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+
 .verdict {
   --icon: 1.5rem;
+  --text-line: 1lh;
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
   align-items: baseline;
@@ -910,6 +918,8 @@ select {
   border-radius: 50%;
   font-size: 0.83em;
   font-weight: 900;
+  /* Browsers without lh: the glyph sits on the text's baseline, a little low
+     as it is smaller; lift it by about a third of the size difference. */
   translate: 0 -0.07em;
 }
 
@@ -920,7 +930,7 @@ select {
 
   .verdict::before {
     display: inline-grid;
-    margin: 0 10px 0 0;
+    margin-right: 10px;
   }
 }
 
@@ -1051,18 +1061,11 @@ select {
   color: var(--brand-strong);
 }
 
-/* A pinned row's rank in words: for screen readers, and on screen only when
-   the rank badge is hidden (very large text, below). Normal case, so it is
-   read as words ("5th", not "5 T H"). */
+/* A pinned row's rank as a tag ("5th of 9"), shown only when very large text
+   hides the rank badge (below). Screen readers hear every row's rank in words
+   instead, so the tag is aria-hidden. */
 .tag-rank {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
+  display: none;
   text-transform: none;
   letter-spacing: 0;
   background: var(--surface);
@@ -1112,50 +1115,6 @@ select {
   grid-column: 2 / -1;
 }
 
-/* Very narrow for the text size (large text on a small phone): amounts too,
-   and the details line uses the full width. */
-@container (max-width: 12em) {
-  /* The name gets the full width: the rank badge steps aside (rows are in
-     rank order; a fee page's pinned row names its rank in a tag) and every
-     figure goes under its name. */
-  .result-main {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .rank {
-    display: none;
-  }
-
-  .tag-rank {
-    position: static;
-    width: auto;
-    height: auto;
-    margin: 0;
-    padding: 2px 8px;
-    overflow: visible;
-    clip: auto;
-    white-space: normal;
-  }
-
-  .breakdown {
-    padding-left: 14px;
-  }
-
-  .result-main > .figure,
-  .results.stacked .result-main > .figure {
-    grid-column: 1 / -1;
-    font-size: 1.05rem; /* on its own row: body size keeps a big amount on one line */
-  }
-
-  .result-sub {
-    margin-left: 0;
-  }
-
-  .result-sub .seg {
-    white-space: normal;
-  }
-}
-
 .figure.zero {
   color: var(--muted);
   font-size: 1rem;
@@ -1202,6 +1161,44 @@ select {
 
   .breakdown {
     padding-left: 14px;
+  }
+}
+
+/* Very narrow for the text size (large text on a small phone): amounts too,
+   and the details line and breakdown use the full width. After the rules it
+   overrides, which have the same specificity. */
+@container (max-width: 12em) {
+  /* The name gets the full width: the rank badge steps aside (rows are in
+     rank order; a fee page's pinned row names its rank in a tag) and every
+     figure goes under its name. */
+  .result-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rank {
+    display: none;
+  }
+
+  .tag-rank {
+    display: inline-block;
+  }
+
+  .breakdown {
+    padding-left: 14px;
+  }
+
+  .result-main > .figure,
+  .results.stacked .result-main > .figure {
+    grid-column: 1 / -1;
+    font-size: 1.05rem; /* on its own row: body size keeps a big amount on one line */
+  }
+
+  .result-sub {
+    margin-left: 0;
+  }
+
+  .result-sub .seg {
+    white-space: normal;
   }
 }
 
@@ -1373,6 +1370,7 @@ select {
 
 .checklist li {
   --icon: 1.375rem;
+  --text-line: 1lh;
   display: grid;
   grid-template-columns: var(--icon) minmax(0, 1fr);
   align-items: baseline;
@@ -1391,7 +1389,7 @@ select {
   color: var(--brand-strong);
   font-size: 0.75em;
   font-weight: 900;
-  translate: 0 -0.12em;
+  translate: 0 -0.12em; /* without lh, as for the verdict */
 }
 
 @container (max-width: 12em) {
@@ -1401,7 +1399,19 @@ select {
 
   .checklist li::before {
     display: inline-grid;
-    margin: 0 10px 0 0;
+    margin-right: 10px;
+  }
+}
+
+/* With lh: the icon's top is half the difference between the line and the
+   icon below the line's top, beside the text (grid) or inline with it. */
+@supports (height: 1lh) {
+  .verdict::before,
+  .checklist li::before {
+    align-self: start;
+    vertical-align: top;
+    margin-top: calc((var(--text-line) - var(--icon)) / 2);
+    translate: none;
   }
 }
 
@@ -1650,8 +1660,8 @@ table.data {
    the text) and apply to the whole list, so every row changes together.
    They leave room for the longest name word, "Marketplace" (7em in a wide
    font; the page tests check it never splits): below 14.5em every amount
-   moves under its name, below 10em the rank number steps aside (still read
-   by screen readers). */
+   moves under its name, below 10em the rank number steps aside (screen
+   readers hear the rank in words either way). */
 .compare {
   container-type: inline-size;
   list-style: none;
@@ -1701,12 +1711,7 @@ table.data {
   }
 
   .cmp-rank {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+    display: none;
   }
 
   .compare .num {

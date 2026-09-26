@@ -486,10 +486,10 @@ def build_inventory(wb, verify=False):
             for col, value in enumerate(row, start=1):
                 ws.cell(row=r, column=col, value=value)
         # Sales whose fee can't be worked out: payout and profit must stay blank.
-        # The unknown one has Actual fees too: without a listed marketplace they don't count either.
+        # With Actual fees too: without a listed marketplace they don't count either.
         for i, market in enumerate(NO_FEE_CASES):
             r = no_fee_row(i)
-            row = ["VERIFY", "no fee", "Other", as_of(24), VERIFY_COST, market, as_of(5), 45, 5, VERIFY_LABEL, None, None, 3 if market else None]
+            row = ["VERIFY", "no fee", "Other", as_of(24), VERIFY_COST, market, as_of(5), 45, 5, VERIFY_LABEL, None, None, 3]
             for col, value in enumerate(row, start=1):
                 if value is not None:  # L is a formula
                     ws.cell(row=r, column=col, value=value)

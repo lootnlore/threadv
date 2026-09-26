@@ -229,22 +229,37 @@ function pick(ids) {
 }
 
 /**
- * Run a calculator mode across platforms and rank the results best-first.
- *   profit -> highest profit first
- *   maxbuy -> highest max buy price first
- *   price  -> lowest required list price first (unreachable last)
+ * How good a result is in a mode, higher is better: profit, max buy price, or
+ * the negated list price. null for a result that can't be reached. The one
+ * definition behind the order, the rank numbers and the verdict.
+ */
+export function scoreFor(mode, r) {
+  if (r.unreachable) return null;
+  return mode === 'maxbuy' ? r.maxCost : mode === 'price' ? -r.price : r.profit;
+}
+
+/**
+ * Competition ranks ("1, 2, 2, 4") for scores where higher is better: equal
+ * scores share a rank. A null score (can't be reached) gets no rank.
+ */
+export function competitionRanks(scores) {
+  return scores.map((s) => (s === null ? null : 1 + scores.filter((t) => t !== null && t > s).length));
+}
+
+/**
+ * Run a calculator mode across platforms and rank the results best-first
+ * (see scoreFor; unreachable last, ties in platform order).
  */
 export function rank(mode, input, ids) {
-  const platforms = pick(ids);
-  if (mode === 'maxbuy') {
-    return platforms.map((p) => maxBuy(p, input)).sort((a, b) => b.maxCost - a.maxCost);
-  }
-  if (mode === 'price') {
-    return platforms
-      .map((p) => listPrice(p, input) ?? { id: p.id, name: p.name, short: p.short ?? p.name, unreachable: true })
-      .sort((a, b) => (a.unreachable ? 1 : 0) - (b.unreachable ? 1 : 0) || (a.price ?? 0) - (b.price ?? 0));
-  }
-  return platforms.map((p) => evaluate(p, input)).sort((a, b) => b.profit - a.profit);
+  const run = {
+    profit: (p) => evaluate(p, input),
+    maxbuy: (p) => maxBuy(p, input),
+    price: (p) => listPrice(p, input) ?? { id: p.id, name: p.name, short: p.short ?? p.name, unreachable: true },
+  }[mode] ?? ((p) => evaluate(p, input)); // like scoreFor: anything else is profit
+  const key = (r) => scoreFor(mode, r) ?? -Infinity;
+  return pick(ids)
+    .map(run)
+    .sort((a, b) => (key(a) === key(b) ? 0 : key(b) > key(a) ? 1 : -1));
 }
 
 export { PLATFORMS, PLATFORM_BY_ID, MAX_CENTS };

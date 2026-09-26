@@ -4,7 +4,8 @@
  * re-renders match the server output exactly). Output only contains numbers
  * and strings from fees.mjs, and everything passes through esc().
  */
-import { MAX_CENTS, usdText } from './fees.mjs';
+import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
+import { scoreFor, competitionRanks } from './calc.mjs';
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
@@ -70,19 +71,14 @@ function breakdown(mode, r, target) {
   return `<dl>${rows.join('')}</dl>${taxNote}`;
 }
 
-/**
- * Competition ranks ("1, 2, 2, 4") for scores where higher is better: equal
- * scores share a rank. A null score (can't be reached) gets no rank.
- */
-export function competitionRanks(scores) {
-  return scores.map((s) => (s === null ? null : 1 + scores.filter((t) => t !== null && t > s).length));
-}
-
 /** 1 -> "1st", 2 -> "2nd", 11 -> "11th", 22 -> "22nd". */
 export function ordinal(n) {
   const teen = n % 100 >= 11 && n % 100 <= 13;
   return `${n}${(!teen && { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10]) || 'th'}`;
 }
+
+/** A rank in words: "4th", or "Tied 4th" when another result shares it. */
+export const rankWords = (rank, tied) => `${tied ? 'Tied ' : ''}${ordinal(rank)}`;
 
 function figureFor(mode, r) {
   if (mode === 'maxbuy') {
@@ -115,13 +111,9 @@ function subFor(mode, r) {
  */
 export function renderResults(mode, results, { focus, target = 0 } = {}) {
   // Equal results share a rank; one that can't be reached has none.
-  const scores = results.map((r) => (r.unreachable ? null : mode === 'maxbuy' ? r.maxCost : mode === 'price' ? -r.price : r.profit));
-  const ranks = competitionRanks(scores);
+  const ranks = competitionRanks(results.map((r) => scoreFor(mode, r)));
   const rows = results.map((r, i) => ({ r, rank: ranks[i], tied: ranks[i] !== null && ranks.filter((n) => n === ranks[i]).length > 1 }));
-  // On a platform's own fee page, pin it first but keep its true rank: the
-  // badge shows the number, and a tag says it in words for screen readers
-  // (the badge is hidden from them) and for very large text (the badge is
-  // hidden then too).
+  // On a platform's own fee page, pin it first but keep its true rank.
   const pinned = rows.findIndex(({ r }) => r.id === focus);
   if (pinned > 0) rows.unshift(...rows.splice(pinned, 1));
   return rows
@@ -132,12 +124,17 @@ export function renderResults(mode, results, { focus, target = 0 } = {}) {
         (mode !== 'maxbuy' || r.maxCost >= 0) &&
         (mode !== 'profit' || (r.profit > 0 && r.profit >= target));
       const cls = ['result', best && 'is-best', r.id === focus && 'is-focus'].filter(Boolean).join(' ');
+      // The rank: a badge on screen, words for screen readers ("Tied 4th:"; the
+      // list's own item numbers can't show ties). A pinned row also gets the
+      // words as a tag, shown only when very large text hides the badge.
+      const words = rank === null ? '' : rankWords(rank, tied);
+      const spoken = words && `<span class="visually-hidden">${words}: </span>`;
       const tag = best
         ? '<span class="tag tag-best">Best</span>'
-        : r.id === focus && pinned > 0 && rank !== null
-          ? `<span class="tag tag-rank">${tied ? 'Tied ' : ''}${ordinal(rank)} of ${results.length}</span>`
+        : r.id === focus && pinned > 0 && words
+          ? `<span class="tag tag-rank" aria-hidden="true">${words} of ${results.length}</span>`
           : '';
-      const head = `<span class="result-main"><span class="rank" aria-hidden="true">${rank ?? '\u2013'}</span><span class="pname">${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
+      const head = `<span class="result-main"><span class="rank" aria-hidden="true">${rank ?? '\u2013'}</span><span class="pname">${spoken}${esc(r.short)}${tag && ` ${tag}`}</span>${figureFor(mode, r)}</span>
 <span class="result-sub">${subFor(mode, r)}<wbr></span>`; // <wbr>: the disclosure chevron may wrap too
       const body = r.unreachable
         ? `<div class="result-head">${head}</div>`
@@ -155,6 +152,8 @@ export function renderVerdict(mode, results, input) {
   const out = (tone, html) => ({ tone, html: `<span>${html}</span>` });
   const target = money(input.target);
   const top = results.find((r) => !r.unreachable);
+  // Every platform tied for the top result is named.
+  const best = results.filter((r) => top && scoreFor(mode, r) === scoreFor(mode, top)).map((r) => esc(r.name));
   if (!top) {
     return out('bad', `<strong>Out of range.</strong> No platform reaches ${target} profit with these costs.`);
   }
@@ -162,17 +161,17 @@ export function renderVerdict(mode, results, input) {
     if (top.maxCost < 0) {
       return out('bad', `<strong>Pass.</strong> At a ${money(input.price)} sale you can’t clear ${target} on any platform, even if the item is free.`);
     }
-    return out('good', `<strong>Pay up to ${money(top.maxCost)}</strong> to make ${target} selling on ${esc(top.name)} at ${money(input.price)}.`);
+    return out('good', `<strong>Pay up to ${money(top.maxCost)}</strong> to make ${target} selling on ${orList(best)} at ${money(input.price)}.`);
   }
   if (mode === 'price') {
-    return out('good', `<strong>List at ${money(top.price)}</strong> on ${esc(top.name)}, the lowest price that clears ${target} after fees and costs.`);
+    return out('good', `<strong>List at ${money(top.price)}</strong> on ${orList(best)}, the lowest price that clears ${target} after fees and costs.`);
   }
   if (top.profit < input.target) {
-    return out('bad', `<strong>Pass.</strong> Best case is ${money(top.profit)} on ${esc(top.name)}, under your ${target} minimum.`);
+    return out('bad', `<strong>Pass.</strong> Best case is ${money(top.profit)} on ${orList(best)}, under your ${target} minimum.`);
   }
   if (top.profit <= 0) {
-    return out('bad', `<strong>No profit.</strong> At best you break even on ${esc(top.name)}.`);
+    return out('bad', `<strong>No profit.</strong> At best you break even on ${orList(best)}.`);
   }
   const roi = top.roi === null ? '' : ` (${percent(top.roi)} ROI)`;
-  return out('good', `<strong>Worth it.</strong> Best on ${esc(top.name)}: ${money(top.profit)} profit${roi}.`);
+  return out('good', `<strong>Worth it.</strong> Best on ${andList(best)}: ${money(top.profit)} profit${roi}.`);
 }

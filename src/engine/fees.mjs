@@ -62,7 +62,9 @@ export const percentOf = (fraction) => Math.round(fraction * 10_000) / 100;
 export const pctText = (fraction) => `${percentOf(fraction)}%`;
 export const usdText = (dollars) => `$${dollars.toLocaleString('en-US', { minimumFractionDigits: dollars % 1 ? 2 : 0 })}`;
 /** ['eBay', 'Etsy', 'Depop'] -> "eBay, Etsy and Depop" (house style: no serial comma). */
-export const andList = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : (items[0] ?? ''));
+const joinList = (conj) => (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} ${conj} ${items.at(-1)}` : (items[0] ?? ''));
+export const andList = joinList('and');
+export const orList = joinList('or');
 const tierText = (rate, cap, over) => `${pctText(rate)} up to ${usdText(cap)}, ${pctText(over)} above`;
 
 /**
