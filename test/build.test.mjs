@@ -324,8 +324,9 @@ test('in High Contrast every focus ring uses the system focus colour', () => {
   // Chromium already paints a focused element's ring in Highlight, so this is
   // checked in the stylesheet: Firefox relies on the rule. A "ring" is any
   // :focus, :focus-within or :focus-visible rule that draws an outline (any
-  // outline property but `none`) or a ring-shaped box-shadow (`0 0 0 3px`,
-  // not a drop shadow like the skip link's).
+  // outline property but `none`) or a ring-shaped box-shadow: no offset or
+  // blur, just a spread (`0 0 0 3px`, `inset 0px 0px 0px 0.2rem`,
+  // `0 0 0 var(--ring-width)`), not a drop shadow like the skip link's.
   const css = readFileSync(new URL('../src/assets/styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   const forcedAt = css.indexOf('@media (forced-colors: active)');
   assert.ok(forcedAt > 0, 'a forced-colors block exists');
@@ -341,7 +342,8 @@ test('in High Contrast every focus ring uses the system focus colour', () => {
     return out.map((x) => x.trim().replace(/\s+/g, ' ')).filter(Boolean);
   };
   const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sels: splitSelectors(sel), body }));
-  const draws = (body) => /(^|;|\s)box-shadow\s*:\s*0\s+0\s+0\s+[\d.]+px/.test(body) || [...body.matchAll(/(?:^|;|\s)outline(-style|-width|-color)?\s*:\s*([^;]+)/g)].some(([, , value]) => value.trim() !== 'none');
+  const ringShadow = /(^|;|\s)box-shadow\s*:\s*(inset\s+)?(0(px|r?em)?\s+){3}([\d.]+(px|r?em)|var\()/;
+  const draws = (body) => ringShadow.test(body) || [...body.matchAll(/(?:^|;|\s)outline(-style|-width|-color)?\s*:\s*([^;]+)/g)].some(([, , value]) => value.trim() !== 'none');
   const ringSelectors = rules(css.slice(0, forcedAt))
     .filter(({ body }) => draws(body))
     .flatMap(({ sels }) => sels)
@@ -352,6 +354,8 @@ test('in High Contrast every focus ring uses the system focus colour', () => {
     .flatMap(({ sels }) => sels);
   for (const sel of ringSelectors) assert.ok(highlighted.includes(sel), `${sel} has no Highlight ring in forced colors`);
   assert.deepEqual(splitSelectors(':is(.a, .b):focus-visible, .c'), [':is(.a, .b):focus-visible', '.c'], 'selectors split at the top level only');
+  for (const ring of ['box-shadow: 0 0 0 3px red', 'box-shadow: inset 0px 0px 0px 0.2rem red', 'box-shadow: 0 0 0 var(--ring-width) red']) assert.ok(draws(ring), ring);
+  for (const other of ['box-shadow: var(--shadow)', 'box-shadow: 0 1px 3px rgb(0 0 0 / 0.12)', 'outline: none']) assert.ok(!draws(other), other);
 });
 
 test('fee change dates are machine-readable', () => {

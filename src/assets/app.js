@@ -12,7 +12,7 @@
 //   never reads or writes the visitor's saved settings.
 import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, parseNumber, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, MODES } from '../engine/render.mjs';
-import { PLATFORMS, usdText } from '../engine/fees.mjs';
+import { PLATFORMS, usdText, andList } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
 const SHARE_FLAG = 's';
@@ -171,14 +171,22 @@ function setup(root) {
 
   // ---- rendering ----
 
-  /** Flags each numeric field; returns the fields on show that hold a bad value. */
-  function validate(values) {
+  const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
+  /** The marketplace a fee field belongs to (tiktokRate: tiktok), if any. */
+  const ownerOf = (key) => PLATFORMS.find((p) => key.startsWith(p.id))?.id;
+
+  /**
+   * Flags each numeric field; returns the flagged ones that affect the results
+   * now: on show in this mode, and not the rate of a marketplace left out.
+   */
+  function validate(values, ids) {
     const bad = [];
     for (const key of NUMERIC) {
       const el = field(key);
       if (!el) continue;
       const problem = problemWith(key, values[key]);
-      if (problem && !el.closest('[hidden]')) bad.push(key);
+      const owner = ownerOf(key);
+      if (problem && !el.closest('[hidden]') && (!owner || ids.includes(owner))) bad.push(key);
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -191,42 +199,66 @@ function setup(root) {
     return bad;
   }
 
+  let renderedMode = null; // the mode the rows on screen were worked out for (null: the page's own example)
+  let pendingField = null; // the field to fix before results can show
+  let badBefore = new Set();
+
+  function setStale(stale) {
+    resultsEl.classList.toggle('is-stale', stale);
+    resultsEl.inert = stale;
+  }
+
   /**
    * While the numbers can't be trusted (a flagged field, or no sell price where
-   * the mode needs one) the verdict asks for them instead of deciding, and the
-   * last results stay dimmed and out of reach (inert) until they can.
+   * the mode needs one) the verdict asks for them, in a neutral tone, instead
+   * of deciding. The last results stay, dimmed and out of reach (inert), if
+   * they were worked out for this mode; otherwise (another mode, or the page's
+   * example) they would mislead, so they go.
    */
-  function showPending(html) {
-    verdictEl.className = 'verdict verdict-bad';
+  function showPending(html, fix) {
+    verdictEl.className = 'verdict verdict-wait';
     verdictEl.innerHTML = `<span>${html}</span>`;
-    resultsEl.classList.add('is-stale');
-    resultsEl.inert = true;
+    pendingField = fix;
+    if (renderedMode === mode) setStale(true);
+    else {
+      resultsEl.innerHTML = '';
+      renderedMode = null;
+      setStale(false);
+    }
   }
 
   /** `save` marks the user's own edits: stored (outside a shared link) and mirrored to the URL. */
   function render({ save = false } = {}) {
     const state = readForm();
     fieldBox('ebayCustomRate').hidden = state.values.ebayCategory !== 'custom';
-    const bad = validate(state.values);
-    const needsPrice = !MODES[mode].hidden.includes('price') && !(parseNumber(state.values.price) > 0);
+    // A marketplace's own fee page always shows it, even if the visitor hid it.
+    const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
+    const bad = validate(state.values, ids);
+    // A field that has just gone bad inside the closed Fine-tune panel (a shared
+    // link's junk, say) opens it, once: closing it again is up to the user.
+    for (const key of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
+    badBefore = new Set(bad);
 
     const open = new Set([...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id));
     const input = normalizeInputs(state.values);
+    // The sale price as the engine sees it (to the cent): "0.004" is $0.
+    const needsPrice = !MODES[mode].hidden.includes('price') && input.price === 0;
+    pendingField = null;
 
-    // A marketplace's own fee page always shows it, even if the visitor hid it.
-    const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     if (ids.length === 0) {
       verdictEl.className = 'verdict verdict-bad';
       verdictEl.innerHTML = '<span><strong>No marketplaces selected.</strong> Pick at least one under “Fine-tune fees”.</span>';
       resultsEl.innerHTML = '';
+      renderedMode = null;
+      setStale(false);
     } else if (bad.length) {
-      for (const key of bad) field(key).closest('details:not([open])')?.setAttribute('open', ''); // e.g. a shared link's junk under Fine-tune fees
-      showPending(`<strong>Check the highlighted ${bad.length > 1 ? 'fields' : 'field'}.</strong> Results update once ${bad.length > 1 ? 'they hold' : 'it holds'} a valid number.`);
+      const names = andList(bad.map((key) => `“${labelOf(key)}”`));
+      showPending(`<strong>Check ${names}.</strong> Results update once ${bad.length > 1 ? 'they hold' : 'it holds'} a valid number.`, bad[0]);
     } else if (needsPrice) {
-      showPending('<strong>Enter a sell price</strong> to see results.');
+      showPending('<strong>Enter a sell price above $0</strong> to see results.', 'price');
     } else {
-      resultsEl.classList.remove('is-stale');
-      resultsEl.inert = false;
+      setStale(false);
+      renderedMode = mode;
       const rows = rankedRows(mode, rank(mode, input, ids), input.target);
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
@@ -330,6 +362,8 @@ function setup(root) {
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     render({ save: true });
+    // Nothing to show yet: go to the field to fix, not away from it.
+    if (pendingField) return field(pendingField).focus();
     if (seeResults.offsetParent === null) return;
     const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     verdictEl.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });

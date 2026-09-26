@@ -265,24 +265,37 @@ if (chromium) {
 
   test('no verdict from numbers the form rejects or leaves out', async () => {
     const { context, page } = await open();
-    const stale = () => page.evaluate(() => {
-      const list = document.querySelector('[data-results]');
-      return list.classList.contains('is-stale') && list.inert;
-    });
+    const state = () =>
+      page.evaluate(() => {
+        const list = document.querySelector('[data-results]');
+        return { tone: document.querySelector('[data-verdict]').className, stale: list.classList.contains('is-stale') && list.inert, rows: list.children.length };
+      });
     const before = await page.locator('[data-results]').innerHTML();
-    for (const [id, value, want] of [['#f-cost', '-5', /^Check the highlighted field\./], ['#f-price', '12,5', /^Check the highlighted field\./], ['#f-price', '', /^Enter a sell price/]]) {
+    const cases = [
+      ['#f-cost', '-5', /^Check “You paid”\. Results update once it holds a valid number\./],
+      ['#f-price', '12,5', /^Check “Sell price”\./],
+      ['#f-price', '', /^Enter a sell price above \$0/],
+      ['#f-price', '0.004', /^Enter a sell price above \$0/, 'rounds to $0'],
+    ];
+    for (const [id, value, want, why] of cases) {
       await page.fill(id, value);
       await settle(page);
-      assert.match(await verdict(page), want, `${id} = "${value}"`);
-      assert.equal(await stale(), true, 'the old results are dimmed and out of reach');
-      assert.equal(await page.locator('[data-results]').innerHTML(), before, 'and not recomputed from a made-up value');
+      assert.match(await verdict(page), want, why ?? `${id} = "${value}"`);
+      assert.deepEqual(await state(), { tone: 'verdict verdict-wait', stale: true, rows: 9 }, 'a neutral prompt over the dimmed, unreachable rows');
+      assert.equal(await page.locator('[data-results]').innerHTML(), before, 'not recomputed from a made-up value');
       await page.fill('#f-price', '40');
       await page.fill('#f-cost', '8');
       await settle(page);
       assert.match(await verdict(page), /^Worth it\./);
-      assert.equal(await stale(), false);
+      assert.equal((await state()).stale, false);
     }
-    // Two bad fields, one inside the closed Fine-tune panel: the panel opens.
+    // Enter goes to the field to fix, not to the verdict (phones scroll there).
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.fill('#f-price', '');
+    await page.locator('#f-cost').press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
+    await page.fill('#f-price', '40');
+    // Two bad fields, one inside the closed Fine-tune panel: named, and the panel opens once.
     await page.fill('#f-cost', 'abc');
     await page.evaluate(() => {
       const rate = document.querySelector('#f-tiktokRate');
@@ -290,17 +303,35 @@ if (chromium) {
       rate.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await settle(page);
-    assert.match(await verdict(page), /^Check the highlighted fields\./);
+    assert.match(await verdict(page), /^Check “You paid” and “TikTok Shop fee”\. Results update once they hold/);
     assert.equal(await page.locator('.tune').getAttribute('open'), '');
-    // A hidden field doesn't hold results back: List price mode doesn't use the sell price.
+    await page.locator('.tune > summary').click(); // the user closes it...
+    await page.fill('#f-price', '41'); // ...and keeps typing elsewhere
+    await settle(page);
+    assert.equal(await page.locator('.tune').getAttribute('open'), null, 'it stays closed');
+    // A marketplace left out doesn't hold the others back.
     await page.fill('#f-cost', '8');
+    await page.locator('.tune > summary').click();
+    await page.locator('input[name="platform"][value="tiktok"]').uncheck();
+    await settle(page);
+    assert.match(await verdict(page), /^Worth it\./, 'a bad TikTok rate with TikTok unticked');
+    await page.locator('input[name="platform"][value="tiktok"]').check();
     await page.fill('#f-tiktokRate', '6');
-    await page.fill('#f-price', 'junk');
+    // Rows from another mode are cleared, not dimmed: cost is hidden in Max buy and
+    // shown (bad) in List price.
+    await page.fill('#f-cost', 'abc');
+    await page.getByRole('tab', { name: 'Max buy' }).click();
+    await settle(page);
+    assert.match(await verdict(page), /^Pay up to /, 'Max buy ignores the hidden cost');
     await page.getByRole('tab', { name: 'List price' }).click();
     await settle(page);
-    assert.match(await verdict(page), /^List at /);
-    assert.equal(await stale(), false);
+    assert.deepEqual(await state(), { tone: 'verdict verdict-wait', stale: false, rows: 0 });
     await context.close();
+    // Nor are the page's own example rows shown for a link that can't be worked out.
+    const link = await open('/#mode=maxbuy&price=');
+    assert.match(await verdict(link.page), /^Enter a sell price above \$0/);
+    assert.equal(await link.page.locator('[data-results] > li').count(), 0);
+    await link.context.close();
   });
 
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
@@ -647,6 +678,35 @@ if (chromium) {
         assert.ok(visible, `${selector} takes keyboard focus`);
         const ring = await get(p, selector);
         assert.ok(ring.outline && ring.outlineStyle === 'solid' && ring.outlineWidth >= 3, `forced colors ${forcedColors}: ${selector} focus ring ${JSON.stringify(ring)}`);
+      }
+      // The Best row's ring keeps clear of its edge (the 4px Best bar, or the
+      // High Contrast border) by at least 1px.
+      const clear = await p.evaluate(() => {
+        const row = document.querySelector('.result.is-best');
+        const summary = row.querySelector('summary');
+        summary.focus();
+        const st = getComputedStyle(summary);
+        return summary.getBoundingClientRect().left - row.getBoundingClientRect().left - parseFloat(st.outlineOffset) - parseFloat(st.outlineWidth);
+      });
+      assert.ok(clear >= 5, `forced colors ${forcedColors}: Best row ring ${clear}px from the row's edge`);
+      // A focused invalid field shows the focus ring (its red border or double
+      // line waits until focus leaves).
+      await p.fill('#f-cost', '-5');
+      await p.focus('#f-cost');
+      await settle(p);
+      const invalidFocused = await get(p, '.input-wrap:has(#f-cost)');
+      assert.ok(invalidFocused.outlineStyle === 'solid' && invalidFocused.outlineWidth >= 3, `forced colors ${forcedColors}: focused invalid field ${JSON.stringify(invalidFocused)}`);
+      // Its lines, focused or not, stay off the label and the hint.
+      for (const focusOn of ['#f-cost', '#f-price']) {
+        await p.focus(focusOn);
+        const gaps = await p.evaluate(() => {
+          const wrap = document.querySelector('.input-wrap:has(#f-cost)');
+          const st = getComputedStyle(wrap);
+          const reach = st.outlineStyle === 'none' ? 0 : parseFloat(st.outlineWidth) + parseFloat(st.outlineOffset);
+          const w = wrap.getBoundingClientRect();
+          return [w.top - reach - document.querySelector('label[for="f-cost"]').getBoundingClientRect().bottom, document.querySelector('#h-cost').getBoundingClientRect().top - w.bottom - reach];
+        });
+        assert.ok(Math.min(...gaps) >= 0.5, `forced colors ${forcedColors}, focus on ${focusOn}: field lines ${gaps} from the label and hint`);
       }
       await ctx.close();
     }
