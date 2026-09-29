@@ -330,17 +330,37 @@ if (chromium) {
     }
     assert.equal(await page.evaluate(() => window.cleared), 0, 'no flash of an empty list while typing');
     assert.match(await verdict(page), /^Worth it\./);
-    // Clicked with a field half-typed, the share button still works, for the
-    // result on screen; then the field is judged, and focus, on the button
-    // the prompt hides, moves to the prompt.
+    // Share clicked with a field half-typed judges the field first: no link
+    // for numbers no longer in the form. The prompt takes the results'
+    // place, and focus moves from the button it hides to the prompt.
+    await page.evaluate(() => navigator.clipboard.writeText('untouched'));
     await page.fill('#f-price', '4,');
     await page.getByRole('button', { name: 'Copy link to this result' }).click();
-    await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
-    const shared = await page.evaluate(() => navigator.clipboard.readText());
-    assert.equal(new URLSearchParams(new URL(shared).hash.slice(1)).get('price'), '12,500');
     await tick(page);
-    assert.equal(await verdict(page), 'Check “Sell price”. Enter $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “Sell price”. Use a dot, not a comma.');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'untouched');
+    assert.equal(await page.locator('[data-share-status]').textContent(), '');
     assert.equal(await page.evaluate(() => document.activeElement.hasAttribute('data-verdict')), true);
+    // Leaving a field for another window or tab isn't leaving it: the value
+    // is judged when the user really leaves (focus stays on it meanwhile).
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.fill('#f-price', '12,');
+    await page.locator('#f-price').dispatchEvent('focusout'); // what a window losing focus sends
+    await tick(page);
+    await settle(page);
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, 'not judged while away');
+    assert.match(await verdict(page), /^Worth it\./);
+    await leave('#f-price');
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
+    // A press the page never hears end (a context menu took the release)
+    // holds a judgement back a second at most.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.fill('#f-price', '12,');
+    await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 9, bubbles: true })));
+    await leave('#f-price');
+    await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 1500 });
     await page.fill('#f-price', '40');
     await settle(page);
     // Leaving a field whose value already shows (nothing left to judge)
@@ -370,7 +390,8 @@ if (chromium) {
     // results (no rows for numbers that were never entered), and is read out.
     const cases = [
       ['#f-cost', '-5', 'Check “You paid”. Enter $0 to $100,000.', 'true'],
-      ['#f-price', '12,5', 'Check “Sell price”. Enter $0 to $100,000.', 'true'],
+      ['#f-price', '12,5', 'Check “Sell price”. Use a dot, not a comma.', 'true'],
+      ['#f-price', 'abc', 'Check “Sell price”. Enter $0 to $100,000.', 'true'],
       ['#f-price', '0.004', 'Check “Sell price”. Enter at least $0.01.', 'true'],
       ['#f-price', '', 'Enter a sell price to see results.', null, 'not typed yet: a prompt, not an error'],
     ];
@@ -401,10 +422,15 @@ if (chromium) {
     await page.locator('#f-cost').press('Enter');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
     await page.fill('#f-price', '40');
-    // ...even inside the Fine-tune panel after the user closed it.
-    await enter('#f-tiktokRate', 'x');
-    assert.equal(await page.locator('.tune').getAttribute('open'), '', 'a field going bad in Fine-tune opens it');
+    // ...even inside the Fine-tune panel after the user closed it: left
+    // half-typed by closing the panel, the field is judged but the panel
+    // stays as the user left it.
     await page.locator('.tune > summary').click();
+    await page.fill('#f-tiktokRate', 'x');
+    await page.locator('.tune > summary').click();
+    await tick(page);
+    assert.equal(await page.locator('#f-tiktokRate').getAttribute('aria-invalid'), 'true');
+    assert.equal(await page.locator('.tune').getAttribute('open'), null, 'closed by the user, it stays closed');
     await page.fill('#f-price', '41');
     await settle(page);
     assert.equal(await page.locator('.tune').getAttribute('open'), null, 'closed by the user, it stays closed while they type');
@@ -453,13 +479,20 @@ if (chromium) {
     // Focus on a row stays on that row when the results are redrawn (Back,
     // or a pasted link)...
     await link.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    const first = await verdict(link.page);
     await link.page.evaluate(() => {
-      document.querySelector('.result[data-id="mercari"] summary').focus();
-      location.hash = '#price=50';
+      document.querySelector('.result[data-id="poshmark"] summary').focus(); // top of the list
+      location.hash = '#price=200';
     });
     await settle(link.page);
-    assert.match(await verdict(link.page), /\$50|Worth it/);
-    assert.equal(await link.page.evaluate(() => document.activeElement.matches('.result[data-id="mercari"] summary')), true, 'focus kept on its row');
+    assert.notEqual(await verdict(link.page), first, 'redrawn for the new numbers');
+    const kept = await link.page.evaluate(() => {
+      const el = document.activeElement;
+      const row = el.closest('.result');
+      const box = el.getBoundingClientRect();
+      return { row: row?.dataset.id, movedDown: [...row.parentElement.children].indexOf(row) > 2, inView: box.top >= -1 && box.bottom <= innerHeight + 1 };
+    });
+    assert.deepEqual(kept, { row: 'poshmark', movedDown: true, inView: true }, 'focus kept on its row, in view');
     // ...and focus in the results (or on their share button) when they go
     // moves to the prompt, in view, not to the top of the page. Focus reads
     // the prompt out, so the live region doesn't repeat it.
@@ -475,7 +508,7 @@ if (chromium) {
       const focused = await link.page.evaluate(() => {
         const el = document.activeElement;
         const box = el.getBoundingClientRect();
-        return { verdict: el.hasAttribute('data-verdict'), inView: box.top >= 0 && box.bottom <= innerHeight };
+        return { verdict: el.hasAttribute('data-verdict'), inView: box.top >= -1 && box.bottom <= innerHeight + 1 };
       });
       assert.deepEqual(focused, { verdict: true, inView: true }, `focus from ${inside}`);
     }
@@ -513,11 +546,27 @@ if (chromium) {
     await retype('#f-price', '12,');
     await page.keyboard.press('Tab'); // left half-typed: the prompt
     await idle();
-    assert.equal(await verdict(page), 'Check “Sell price”. Enter $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “Sell price”. Use a dot, not a comma.');
     await retype('#f-price', '40');
     await page.keyboard.press('Tab');
     await idle();
     assert.match(await verdict(page), /^Worth it\./);
+    // A press that starts right after a keystroke, before the result has
+    // caught up, isn't redrawn under either: the click opens the row.
+    const row = page.locator('.result[data-id="mercari"]');
+    await row.scrollIntoViewIfNeeded();
+    const box = await row.locator('summary').boundingBox();
+    await page.focus('#f-price');
+    await page.keyboard.press('End');
+    await page.keyboard.type('0');
+    await page.mouse.move(box.x + 20, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(150); // longer than the result takes to catch up while typing
+    await page.mouse.up();
+    await tick(page);
+    assert.equal(await row.locator('details').getAttribute('open'), '', 'the press opened the row');
+    assert.match(await verdict(page), /\$400|Worth it/);
+    await idle();
     assert.deepEqual(await page.evaluate(() => window.shifts), [], 'layout shifts the user did not cause');
     assert.deepEqual(errors, []);
     await context.close();

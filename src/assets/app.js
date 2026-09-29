@@ -80,10 +80,10 @@ function setup(root) {
   let mode = 'profit';
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
-  let badBefore = new Set(); // fields flagged at the last render (reset by load)
+  let reveal = false; // open Fine-tune for bad values a link brought in (set by load)
   let rendered = null; // the form as last judged: what the address bar holds
   let shownLink = ''; // the result on screen as a shared link ('' while the prompt shows)
-  let dirty = false; // typed into since the last judged render
+  let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -114,7 +114,7 @@ function setup(root) {
   const linkParams = () => new URLSearchParams(location.hash.slice(1));
 
   function load() {
-    badBefore = new Set(); // a new link's bad fields open Fine-tune again
+    reveal = true;
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
@@ -244,8 +244,9 @@ function setup(root) {
     // Focus that was in the list stays on its row (or goes to the verdict, if the row went).
     if (!inList) return;
     const summary = row && resultsEl.querySelector(`[data-id="${row}"] summary`);
-    if (summary) summary.focus({ preventScroll: true });
-    else focusVerdict();
+    if (!summary) return focusVerdict();
+    summary.focus({ preventScroll: true });
+    summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
   }
 
   /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
@@ -279,15 +280,14 @@ function setup(root) {
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
     if (typed && (typed.problem || typed.missing)) return;
-    dirty = false;
+    dirty = '';
     rendered = state;
     flag(checks);
     const blocking = checks.filter((c) => c.blocks);
-    // A field that has just gone bad inside the closed Fine-tune panel (a shared
-    // link's junk, say) opens it, once: closing it again is up to the user.
-    const bad = blocking.filter((b) => b.problem).map(({ key }) => key);
-    for (const key of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
-    badBefore = new Set(bad);
+    // Bad values a link brought in open the Fine-tune panel they're in, so
+    // they're seen. After that, opening and closing it is up to the user.
+    if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
+    reveal = false;
 
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
@@ -386,30 +386,54 @@ function setup(root) {
   // Text fields render as you type; selects and checkboxes on change.
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
-    dirty = true;
+    dirty = e.target.name;
     renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
     if (e.target.type !== 'text') render({ save: true });
   });
-  // A field left half-typed is judged once focus has moved on, and when it
-  // was left by a click, once that click is done: a flag or the prompt
-  // moving things can't pull the click's target out from under the pointer.
-  const judge = () => dirty && render({ save: true });
-  let pressed = false; // a mouse button, finger or pen is down
-  let judgeOnRelease = false;
-  addEventListener('pointerdown', () => (pressed = true), true);
+
+  // A field left half-typed is judged once focus has moved on. Losing focus
+  // to another window or tab isn't leaving it (it stays the active element).
+  // Left by a press, it waits for the press to end, and for the click that
+  // makes: a flag or the prompt appearing mid-press would move things out
+  // from under the pointer, and the click would be lost.
+  const judge = (el) => {
+    if (dirty === el.name && document.activeElement !== el) render({ save: true });
+  };
+  const presses = new Set(); // pointers down: a mouse button, fingers, a pen
+  let leftByPress = null; // the field to judge when they are all up
+  let pressTimer = 0;
+  function pressesEnded() {
+    if (presses.size || !leftByPress) return;
+    const el = leftByPress;
+    leftByPress = null;
+    clearTimeout(pressTimer);
+    setTimeout(() => judge(el)); // after the click this release makes
+  }
+  addEventListener('pointerdown', (e) => presses.add(e.pointerId), true);
   for (const type of ['pointerup', 'pointercancel']) {
-    addEventListener(type, () => {
-      pressed = false;
-      if (judgeOnRelease) setTimeout(judge); // after the click this release makes
-      judgeOnRelease = false;
+    addEventListener(type, (e) => {
+      presses.delete(e.pointerId);
+      pressesEnded();
     }, true);
   }
+  // A release the page never hears of (a context menu took it, or another
+  // window) can't hold a judgement back: at most a second, then it's made.
+  const forgetPresses = () => {
+    presses.clear();
+    pressesEnded();
+  };
+  addEventListener('contextmenu', forgetPresses, true);
+  addEventListener('blur', forgetPresses); // the window's own (a field's blur doesn't bubble)
   form.addEventListener('focusout', (e) => {
-    if (!dirty || e.target.type !== 'text') return;
-    if (pressed) judgeOnRelease = true;
-    else setTimeout(judge);
+    const el = e.target;
+    if (dirty !== el.name) return;
+    if (!presses.size) return void setTimeout(() => judge(el));
+    renderSoon.cancel(); // nothing redrawn mid-press either (still dirty: the judgement renders it)
+    leftByPress = el;
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(forgetPresses, 1000);
   });
 
   // On narrow screens the results sit below the form: "See results" (and
@@ -442,7 +466,12 @@ function setup(root) {
   let shareReset;
   if (shareSupported) {
     shareBtn.addEventListener('click', async () => {
-      const url = `${location.origin}${location.pathname}${shownLink}`; // the result on screen
+      // A field left half-typed is judged first, so the link is never for
+      // numbers no longer in the form; if the prompt takes the results'
+      // place (and focus), there is nothing to share.
+      if (dirty) render({ save: true });
+      if (!shownLink) return;
+      const url = `${location.origin}${location.pathname}${shownLink}`;
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);

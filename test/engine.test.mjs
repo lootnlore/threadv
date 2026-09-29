@@ -584,10 +584,16 @@ test('a bad field is named with a short reason, and the hint keeps room for each
   assert.equal(inputProblem('cost', ''), '', 'empty is $0');
   assert.equal(inputProblem('cost', ' 1,234.50 '), '');
   assert.equal(inputProblem('cost', '-5'), 'Enter $0 to $100,000.');
-  assert.equal(inputProblem('cost', '12,5'), 'Enter $0 to $100,000.', 'a decimal comma is not read as 125');
+  assert.equal(inputProblem('cost', '12,5'), 'Use a dot, not a comma.', 'a decimal comma is not read as 125, and says so');
+  assert.equal(inputProblem('cost', '1,'), 'Use a dot, not a comma.');
+  assert.equal(inputProblem('cost', '1,234,5'), 'Enter $0 to $100,000.', 'not just a comma for a dot');
+  assert.equal(inputProblem('cost', '-1,5'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('cost', '100000.01'), 'Enter $0 to $100,000.');
+  assert.equal(inputProblem('cost', '100000.004'), '', 'the engine reads it as $100,000.00');
+  assert.equal(inputProblem('cost', '100000.005'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('tiktokRate', '60'), '');
   assert.equal(inputProblem('tiktokRate', '60.5'), 'Enter 0 to 60%.');
+  assert.equal(inputProblem('tiktokRate', '7,5'), 'Use a dot, not a comma.');
   assert.equal(inputProblem('price', '0.004'), '', 'a price the mode does not use');
   assert.equal(inputProblem('price', '0.004', { sellPrice: true }), 'Enter at least $0.01.');
   assert.equal(inputProblem('price', '0.005', { sellPrice: true }), '', 'rounds up to a cent, as the engine rounds it');

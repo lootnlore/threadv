@@ -40,9 +40,8 @@ export const FEE_CHANGES = [
  */
 function hintFor(name, hint) {
   const also = name === 'target' ? Object.values(MODES).map((m) => ({ text: m.targetHint })) : [];
-  const room = [{ text: hint }, ...also, ...hintsFor(name)]
-    .map(({ text, error }) => `<span class="hint-room${error ? ' hint-error' : ''}" aria-hidden="true">${esc(text)}</span>`)
-    .join('');
+  const texts = [{ text: hint }, ...also, ...hintsFor(name)].map(({ text, error }) => `<span class="hint-room${error ? ' hint-error' : ''}" aria-hidden="true">${esc(text)}</span>`);
+  const room = [...new Set(texts)].join('');
   return `<p class="hint" id="h-${name}"><span data-live>${esc(hint)}</span>${room}</p>`;
 }
 

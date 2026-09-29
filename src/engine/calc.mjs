@@ -54,8 +54,10 @@ export function parseNumber(value) {
 }
 
 const isRate = (key) => key !== 'money' && has(LIMITS, key);
-const maxOf = (key) => (isRate(key) ? LIMITS[key] : LIMITS.money);
+// Money is checked as the engine reads it, rounded to the cent.
+const inRange = (key, n) => Number.isFinite(n) && n >= 0 && (isRate(key) ? n <= LIMITS[key] : roundCents(n * 100) <= MAX_CENTS);
 const outOfRange = (key) => (isRate(key) ? `Enter 0 to ${LIMITS[key]}%.` : `Enter $0 to ${usdText(LIMITS.money)}.`);
+const DECIMAL_COMMA = 'Use a dot, not a comma.';
 const BELOW_A_CENT = 'Enter at least $0.01.';
 /** The hint under a sell price the mode needs that isn't typed yet: a prompt, not an error. */
 export const PRICE_NEEDED = 'Needed to see results.';
@@ -70,14 +72,15 @@ export function inputProblem(key, raw, { sellPrice = false } = {}) {
   const text = String(raw).trim();
   if (text === '') return '';
   const n = parseNumber(text);
-  if (!(Number.isFinite(n) && n >= 0 && n <= maxOf(key))) return outOfRange(key);
+  if (!Number.isFinite(n) && inRange(key, parseNumber(text.replace(',', '.')))) return DECIMAL_COMMA; // "12,50"
+  if (!inRange(key, n)) return outOfRange(key);
   return sellPrice && roundCents(n * 100) === 0 ? BELOW_A_CENT : '';
 }
 
 /** Every message a numeric field's hint can switch to, as { text, error }, so the form can keep room for the longest. */
 export function hintsFor(key) {
-  if (key !== 'price') return [{ text: outOfRange(key), error: true }];
-  return [{ text: outOfRange(key), error: true }, { text: BELOW_A_CENT, error: true }, { text: PRICE_NEEDED, error: false }];
+  const errors = [outOfRange(key), DECIMAL_COMMA, ...(key === 'price' ? [BELOW_A_CENT] : [])];
+  return [...errors.map((text) => ({ text, error: true })), ...(key === 'price' ? [{ text: PRICE_NEEDED, error: false }] : [])];
 }
 
 function cents(value, fallback) {
