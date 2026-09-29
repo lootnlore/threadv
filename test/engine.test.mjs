@@ -40,7 +40,21 @@ test('parseNumber accepts currency strings and rejects junk', () => {
   assert.equal(parseNumber('-5'), -5);
   assert.equal(parseNumber('$1,234.50'), 1234.5);
   assert.equal(parseNumber('12,345,678'), 12345678);
-  assert.ok(Number.isNaN(parseNumber('12,50')), 'decimal comma is rejected, not read as 1250');
+  assert.equal(parseNumber('12,50'), 12.5, 'a decimal comma where it cannot separate thousands');
+  assert.equal(parseNumber('$12,5'), 12.5);
+  assert.equal(parseNumber('12,'), 12);
+  assert.equal(parseNumber(',5'), 0.5);
+  assert.equal(parseNumber('7,500'), 7500);
+  assert.equal(parseNumber('1,00'), 1);
+  assert.ok(Number.isNaN(parseNumber('0,500')), 'could be either: not read as 500 or 0.5');
+  assert.ok(Number.isNaN(parseNumber('1.000,50')), 'could be either');
+  assert.ok(Number.isNaN(parseNumber('1,2345')));
+  assert.ok(Number.isNaN(parseNumber(',')));
+  assert.equal(parseNumber('7,500', { rate: true }), 7.5, 'a rate never reaches the thousands');
+  assert.equal(parseNumber('7,5%', { rate: true }), 7.5);
+  assert.ok(Number.isNaN(parseNumber('7,5,0', { rate: true })));
+  assert.equal(normalizeInputs({ tiktokRate: '7,5' }).opts.tiktokRate, 0.075, 'the engine reads rates the same way');
+  assert.equal(normalizeInputs({ price: '12,50' }).price, 1250);
   assert.ok(Number.isNaN(parseNumber('1,2,3')));
   assert.equal(parseNumber(' 12 '), 12);
   assert.equal(parseNumber('7.5%'), 7.5);
@@ -584,23 +598,25 @@ test('a bad field is named with a short reason, and the hint keeps room for each
   assert.equal(inputProblem('cost', ''), '', 'empty is $0');
   assert.equal(inputProblem('cost', ' 1,234.50 '), '');
   assert.equal(inputProblem('cost', '-5'), 'Enter $0 to $100,000.');
-  assert.equal(inputProblem('cost', '12,5'), 'Use a dot, not a comma.', 'a decimal comma is not read as 125, and says so');
-  assert.equal(inputProblem('cost', '1,'), 'Use a dot, not a comma.');
-  assert.equal(inputProblem('cost', '1,234,5'), 'Enter $0 to $100,000.', 'not just a comma for a dot');
+  assert.equal(inputProblem('cost', '12,5'), '', 'a decimal comma is read as one');
+  assert.equal(inputProblem('cost', 'abc'), 'Write it like 1,234.50.');
+  assert.equal(inputProblem('cost', '0,500'), 'Write it like 1,234.50.', 'ambiguous: shown how to write it');
+  assert.equal(inputProblem('cost', '1.000,50'), 'Write it like 1,234.50.');
   assert.equal(inputProblem('cost', '-1,5'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('cost', '100000.01'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('cost', '100000.004'), '', 'the engine reads it as $100,000.00');
   assert.equal(inputProblem('cost', '100000.005'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('tiktokRate', '60'), '');
   assert.equal(inputProblem('tiktokRate', '60.5'), 'Enter 0 to 60%.');
-  assert.equal(inputProblem('tiktokRate', '7,5'), 'Use a dot, not a comma.');
+  assert.equal(inputProblem('tiktokRate', '7,500'), '', '7.5%');
+  assert.equal(inputProblem('tiktokRate', 'x'), 'Write it like 7.5.');
   assert.equal(inputProblem('price', '0.004'), '', 'a price the mode does not use');
   assert.equal(inputProblem('price', '0.004', { sellPrice: true }), 'Enter at least $0.01.');
   assert.equal(inputProblem('price', '0.005', { sellPrice: true }), '', 'rounds up to a cent, as the engine rounds it');
   assert.equal(inputProblem('constructor', '5'), '', 'not a rate: a money field');
   // Every reason a field can give is one its hint keeps room for.
   const rand = seeded(11);
-  const pieces = ['', '-', '0', '0.00', '4', '5', '9', '12', ',', '.', '$', '%', ' ', 'e', 'x', '100', '000', ',000'];
+  const pieces = ['', '-', '0', '0.00', '4', '5', '9', '12', ',', '.', '$', '%', ' ', 'e', 'x', '100', '000', ',000', ',5'];
   for (const key of ['price', 'cost', 'target', 'other', ...Object.keys(LIMITS).filter((k) => k !== 'money')]) {
     const room = new Set(hintsFor(key).map((h) => h.text));
     for (let i = 0; i < 400; i++) {

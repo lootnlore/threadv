@@ -40,47 +40,54 @@ const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 /** Own-property check that also works in browsers without Object.hasOwn. */
 export const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
-/** Parse "$1,234.50", "12", 12 or "" into a finite number (NaN if unusable). */
-export function parseNumber(value) {
+/**
+ * Parse "$1,234.50", "12", 12 or "" into a finite number (NaN if unusable).
+ * A comma separates thousands ("1,234.50") or, where it can't, is the
+ * decimal point: "12,50", "12,5", "12," (the decimal keypad in many regions
+ * has only a comma). Where it could be either ("0,500", "1.000,50") the
+ * text is NaN, not a guess. In a `rate` (no rate reaches a thousand) a
+ * single comma is always the decimal point: "7,500" is 7.5.
+ */
+export function parseNumber(value, { rate = false } = {}) {
   if (typeof value === 'number') return value;
   if (typeof value !== 'string') return NaN;
-  const trimmed = value.replace(/[$%\s]/g, '');
-  // Commas only as thousands separators: "1,234.50" yes, a decimal comma
-  // like "12,50" no (it would silently read as 1250).
-  if (trimmed.includes(',') && !/^[-+]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(trimmed)) return NaN;
-  const cleaned = trimmed.replace(/,/g, '');
+  let text = value.replace(/[$%\s]/g, '');
+  if (!rate && /^[-+]?[1-9]\d{0,2}(,\d{3})+(\.\d*)?$/.test(text)) text = text.replace(/,/g, '');
+  else if ((rate ? /^[-+]?\d*,\d*$/ : /^[-+]?\d*,\d{0,2}$/).test(text)) text = text.replace(',', '.');
   // Plain decimals only: Number() would also accept "0x10", "0b11" or "1e3".
-  return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(cleaned) ? Number(cleaned) : NaN;
+  return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(text) ? Number(text) : NaN;
 }
 
 const isRate = (key) => key !== 'money' && has(LIMITS, key);
 // Money is checked as the engine reads it, rounded to the cent.
 const inRange = (key, n) => Number.isFinite(n) && n >= 0 && (isRate(key) ? n <= LIMITS[key] : roundCents(n * 100) <= MAX_CENTS);
 const outOfRange = (key) => (isRate(key) ? `Enter 0 to ${LIMITS[key]}%.` : `Enter $0 to ${usdText(LIMITS.money)}.`);
-const DECIMAL_COMMA = 'Use a dot, not a comma.';
+const unreadable = (key) => (isRate(key) ? 'Write it like 7.5.' : 'Write it like 1,234.50.');
 const BELOW_A_CENT = 'Enter at least $0.01.';
 /** The hint under a sell price the mode needs that isn't typed yet: a prompt, not an error. */
 export const PRICE_NEEDED = 'Needed to see results.';
 
 /**
  * What is wrong with a numeric field's raw text (short enough for the hint
- * under it), or '' when it is fine. Empty is fine: it means $0 or, for a
- * sell price the mode needs, not typed yet. That sell price must be at
- * least $0.01 once rounded to the cent, as the engine rounds it.
+ * under it), or '' when it is fine: not a number as parseNumber reads it
+ * (shown the way to write it), or out of range. Empty is fine: it means $0
+ * or, for a sell price the mode needs, not typed yet. That sell price must
+ * be at least $0.01 once rounded to the cent, as the engine rounds it.
  */
 export function inputProblem(key, raw, { sellPrice = false } = {}) {
   const text = String(raw).trim();
   if (text === '') return '';
-  const n = parseNumber(text);
-  if (!Number.isFinite(n) && inRange(key, parseNumber(text.replace(',', '.')))) return DECIMAL_COMMA; // "12,50"
+  const n = parseNumber(text, { rate: isRate(key) });
+  if (Number.isNaN(n)) return unreadable(key);
   if (!inRange(key, n)) return outOfRange(key);
   return sellPrice && roundCents(n * 100) === 0 ? BELOW_A_CENT : '';
 }
 
 /** Every message a numeric field's hint can switch to, as { text, error }, so the form can keep room for the longest. */
 export function hintsFor(key) {
-  const errors = [outOfRange(key), DECIMAL_COMMA, ...(key === 'price' ? [BELOW_A_CENT] : [])];
-  return [...errors.map((text) => ({ text, error: true })), ...(key === 'price' ? [{ text: PRICE_NEEDED, error: false }] : [])];
+  const hints = [outOfRange(key), unreadable(key)].map((text) => ({ text, error: true }));
+  if (key === 'price') hints.push({ text: BELOW_A_CENT, error: true }, { text: PRICE_NEEDED, error: false });
+  return hints;
 }
 
 function cents(value, fallback) {
@@ -95,7 +102,7 @@ function cents(value, fallback) {
  */
 function rate(value, fallbackPct, maxPct) {
   if (typeof value === 'string' && value.trim() === '') return 0;
-  const n = parseNumber(value);
+  const n = parseNumber(value, { rate: true });
   return clamp(Number.isFinite(n) ? n : fallbackPct, 0, maxPct) / 100;
 }
 

@@ -256,10 +256,12 @@ if (chromium) {
     await tick(page);
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), 'true');
     assert.equal(await page.locator('#h-cost').innerText(), 'Enter $0 to $100,000.');
-    await page.fill('#f-cost', '8');
-    await settle(page);
+    await page.fill('#f-cost', '8,50'); // a decimal comma (all some keypads have) is read as one
+    await page.locator('#f-cost').press('Tab');
+    await tick(page);
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), null);
     assert.equal(await page.locator('#h-cost').innerText(), 'Item cost');
+    assert.match(await verdict(page), /Poshmark: \$23\.50 profit/, '$40 − $8 fee − $8.50 cost');
     await page.locator('.tune > summary').click();
     await page.fill('#f-tiktokRate', 'abc');
     await page.locator('#f-tiktokRate').press('Tab');
@@ -274,14 +276,14 @@ if (chromium) {
     const tune = narrow.page.locator('.tune > summary');
     const top = () => tune.evaluate((el) => el.getBoundingClientRect().top + scrollY);
     const before = await top();
-    await narrow.page.fill('#f-target', '1,');
+    await narrow.page.fill('#f-target', '1..');
     await narrow.page.locator('#f-target').press('Tab');
     await tick(narrow.page);
     assert.equal(await narrow.page.locator('#f-target').getAttribute('aria-invalid'), 'true');
     assert.equal(await top(), before, 'nothing below the flagged field moved');
     await narrow.page.fill('#f-target', '10');
     await settle(narrow.page);
-    await narrow.page.fill('#f-target', '1,');
+    await narrow.page.fill('#f-target', '1..');
     await tune.click({ position: { x: 24, y: 3 } });
     assert.equal(await narrow.page.locator('.tune').getAttribute('open'), '', 'the click opened Fine-tune');
     await narrow.context.close();
@@ -320,7 +322,7 @@ if (chromium) {
       const list = document.querySelector('[data-results]');
       new MutationObserver(() => (window.cleared += list.children.length === 0 || list.hidden)).observe(list, { childList: true, attributes: true });
     });
-    for (const [id, halfway, done] of [['#f-price', '', '45'], ['#f-price', '12,', '12,500'], ['#f-cost', '-', '8']]) {
+    for (const [id, halfway, done] of [['#f-price', '', '45'], ['#f-price', '$', '$12,500'], ['#f-cost', '-', '8']]) {
       await page.fill(id, halfway);
       await page.waitForTimeout(400); // past the render and address-bar delays
       assert.equal(await page.locator(id).getAttribute('aria-invalid'), null, `"${halfway}" isn't flagged while typing`);
@@ -334,10 +336,10 @@ if (chromium) {
     // for numbers no longer in the form. The prompt takes the results'
     // place, and focus moves from the button it hides to the prompt.
     await page.evaluate(() => navigator.clipboard.writeText('untouched'));
-    await page.fill('#f-price', '4,');
+    await page.fill('#f-price', '4..');
     await page.getByRole('button', { name: 'Copy link to this result' }).click();
     await tick(page);
-    assert.equal(await verdict(page), 'Check “Sell price”. Use a dot, not a comma.');
+    assert.equal(await verdict(page), 'Check “Sell price”. Write it like 1,234.50.');
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'untouched');
     assert.equal(await page.locator('[data-share-status]').textContent(), '');
     assert.equal(await page.evaluate(() => document.activeElement.hasAttribute('data-verdict')), true);
@@ -345,7 +347,7 @@ if (chromium) {
     // is judged when the user really leaves (focus stays on it meanwhile).
     await page.fill('#f-price', '40');
     await settle(page);
-    await page.fill('#f-price', '12,');
+    await page.fill('#f-price', '12..');
     await page.locator('#f-price').dispatchEvent('focusout'); // what a window losing focus sends
     await tick(page);
     await settle(page);
@@ -353,14 +355,6 @@ if (chromium) {
     assert.match(await verdict(page), /^Worth it\./);
     await leave('#f-price');
     assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
-    // A press the page never hears end (a context menu took the release)
-    // holds a judgement back a second at most.
-    await page.fill('#f-price', '40');
-    await settle(page);
-    await page.fill('#f-price', '12,');
-    await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 9, bubbles: true })));
-    await leave('#f-price');
-    await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 1500 });
     await page.fill('#f-price', '40');
     await settle(page);
     // Leaving a field whose value already shows (nothing left to judge)
@@ -390,8 +384,8 @@ if (chromium) {
     // results (no rows for numbers that were never entered), and is read out.
     const cases = [
       ['#f-cost', '-5', 'Check “You paid”. Enter $0 to $100,000.', 'true'],
-      ['#f-price', '12,5', 'Check “Sell price”. Use a dot, not a comma.', 'true'],
-      ['#f-price', 'abc', 'Check “Sell price”. Enter $0 to $100,000.', 'true'],
+      ['#f-price', 'abc', 'Check “Sell price”. Write it like 1,234.50.', 'true'],
+      ['#f-price', '0,500', 'Check “Sell price”. Write it like 1,234.50.', 'true', 'a comma that could be either'],
       ['#f-price', '0.004', 'Check “Sell price”. Enter at least $0.01.', 'true'],
       ['#f-price', '', 'Enter a sell price to see results.', null, 'not typed yet: a prompt, not an error'],
     ];
@@ -414,7 +408,7 @@ if (chromium) {
     await page.fill('#f-price', '');
     await page.fill('#f-cost', 'abc');
     await leave('#f-cost');
-    assert.equal(await verdict(page), 'Check “You paid”. Enter $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “You paid”. Write it like 1,234.50.');
     await page.fill('#f-price', '40');
     await page.fill('#f-cost', '8');
     // Enter goes to what needs fixing, not to the verdict (phones scroll there)...
@@ -439,7 +433,7 @@ if (chromium) {
     // Several bad fields: each named with its reason.
     await page.fill('#f-cost', 'abc');
     await leave('#f-cost');
-    assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Enter \$0 to \$100,000\. “TikTok Shop fee”: Enter 0 to \d+%\./);
+    assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Write it like 1,234\.50\. “TikTok Shop fee”: Write it like 7\.5\.$/);
     // A bad value no compared marketplace reads doesn't hold results back...
     await page.fill('#f-cost', '8');
     await page.locator('input[name="platform"][value="tiktok"]').uncheck();
@@ -464,7 +458,7 @@ if (chromium) {
     assert.match(await verdict(page), /^Pay up to /, 'Max buy ignores the cost');
     // Rows for another mode are never kept: List price reads the bad cost.
     await page.getByRole('tab', { name: 'List price' }).click();
-    assert.equal(await verdict(page), 'Check “You paid”. Enter $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “You paid”. Write it like 1,234.50.');
     assert.equal((await state()).rows, 0);
     await page.fill('#f-cost', '8');
     await enter('#f-price', 'junk'); // hidden in this mode, as if left from before
@@ -543,32 +537,100 @@ if (chromium) {
       await idle();
     };
     await retype('#f-price', '45');
-    await retype('#f-price', '12,');
+    await retype('#f-price', '12..');
     await page.keyboard.press('Tab'); // left half-typed: the prompt
     await idle();
-    assert.equal(await verdict(page), 'Check “Sell price”. Use a dot, not a comma.');
+    assert.equal(await verdict(page), 'Check “Sell price”. Write it like 1,234.50.');
     await retype('#f-price', '40');
     await page.keyboard.press('Tab');
     await idle();
     assert.match(await verdict(page), /^Worth it\./);
-    // A press that starts right after a keystroke, before the result has
-    // caught up, isn't redrawn under either: the click opens the row.
+    // A long press that starts right after a keystroke, before the result
+    // has caught up, isn't redrawn under: the click opens the row it began
+    // on, and then the result catches up.
     const row = page.locator('.result[data-id="mercari"]');
     await row.scrollIntoViewIfNeeded();
     const box = await row.locator('summary').boundingBox();
+    const before = await verdict(page);
     await page.focus('#f-price');
     await page.keyboard.press('End');
     await page.keyboard.type('0');
     await page.mouse.move(box.x + 20, box.y + box.height / 2);
     await page.mouse.down();
-    await page.waitForTimeout(150); // longer than the result takes to catch up while typing
+    await page.waitForTimeout(1300); // a slow, deliberate press
     await page.mouse.up();
     await tick(page);
     assert.equal(await row.locator('details').getAttribute('open'), '', 'the press opened the row');
-    assert.match(await verdict(page), /\$400|Worth it/);
+    await settle(page);
+    assert.notEqual(await verdict(page), before, 'then the result for 400 shows');
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '400');
     await idle();
     assert.deepEqual(await page.evaluate(() => window.shifts), [], 'layout shifts the user did not cause');
     assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test('a tap or click lands where it was aimed, and nothing is judged or saved that was not left', async () => {
+    // A tap right after a keystroke: the list isn't redrawn under the finger
+    // (touch moves focus only after the finger lifts). Tall, so the field and
+    // the first row are both on screen.
+    const touch = await open('/', { viewport: { width: 390, height: 1500 }, hasTouch: true, isMobile: true });
+    const tp = touch.page;
+    const first = await tp.getAttribute('.result:first-child', 'data-id');
+    const box = await tp.locator(`.result[data-id="${first}"] summary`).boundingBox();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await tp.keyboard.type('0'); // 40 becomes 400: the order changes
+    const cdp = await touch.context.newCDPSession(tp);
+    const point = { x: box.x + 30, y: box.y + box.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+    await tp.waitForTimeout(120); // longer than the result takes to catch up while typing
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual(await tp.$$eval('.result details[open]', (d) => d.map((el) => el.closest('.result').dataset.id)), [first], 'the tapped row opened');
+    assert.notEqual(await tp.getAttribute('.result:first-child', 'data-id'), first, 'and the list then re-ranked for 400');
+    await touch.context.close();
+
+    const { context, page } = await open('/', { viewport: { width: 1280, height: 900 } });
+    const shown = () => verdict(page);
+    // A click on the field's own label right after a keystroke: the value
+    // shows (the field is back in focus, nothing left to judge).
+    let before = await shown();
+    await page.focus('#f-price');
+    await page.keyboard.press('End');
+    await page.keyboard.type('0');
+    await page.click('label[for="f-price"]');
+    await settle(page);
+    assert.notEqual(await shown(), before, 'the result for 400');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
+    // Tabbing off a button isn't leaving a typed field: nothing is saved.
+    await page.locator('.tune > summary').click();
+    await page.evaluate(() => {
+      window.writes = 0;
+      const write = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (...args) {
+        window.writes++;
+        return write.apply(this, args);
+      };
+    });
+    await page.focus('[data-reset]');
+    await page.keyboard.press('Tab');
+    await tick(page);
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.writes), 0);
+    // A press whose release the page never hears (a context menu or another
+    // window took it) doesn't hold the results back.
+    for (const [why, end, price] of [
+      ['a context menu', () => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })), '30'],
+      ['another window', () => window.dispatchEvent(new FocusEvent('blur')), '31'],
+    ]) {
+      before = await shown();
+      await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, bubbles: true })));
+      await page.evaluate(end);
+      await page.fill('#f-price', price);
+      await settle(page);
+      assert.notEqual(await shown(), before, `results follow the typing after ${why}`);
+    }
     await context.close();
   });
 
