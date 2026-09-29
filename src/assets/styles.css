@@ -58,6 +58,7 @@ html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   scroll-padding-top: 5rem;
+  touch-action: manipulation; /* a tap clicks at once (no double-tap-zoom wait); pinch zoom still works */
 }
 
 body {

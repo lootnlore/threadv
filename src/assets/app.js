@@ -10,7 +10,7 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, PRICE_NEEDED, has } from '../engine/calc.mjs';
+import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, stillTyping, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID } from '../engine/fees.mjs';
 
@@ -261,64 +261,87 @@ function setup(root) {
   }
 
   // ---- presses ----
-  // While the user presses anywhere a render could move (all but this
-  // calculator's tabs and form, which renders never move), renders wait for
-  // the click the press makes: a list redrawn, or the prompt taking its
-  // place, mid-press would move the target from under the pointer or
-  // finger, and the click would be lost. A release the page never hears of
-  // (a context menu or another window took it) or a key press ends the wait.
-  const inputSide = root.querySelector('.calc-input');
+  // A press (a mouse button, a finger, a pen) is under way from pointerdown
+  // until the click it makes has landed. Meanwhile nothing renders: a list
+  // redrawn, or the prompt taking its place, mid-press would move the
+  // target out from under the pointer and the click would be lost. Nor is a
+  // field the press took focus from judged yet: the click may give focus
+  // straight back (its label). A release the page never hears of (a select's
+  // popup, a context menu, a drag or another window took it) or a key press
+  // ends it; a release that makes no click, 250ms on.
   const presses = new Set(); // pointer ids
-  let held = null; // the options of the render waiting, merged
-  let clickDue = 0; // timer from a release to its click (or to when none came)
+  let clickDue = 0; // timer from the last release to its click (or to when none came)
+  let held = null; // the render waiting, its options merged
+  const afterPress = []; // what else waits (judging a field)
   const pressing = () => presses.size > 0 || clickDue !== 0;
+  function stopClickTimer() {
+    clearTimeout(clickDue);
+    clickDue = 0;
+  }
   function flush() {
+    if (pressing()) return; // another press began: it waits for that one
+    for (const fn of afterPress.splice(0)) fn();
     const opts = held;
     held = null;
-    if (opts) render(opts); // waits again if another press has begun
+    if (opts) render(opts);
   }
   function endPresses() {
     presses.clear();
-    clearTimeout(clickDue);
-    clickDue = 0;
+    stopClickTimer();
     flush();
   }
+  /** Runs `fn` a task from now, or once the press under way is over. */
+  const afterPresses = (fn) => (pressing() ? afterPress.push(fn) : setTimeout(fn));
   addEventListener('pointerdown', (e) => {
-    if (!inputSide.contains(e.target)) presses.add(e.pointerId);
+    stopClickTimer(); // a new press: the last release's wait is over
+    presses.add(e.pointerId);
   }, true);
   addEventListener('pointerup', (e) => {
-    if (presses.delete(e.pointerId) && !presses.size) clickDue = setTimeout(endPresses, 250);
+    if (!presses.delete(e.pointerId) || presses.size) return;
+    stopClickTimer();
+    clickDue = setTimeout(endPresses, 250);
   }, true);
   addEventListener('pointercancel', (e) => {
     if (presses.delete(e.pointerId) && !presses.size) endPresses();
   }, true);
-  // The click has landed: renders its handlers ask for (share's) run now,
-  // and the one waiting runs after them.
+  // The click has landed: renders its own handlers ask for (share's, a
+  // tab's) run now, and what waited runs after them.
   addEventListener('click', () => {
     if (!clickDue) return;
-    clearTimeout(clickDue);
-    clickDue = 0;
+    stopClickTimer();
     setTimeout(flush);
   }, true);
-  for (const type of ['contextmenu', 'keydown']) addEventListener(type, endPresses, true);
+  for (const type of ['contextmenu', 'dragstart', 'keydown']) addEventListener(type, endPresses, true);
+  // A select's change comes after its popup took the release (a text field's
+  // comes as focus leaves it, mid-press).
+  addEventListener('change', (e) => e.target.type !== 'text' && endPresses(), true);
   addEventListener('blur', endPresses); // the window's own (a field's blur doesn't bubble)
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
-   * mirrored to the URL. `typing` names the text field a keystroke changed.
-   * Mid-typing a field can be briefly empty or half a number ("" before
-   * "45", "12," before "12,50"), so while it isn't a usable value nothing
-   * changes: no flag, no prompt in place of the results, nothing saved. It
-   * stays `dirty` and is judged when the user leaves the field or presses
-   * Enter. A usable value shows its results at once. The list is redrawn
-   * only when the result changed. During a press it all waits (see presses).
+   * mirrored to the URL. `typing` names the text field a keystroke changed;
+   * without it, a render judges every field (a commit). Mid-typing a field
+   * can be briefly empty or on its way to a number ("" before "45", "1,2"
+   * before "1,234"), so until it is usable nothing changes: no flag, no
+   * prompt in place of the results, nothing saved. It stays `dirty` and is
+   * judged when the user leaves the field or presses Enter. A usable value
+   * shows its results at once. The list is redrawn only when the result
+   * changed. During a press it all waits (see presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
     if (pressing()) {
-      // A judgement beats a keystroke's render; either one saving saves.
-      held = { save: save || Boolean(held?.save), typing: held && !held.typing ? '' : typing };
+      held = { save: save || Boolean(held?.save), typing: held?.typing === '' ? '' : typing }; // a commit stays one
       return;
+    }
+    // Judged, a comma read as the decimal point is shown as one: "2,50"
+    // becomes "2.50", so a slip meant as 250 can't pass unseen.
+    if (!typing) {
+      for (const key of NUMERIC) {
+        const el = field(key);
+        const text = el && withDecimalPoint(key, el.value);
+        if (el && text !== el.value) el.value = text;
+      }
     }
     const state = readForm();
     const input = normalizeInputs(state.values);
@@ -327,7 +350,7 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (typed.problem || typed.missing)) return;
+    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, state.values[typed.key]))) return;
     dirty = '';
     rendered = state;
     flag(checks);
@@ -441,14 +464,14 @@ function setup(root) {
     if (e.target.type !== 'text') render({ save: true });
   });
 
-  // A field left half-typed is judged once focus has moved on (a press
-  // that left it is under way by then, so its render waits for the click:
-  // see presses). Losing focus to another window or tab isn't leaving: the
-  // field stays the active element, and is judged when the user leaves it.
+  // A field left half-typed is judged once focus has moved on, and a press
+  // that took it is over (see presses). Losing focus to another window or
+  // tab isn't leaving: the field stays the active element, and is judged
+  // when the user leaves it.
   form.addEventListener('focusout', (e) => {
     const el = e.target;
     if (el.type !== 'text' || dirty !== el.name) return;
-    setTimeout(() => {
+    afterPresses(() => {
       if (dirty === el.name && document.activeElement !== el) render({ save: true });
     });
   });

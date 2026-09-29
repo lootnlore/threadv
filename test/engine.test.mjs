@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, stillTyping, withDecimalPoint, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
 import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, ETSY_OFFSITE, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
@@ -55,6 +55,7 @@ test('parseNumber accepts currency strings and rejects junk', () => {
   assert.ok(Number.isNaN(parseNumber('7,5,0', { rate: true })));
   assert.equal(normalizeInputs({ tiktokRate: '7,5' }).opts.tiktokRate, 0.075, 'the engine reads rates the same way');
   assert.equal(normalizeInputs({ price: '12,50' }).price, 1250);
+  assert.equal(parseNumber('1.500'), 1.5, 'the engine reads a dot as the decimal point (the form asks again: see inputProblem)');
   assert.ok(Number.isNaN(parseNumber('1,2,3')));
   assert.equal(parseNumber(' 12 '), 12);
   assert.equal(parseNumber('7.5%'), 7.5);
@@ -602,6 +603,11 @@ test('a bad field is named with a short reason, and the hint keeps room for each
   assert.equal(inputProblem('cost', 'abc'), 'Write it like 1,234.50.');
   assert.equal(inputProblem('cost', '0,500'), 'Write it like 1,234.50.', 'ambiguous: shown how to write it');
   assert.equal(inputProblem('cost', '1.000,50'), 'Write it like 1,234.50.');
+  assert.equal(inputProblem('cost', '1.500'), 'Write it like 1,234.50.', '1500 in many regions: asked again, not read as 1.5');
+  assert.equal(inputProblem('cost', '0.500'), '', 'no one writes 500 that way');
+  assert.equal(inputProblem('cost', '1.50'), '');
+  assert.equal(inputProblem('cost', '1,234,5'), 'Write it like 1,234.50.', 'not a comma for a dot');
+  assert.equal(inputProblem('tiktokRate', '7.500'), '', 'a rate never reaches the thousands');
   assert.equal(inputProblem('cost', '-1,5'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('cost', '100000.01'), 'Enter $0 to $100,000.');
   assert.equal(inputProblem('cost', '100000.004'), '', 'the engine reads it as $100,000.00');
@@ -627,4 +633,14 @@ test('a bad field is named with a short reason, and the hint keeps room for each
       }
     }
   }
+});
+
+test('mid-typing, an amount whose comma may still separate thousands waits; judged, a decimal comma is written as a point', () => {
+  for (const raw of ['1,', '1,2', '1,23', '$12,5', '999,99']) assert.ok(stillTyping('cost', raw), raw);
+  for (const raw of ['1,234', '0,5', '1234,5', '12', '12.5']) assert.ok(!stillTyping('cost', raw), raw);
+  assert.ok(!stillTyping('tiktokRate', '7,5'), 'a rate comma is always the decimal point');
+  assert.equal(withDecimalPoint('cost', '2,50'), '2.50');
+  assert.equal(withDecimalPoint('cost', '$ 12,5'), '$ 12.5');
+  assert.equal(withDecimalPoint('tiktokRate', '7,500'), '7.500');
+  for (const raw of ['1,234', '1,234.50', '0,500', '1.000,50', '12.50', 'abc']) assert.equal(withDecimalPoint('cost', raw), raw, raw);
 });

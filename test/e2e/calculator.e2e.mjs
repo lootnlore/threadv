@@ -256,9 +256,10 @@ if (chromium) {
     await tick(page);
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), 'true');
     assert.equal(await page.locator('#h-cost').innerText(), 'Enter $0 to $100,000.');
-    await page.fill('#f-cost', '8,50'); // a decimal comma (all some keypads have) is read as one
+    await page.fill('#f-cost', '8,50'); // a decimal comma (all some keypads have) is read as one...
     await page.locator('#f-cost').press('Tab');
     await tick(page);
+    assert.equal(await page.inputValue('#f-cost'), '8.50', '...and shown as a point once left');
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), null);
     assert.equal(await page.locator('#h-cost').innerText(), 'Item cost');
     assert.match(await verdict(page), /Poshmark: \$23\.50 profit/, '$40 − $8 fee − $8.50 cost');
@@ -593,16 +594,48 @@ if (chromium) {
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 } });
     const shown = () => verdict(page);
-    // A click on the field's own label right after a keystroke: the value
-    // shows (the field is back in focus, nothing left to judge).
+    // A click on the field's own label gives it focus straight back: a
+    // half-typed value isn't judged, and a usable one shows.
     let before = await shown();
-    await page.focus('#f-price');
+    const label = await page.locator('label[for="f-price"]').boundingBox();
+    await page.fill('#f-price', '12..');
+    await page.mouse.move(label.x + 5, label.y + label.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(90); // a click's press, at a person's speed
+    await page.mouse.up();
+    await settle(page);
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, 'not left, so not judged');
+    assert.equal(await shown(), before);
+    await page.fill('#f-price', '40');
+    await settle(page);
     await page.keyboard.press('End');
     await page.keyboard.type('0');
     await page.click('label[for="f-price"]');
     await settle(page);
     assert.notEqual(await shown(), before, 'the result for 400');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
+    // A release with no click (a middle click) doesn't cut the next press short.
+    const mercari = page.locator('.result[data-id="mercari"]');
+    const at = await mercari.locator('summary').boundingBox();
+    await page.keyboard.type('0'); // 4000: the order changes
+    await page.mouse.click(640, 20, { button: 'middle' });
+    await page.mouse.move(at.x + 20, at.y + at.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(600);
+    await page.mouse.up();
+    await tick(page);
+    assert.equal(await mercari.locator('details').getAttribute('open'), '', 'the press opened its row');
+    // Typing "1,234" key by key shows no result for $1.20 or $1.23 on the
+    // way (its comma may still separate thousands): $1 stays until $1,234.
+    await page.fill('#f-price', '');
+    const seen = [];
+    for (const key of '1,234') {
+      await page.keyboard.type(key);
+      await page.waitForTimeout(150);
+      seen.push(await shown());
+    }
+    assert.deepEqual(seen.slice(1, 4), [seen[0], seen[0], seen[0]], `no result for "1," "1,2" or "1,23": ${seen.join(' | ')}`);
+    assert.match(seen[4], /\$1,174\.77/, 'the result for $1,234');
     // Tabbing off a button isn't leaving a typed field: nothing is saved.
     await page.locator('.tune > summary').click();
     await page.evaluate(() => {
@@ -623,6 +656,8 @@ if (chromium) {
     for (const [why, end, price] of [
       ['a context menu', () => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })), '30'],
       ['another window', () => window.dispatchEvent(new FocusEvent('blur')), '31'],
+      ["a select's popup", () => document.querySelector('#f-etsyOffsite').dispatchEvent(new Event('change', { bubbles: true })), '32'],
+      ['a drag', () => document.querySelector('h1').dispatchEvent(new DragEvent('dragstart', { bubbles: true })), '33'],
     ]) {
       before = await shown();
       await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, bubbles: true })));

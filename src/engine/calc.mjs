@@ -40,20 +40,25 @@ const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 /** Own-property check that also works in browsers without Object.hasOwn. */
 export const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
+const US_THOUSANDS = /^[-+]?[1-9]\d{0,2}(,\d{3})+(\.\d*)?$/; // "1,234.50"
+const DOT_THOUSANDS = /^[-+]?[1-9]\d{0,2}(\.\d{3})+$/; // "1.500": 1.5 here, 1500 in many regions
+const commaIsDecimal = (text, rate) => (rate ? /^[-+]?\d*,\d*$/ : /^[-+]?\d*,\d{0,2}$/).test(text);
+const bare = (value) => value.replace(/[$%\s]/g, '');
+
 /**
  * Parse "$1,234.50", "12", 12 or "" into a finite number (NaN if unusable).
  * A comma separates thousands ("1,234.50") or, where it can't, is the
  * decimal point: "12,50", "12,5", "12," (the decimal keypad in many regions
- * has only a comma). Where it could be either ("0,500", "1.000,50") the
+ * has only a comma). Where either could be meant ("0,500", "1.000,50") the
  * text is NaN, not a guess. In a `rate` (no rate reaches a thousand) a
- * single comma is always the decimal point: "7,500" is 7.5.
+ * single comma is always the decimal point.
  */
 export function parseNumber(value, { rate = false } = {}) {
   if (typeof value === 'number') return value;
   if (typeof value !== 'string') return NaN;
-  let text = value.replace(/[$%\s]/g, '');
-  if (!rate && /^[-+]?[1-9]\d{0,2}(,\d{3})+(\.\d*)?$/.test(text)) text = text.replace(/,/g, '');
-  else if ((rate ? /^[-+]?\d*,\d*$/ : /^[-+]?\d*,\d{0,2}$/).test(text)) text = text.replace(',', '.');
+  let text = bare(value);
+  if (!rate && US_THOUSANDS.test(text)) text = text.replace(/,/g, '');
+  else if (commaIsDecimal(text, rate)) text = text.replace(',', '.');
   // Plain decimals only: Number() would also accept "0x10", "0b11" or "1e3".
   return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(text) ? Number(text) : NaN;
 }
@@ -70,17 +75,32 @@ export const PRICE_NEEDED = 'Needed to see results.';
 /**
  * What is wrong with a numeric field's raw text (short enough for the hint
  * under it), or '' when it is fine: not a number as parseNumber reads it
- * (shown the way to write it), or out of range. Empty is fine: it means $0
- * or, for a sell price the mode needs, not typed yet. That sell price must
- * be at least $0.01 once rounded to the cent, as the engine rounds it.
+ * (shown the way to write it), or out of range. An amount like "1.500" is
+ * asked for again too: parseNumber reads 1.5, but many regions write 1500
+ * that way. Empty is fine: it means $0 or, for a sell price the mode needs,
+ * not typed yet. That sell price must be at least $0.01 once rounded to the
+ * cent, as the engine rounds it.
  */
 export function inputProblem(key, raw, { sellPrice = false } = {}) {
   const text = String(raw).trim();
   if (text === '') return '';
   const n = parseNumber(text, { rate: isRate(key) });
-  if (Number.isNaN(n)) return unreadable(key);
+  if (Number.isNaN(n) || (!isRate(key) && DOT_THOUSANDS.test(bare(text)))) return unreadable(key);
   if (!inRange(key, n)) return outOfRange(key);
   return sellPrice && roundCents(n * 100) === 0 ? BELOW_A_CENT : '';
+}
+
+/**
+ * Mid-typing, an amount whose comma could still become a thousands
+ * separator ("1," "1,2" "1,23" on the way to "1,234"): it isn't read yet.
+ */
+export const stillTyping = (key, raw) => !isRate(key) && /^[-+]?[1-9]\d{0,2},\d{0,2}$/.test(bare(String(raw)));
+
+/** The text with a comma read as the decimal point written as one ("12,50" is "12.50"), so the field shows how it was read. */
+export function withDecimalPoint(key, raw) {
+  const text = String(raw);
+  const b = bare(text);
+  return b.includes(',') && !(!isRate(key) && US_THOUSANDS.test(b)) && commaIsDecimal(b, isRate(key)) ? text.replace(',', '.') : text;
 }
 
 /** Every message a numeric field's hint can switch to, as { text, error }, so the form can keep room for the longest. */
