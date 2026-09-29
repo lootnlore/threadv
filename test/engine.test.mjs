@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
 import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, ETSY_OFFSITE, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
@@ -578,4 +578,31 @@ test('inputsUsedBy lists every input a platform reads, in every mode', () => {
     }
   }
   assert.ok(!inputsUsedBy(P.ebay, 'profit', normalizeInputs({ ...base, ebayCategory: 'most' })).includes('ebayCustomRate'), 'the custom rate only with the custom category');
+});
+
+test('a bad field is named with a short reason, and the hint keeps room for each one', () => {
+  assert.equal(inputProblem('cost', ''), '', 'empty is $0');
+  assert.equal(inputProblem('cost', ' 1,234.50 '), '');
+  assert.equal(inputProblem('cost', '-5'), 'Enter $0 to $100,000.');
+  assert.equal(inputProblem('cost', '12,5'), 'Enter $0 to $100,000.', 'a decimal comma is not read as 125');
+  assert.equal(inputProblem('cost', '100000.01'), 'Enter $0 to $100,000.');
+  assert.equal(inputProblem('tiktokRate', '60'), '');
+  assert.equal(inputProblem('tiktokRate', '60.5'), 'Enter 0 to 60%.');
+  assert.equal(inputProblem('price', '0.004'), '', 'a price the mode does not use');
+  assert.equal(inputProblem('price', '0.004', { sellPrice: true }), 'Enter at least $0.01.');
+  assert.equal(inputProblem('price', '0.005', { sellPrice: true }), '', 'rounds up to a cent, as the engine rounds it');
+  assert.equal(inputProblem('constructor', '5'), '', 'not a rate: a money field');
+  // Every reason a field can give is one its hint keeps room for.
+  const rand = seeded(11);
+  const pieces = ['', '-', '0', '0.00', '4', '5', '9', '12', ',', '.', '$', '%', ' ', 'e', 'x', '100', '000', ',000'];
+  for (const key of ['price', 'cost', 'target', 'other', ...Object.keys(LIMITS).filter((k) => k !== 'money')]) {
+    const room = new Set(hintsFor(key).map((h) => h.text));
+    for (let i = 0; i < 400; i++) {
+      const raw = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => pieces[Math.floor(rand() * pieces.length)]).join('');
+      for (const sellPrice of key === 'price' ? [false, true] : [false]) {
+        const problem = inputProblem(key, raw, { sellPrice });
+        assert.ok(problem === '' || room.has(problem), `${key} = ${JSON.stringify(raw)}: "${problem}" has no room`);
+      }
+    }
+  }
 });

@@ -10,9 +10,9 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, LIMITS, normalizeInputs, rank, rankedRows, inputsUsedBy, parseNumber, has } from '../engine/calc.mjs';
+import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, PRICE_NEEDED, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
-import { PLATFORMS, PLATFORM_BY_ID, usdText, andList, roundCents } from '../engine/fees.mjs';
+import { PLATFORMS, PLATFORM_BY_ID } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
 const SHARE_FLAG = 's';
@@ -56,23 +56,6 @@ function debounce(fn, ms) {
   return call;
 }
 
-/**
- * Error message for a numeric field's raw text, or '' when it is fine (empty
- * is fine: it means $0, or for a needed sell price, not typed yet). A sell
- * price the mode works with must be at least $0.01 once rounded to the cent.
- */
-function problemWith(key, raw, { sellPrice = false } = {}) {
-  const text = String(raw).trim();
-  if (text === '') return '';
-  const n = parseNumber(text);
-  const max = LIMITS[key] ?? LIMITS.money;
-  const isMoney = !(key in LIMITS);
-  if (!(Number.isFinite(n) && n >= 0 && n <= max)) {
-    return isMoney ? `Enter an amount from $0 to ${usdText(max)}.` : `Enter a percentage from 0 to ${max}.`;
-  }
-  return sellPrice && roundCents(n * 100) === 0 ? 'Enter a sell price of at least $0.01.' : ''; // the engine's rounding
-}
-
 function setup(root) {
   const form = root.querySelector('form');
   const panel = root.querySelector('[role="tabpanel"]');
@@ -89,7 +72,7 @@ function setup(root) {
   const focus = root.dataset.focus || undefined;
   const field = (name) => form.elements.namedItem(name);
   const fieldBox = (name) => root.querySelector(`[data-field="${name}"]`);
-  const hintFor = (name) => root.querySelector(`#h-${name}`);
+  const hintFor = (name) => root.querySelector(`#h-${name} [data-live]`); // the text on show; the rest only keep room for it
   for (const key of NUMERIC) {
     const h = hintFor(key);
     if (h) h.dataset.default = h.textContent;
@@ -98,8 +81,9 @@ function setup(root) {
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
   let badBefore = new Set(); // fields flagged at the last render (reset by load)
-  let rendered = null; // the form as last rendered: what the address bar holds
-  let shownLink = ''; // the results on screen, as a shared link
+  let rendered = null; // the form as last judged: what the address bar holds
+  let shownLink = ''; // the result on screen as a shared link ('' while the prompt shows)
+  let dirty = false; // typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -202,7 +186,7 @@ function setup(root) {
     const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id], mode, input)));
     return NUMERIC.filter((key) => field(key)).map((key) => {
       const needed = key === 'price' && used.has('price');
-      const problem = problemWith(key, values[key], { sellPrice: needed });
+      const problem = inputProblem(key, values[key], { sellPrice: needed });
       const missing = !problem && needed && String(values.price).trim() === '';
       const blocks = Boolean(problem || missing) && used.has(key) && !field(key).closest('[hidden]');
       return { key, problem, missing, blocks };
@@ -218,7 +202,7 @@ function setup(root) {
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
       const h = hintFor(key);
       if (h) {
-        h.textContent = problem || (missing ? 'Needed to see results.' : h.dataset.default);
+        h.textContent = problem || (missing ? PRICE_NEEDED : h.dataset.default);
         h.classList.toggle('hint-error', Boolean(problem));
       }
     }
@@ -238,7 +222,30 @@ function setup(root) {
     const lost = resultsEl.contains(document.activeElement) || document.activeElement === shareBtn;
     resultsEl.hidden = true;
     shareBtn.hidden = true;
-    if (lost) verdictEl.focus({ preventScroll: true }); // not dropped to the page top
+    shownLink = '';
+    if (lost) focusVerdict(); // not dropped to the top of the page
+  }
+
+  /** Rows for a result that can be worked out, and the verdict over them. */
+  function showResults(input, ids, link) {
+    const open = openIds();
+    const inList = resultsEl.contains(document.activeElement);
+    const row = inList && document.activeElement.closest('.result')?.dataset.id;
+    const rows = rankedRows(mode, rank(mode, input, ids), input.target);
+    const verdict = renderVerdict(mode, rows, input);
+    verdictEl.className = `verdict verdict-${verdict.tone}`;
+    verdictEl.innerHTML = verdict.html;
+    resultsEl.innerHTML = renderResults(mode, rows, { focus });
+    resultsEl.hidden = false;
+    shareBtn.hidden = !shareSupported;
+    shownLink = link;
+    for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
+    fitResults();
+    // Focus that was in the list stays on its row (or goes to the verdict, if the row went).
+    if (!inList) return;
+    const summary = row && resultsEl.querySelector(`[data-id="${row}"] summary`);
+    if (summary) summary.focus({ preventScroll: true });
+    else focusVerdict();
   }
 
   /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
@@ -257,9 +264,10 @@ function setup(root) {
    * mirrored to the URL. `typing` names the text field a keystroke changed.
    * Mid-typing a field can be briefly empty or half a number ("" before
    * "45", "12," before "12,50"), so while it isn't a usable value nothing
-   * changes: no flag, no prompt in place of the results, nothing saved. The
-   * value is judged when the user commits it (leaves the field or presses
-   * Enter). A usable value shows its results at once.
+   * changes: no flag, no prompt in place of the results, nothing saved. It
+   * stays `dirty` and is judged when the user leaves the field or presses
+   * Enter. A usable value shows its results at once. The list is redrawn
+   * only when the result changed.
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
@@ -271,6 +279,7 @@ function setup(root) {
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
     if (typed && (typed.problem || typed.missing)) return;
+    dirty = false;
     rendered = state;
     flag(checks);
     const blocking = checks.filter((c) => c.blocks);
@@ -282,21 +291,9 @@ function setup(root) {
 
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
-    if (pending) {
-      showPending(pending[0]);
-    } else {
-      const open = openIds();
-      const rows = rankedRows(mode, rank(mode, input, ids), input.target);
-      const verdict = renderVerdict(mode, rows, input);
-      verdictEl.className = `verdict verdict-${verdict.tone}`;
-      verdictEl.innerHTML = verdict.html;
-      resultsEl.innerHTML = renderResults(mode, rows, { focus });
-      resultsEl.hidden = false;
-      shareBtn.hidden = !shareSupported;
-      shownLink = fragment(state, true);
-      for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
-      fitResults();
-    }
+    const link = fragment(state, true); // everything the result depends on
+    if (pending) showPending(pending[0]);
+    else if (link !== shownLink) showResults(input, ids, link);
     if (save) {
       if (!sharedView) persist(state);
       syncUrlSoon();
@@ -337,6 +334,12 @@ function setup(root) {
     const text = verdictText();
     if (text !== spoken) verdictLive.textContent = spoken = text;
   }, 1000);
+  // Focus reads the verdict out, so the live region doesn't say it again.
+  function focusVerdict(scroll = { block: 'nearest' }) {
+    verdictEl.focus({ preventScroll: true });
+    verdictEl.scrollIntoView(scroll);
+    spoken = verdictText();
+  }
 
   // ---- modes (tabs) ----
 
@@ -380,12 +383,34 @@ function setup(root) {
 
   // ---- events ----
 
-  // Text fields render as you type, and are judged on change (when the user
-  // leaves one they edited); selects and checkboxes render on change.
+  // Text fields render as you type; selects and checkboxes on change.
   form.addEventListener('input', (e) => {
-    if (e.target.type === 'text') renderSoon(e.target.name);
+    if (e.target.type !== 'text') return;
+    dirty = true;
+    renderSoon(e.target.name);
   });
-  form.addEventListener('change', () => render({ save: true }));
+  form.addEventListener('change', (e) => {
+    if (e.target.type !== 'text') render({ save: true });
+  });
+  // A field left half-typed is judged once focus has moved on, and when it
+  // was left by a click, once that click is done: a flag or the prompt
+  // moving things can't pull the click's target out from under the pointer.
+  const judge = () => dirty && render({ save: true });
+  let pressed = false; // a mouse button, finger or pen is down
+  let judgeOnRelease = false;
+  addEventListener('pointerdown', () => (pressed = true), true);
+  for (const type of ['pointerup', 'pointercancel']) {
+    addEventListener(type, () => {
+      pressed = false;
+      if (judgeOnRelease) setTimeout(judge); // after the click this release makes
+      judgeOnRelease = false;
+    }, true);
+  }
+  form.addEventListener('focusout', (e) => {
+    if (!dirty || e.target.type !== 'text') return;
+    if (pressed) judgeOnRelease = true;
+    else setTimeout(judge);
+  });
 
   // On narrow screens the results sit below the form: "See results" (and
   // Enter / Go on a phone keyboard) jumps to the verdict. On wide screens the
@@ -402,8 +427,7 @@ function setup(root) {
     }
     if (seeResults.offsetParent === null) return;
     const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
-    verdictEl.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
-    verdictEl.focus({ preventScroll: true });
+    focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
   });
 
   resetBtn.addEventListener('click', () => {
@@ -418,7 +442,7 @@ function setup(root) {
   let shareReset;
   if (shareSupported) {
     shareBtn.addEventListener('click', async () => {
-      const url = `${location.origin}${location.pathname}${shownLink}`; // what's on screen, not a half-typed field
+      const url = `${location.origin}${location.pathname}${shownLink}`; // the result on screen
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);

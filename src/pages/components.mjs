@@ -1,5 +1,5 @@
 import { esc, renderResults, renderVerdict, MODES } from '../engine/render.mjs';
-import { DEFAULTS, normalizeInputs, rank, rankedRows } from '../engine/calc.mjs';
+import { DEFAULTS, normalizeInputs, rank, rankedRows, hintsFor } from '../engine/calc.mjs';
 import { PLATFORMS, EBAY_CATEGORIES, ETSY_OFFSITE, FEES_VERIFIED, RATES, pctText, usdText } from '../engine/fees.mjs';
 import { MILEAGE_YEAR } from '../data/mileage.mjs';
 
@@ -32,12 +32,26 @@ export const FEE_CHANGES = [
   { date: '2025-01', platform: 'mercari', text: 'Mercari drops the seller payment processing fee. Sellers pay a flat 10%.' },
 ];
 
+/**
+ * A field's hint. The script swaps its text for what is wrong with the value
+ * (or, for Minimum profit, the mode's own hint); invisible copies of every
+ * text it can show share its grid cell, so flagging a field never moves the
+ * form below it (where a click might be landing).
+ */
+function hintFor(name, hint) {
+  const also = name === 'target' ? Object.values(MODES).map((m) => ({ text: m.targetHint })) : [];
+  const room = [{ text: hint }, ...also, ...hintsFor(name)]
+    .map(({ text, error }) => `<span class="hint-room${error ? ' hint-error' : ''}" aria-hidden="true">${esc(text)}</span>`)
+    .join('');
+  return `<p class="hint" id="h-${name}"><span data-live>${esc(hint)}</span>${room}</p>`;
+}
+
 function moneyField(name, label, hint) {
   const hidden = MODES.profit.hidden.includes(name) ? ' hidden' : '';
   return `<div class="field" data-field="${name}"${hidden}>
 <label for="f-${name}">${label}</label>
 <div class="input-wrap"><span class="affix" aria-hidden="true">$</span><input id="f-${name}" name="${name}" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="${DEFAULTS[name]}" aria-describedby="h-${name}"></div>
-<p class="hint" id="h-${name}">${hint}</p>
+${hintFor(name, hint)}
 </div>`;
 }
 
@@ -45,7 +59,7 @@ function pctField(name, label, hint, { hidden = false } = {}) {
   return `<div class="field" data-field="${name}"${hidden ? ' hidden' : ''}>
 <label for="f-${name}">${label}</label>
 <div class="input-wrap"><input id="f-${name}" name="${name}" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="${DEFAULTS[name]}" aria-describedby="h-${name}"><span class="affix affix-end" aria-hidden="true">%</span></div>
-<p class="hint" id="h-${name}">${hint}</p>
+${hintFor(name, hint)}
 </div>`;
 }
 

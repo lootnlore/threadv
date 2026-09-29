@@ -2,7 +2,7 @@
  * Profit engine shared by the browser calculator, the static page builder
  * and the tests. Pure functions, integer cents, no DOM access.
  */
-import { PLATFORMS, PLATFORM_BY_ID, EBAY_CATEGORIES, ETSY_OFFSITE, RATES, MAX_CENTS, firstPriceWhere, roundCents, percentOf } from './fees.mjs';
+import { PLATFORMS, PLATFORM_BY_ID, EBAY_CATEGORIES, ETSY_OFFSITE, RATES, MAX_CENTS, firstPriceWhere, roundCents, percentOf, usdText } from './fees.mjs';
 
 /** Defaults shown when the calculator first loads (dollars / percents). */
 export const DEFAULTS = Object.freeze({
@@ -51,6 +51,33 @@ export function parseNumber(value) {
   const cleaned = trimmed.replace(/,/g, '');
   // Plain decimals only: Number() would also accept "0x10", "0b11" or "1e3".
   return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(cleaned) ? Number(cleaned) : NaN;
+}
+
+const isRate = (key) => key !== 'money' && has(LIMITS, key);
+const maxOf = (key) => (isRate(key) ? LIMITS[key] : LIMITS.money);
+const outOfRange = (key) => (isRate(key) ? `Enter 0 to ${LIMITS[key]}%.` : `Enter $0 to ${usdText(LIMITS.money)}.`);
+const BELOW_A_CENT = 'Enter at least $0.01.';
+/** The hint under a sell price the mode needs that isn't typed yet: a prompt, not an error. */
+export const PRICE_NEEDED = 'Needed to see results.';
+
+/**
+ * What is wrong with a numeric field's raw text (short enough for the hint
+ * under it), or '' when it is fine. Empty is fine: it means $0 or, for a
+ * sell price the mode needs, not typed yet. That sell price must be at
+ * least $0.01 once rounded to the cent, as the engine rounds it.
+ */
+export function inputProblem(key, raw, { sellPrice = false } = {}) {
+  const text = String(raw).trim();
+  if (text === '') return '';
+  const n = parseNumber(text);
+  if (!(Number.isFinite(n) && n >= 0 && n <= maxOf(key))) return outOfRange(key);
+  return sellPrice && roundCents(n * 100) === 0 ? BELOW_A_CENT : '';
+}
+
+/** Every message a numeric field's hint can switch to, as { text, error }, so the form can keep room for the longest. */
+export function hintsFor(key) {
+  if (key !== 'price') return [{ text: outOfRange(key), error: true }];
+  return [{ text: outOfRange(key), error: true }, { text: BELOW_A_CENT, error: true }, { text: PRICE_NEEDED, error: false }];
 }
 
 function cents(value, fallback) {

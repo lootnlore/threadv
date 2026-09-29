@@ -132,6 +132,9 @@ if (chromium) {
   };
   const saved = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('threadvet:settings:v2')));
   const settle = (page) => page.waitForTimeout(350);
+  // A field left half-typed is judged a task after focus leaves it: this
+  // waits exactly that long (a timer queued after the calculator's runs after it).
+  const tick = (page) => page.evaluate(() => new Promise((r) => setTimeout(r)));
 
   test('results are pre-rendered without JavaScript', async () => {
     const { context, page } = await open('/', { javaScriptEnabled: false });
@@ -250,8 +253,9 @@ if (chromium) {
     const { context, page } = await open();
     await page.fill('#f-cost', '-5');
     await page.locator('#f-cost').press('Tab');
+    await tick(page);
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), 'true');
-    assert.match(await page.locator('#h-cost').innerText(), /from \$0/);
+    assert.equal(await page.locator('#h-cost').innerText(), 'Enter $0 to $100,000.');
     await page.fill('#f-cost', '8');
     await settle(page);
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), null);
@@ -259,8 +263,28 @@ if (chromium) {
     await page.locator('.tune > summary').click();
     await page.fill('#f-tiktokRate', 'abc');
     await page.locator('#f-tiktokRate').press('Tab');
+    await tick(page);
     assert.equal(await page.locator('#f-tiktokRate').getAttribute('aria-invalid'), 'true');
     await context.close();
+
+    // Flagging a field as it's left moves nothing below it, even where the
+    // message is longer than the hint it replaces (320px wide), so a click
+    // aimed just below lands.
+    const narrow = await open('/', { viewport: { width: 320, height: 700 } });
+    const tune = narrow.page.locator('.tune > summary');
+    const top = () => tune.evaluate((el) => el.getBoundingClientRect().top + scrollY);
+    const before = await top();
+    await narrow.page.fill('#f-target', '1,');
+    await narrow.page.locator('#f-target').press('Tab');
+    await tick(narrow.page);
+    assert.equal(await narrow.page.locator('#f-target').getAttribute('aria-invalid'), 'true');
+    assert.equal(await top(), before, 'nothing below the flagged field moved');
+    await narrow.page.fill('#f-target', '10');
+    await settle(narrow.page);
+    await narrow.page.fill('#f-target', '1,');
+    await tune.click({ position: { x: 24, y: 3 } });
+    assert.equal(await narrow.page.locator('.tune').getAttribute('open'), '', 'the click opened Fine-tune');
+    await narrow.context.close();
   });
 
   test('no verdict from numbers the form rejects or leaves out', async () => {
@@ -273,14 +297,20 @@ if (chromium) {
     const ebayOpen = () => page.locator('.result[data-id="ebay"] details').getAttribute('open');
     const inAddressBar = (key) => page.evaluate((k) => new URLSearchParams(location.hash.slice(1)).get(k), key);
     // A value is judged when the user leaves its field (Tab, here).
-    const leave = (id) => page.locator(id).press('Tab');
+    const leave = async (id) => {
+      await page.locator(id).press('Tab');
+      await tick(page);
+    };
     // Typed and left without touching the page, for fields out of sight.
-    const enter = (id, value) =>
-      page.evaluate(([sel, v]) => {
+    const enter = async (id, value) => {
+      await page.evaluate(([sel, v]) => {
         const el = document.querySelector(sel);
         el.value = v;
-        for (const type of ['input', 'change']) el.dispatchEvent(new Event(type, { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
       }, [id, value]);
+      await tick(page);
+    };
     await page.locator('.result[data-id="ebay"] summary').click(); // a breakdown the user opened
     const live = await state();
     // Retyping a field (a moment empty, or half-typed) changes nothing until
@@ -300,21 +330,48 @@ if (chromium) {
     }
     assert.equal(await page.evaluate(() => window.cleared), 0, 'no flash of an empty list while typing');
     assert.match(await verdict(page), /^Worth it\./);
-    // The link shared is the result on screen, even if the button is used
-    // while a field is half-typed (focus still in it).
+    // Clicked with a field half-typed, the share button still works, for the
+    // result on screen; then the field is judged, and focus, on the button
+    // the prompt hides, moves to the prompt.
     await page.fill('#f-price', '4,');
-    await page.evaluate(() => document.querySelector('[data-share]').click());
+    await page.getByRole('button', { name: 'Copy link to this result' }).click();
     await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
     const shared = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(new URLSearchParams(new URL(shared).hash.slice(1)).get('price'), '12,500');
+    await tick(page);
+    assert.equal(await verdict(page), 'Check “Sell price”. Enter $0 to $100,000.');
+    assert.equal(await page.evaluate(() => document.activeElement.hasAttribute('data-verdict')), true);
+    await page.fill('#f-price', '40');
+    await settle(page);
+    // Leaving a field whose value already shows (nothing left to judge)
+    // redraws nothing, so a click on a row lands.
+    await page.fill('#f-price', '45');
+    await settle(page);
+    await page.locator('.result[data-id="mercari"] summary').click();
+    assert.equal(await page.locator('.result[data-id="mercari"] details').getAttribute('open'), '');
+    assert.equal(await page.evaluate(() => document.activeElement.closest('.result')?.dataset.id), 'mercari');
+    await page.locator('.result[data-id="mercari"] summary').click();
+    // What is left in the field is what's judged, even when it's the value
+    // the field had before (no change event): typed 4, then deleted.
+    await page.fill('#f-price', '');
+    await leave('#f-price');
+    await page.locator('#f-price').click();
+    await page.keyboard.type('4');
+    await settle(page);
+    assert.match(await verdict(page), /^Pass\./);
+    await page.keyboard.press('Backspace');
+    await leave('#f-price');
+    assert.equal(await verdict(page), 'Enter a sell price to see results.');
+    await settle(page);
+    assert.notEqual(await inAddressBar('price'), '4');
     await page.fill('#f-price', '40');
     await settle(page);
     // Left that way, the field is flagged and a neutral prompt replaces the
     // results (no rows for numbers that were never entered), and is read out.
     const cases = [
-      ['#f-cost', '-5', 'Check “You paid”. Enter an amount from $0 to $100,000.', 'true'],
-      ['#f-price', '12,5', 'Check “Sell price”. Enter an amount from $0 to $100,000.', 'true'],
-      ['#f-price', '0.004', 'Check “Sell price”. Enter a sell price of at least $0.01.', 'true'],
+      ['#f-cost', '-5', 'Check “You paid”. Enter $0 to $100,000.', 'true'],
+      ['#f-price', '12,5', 'Check “Sell price”. Enter $0 to $100,000.', 'true'],
+      ['#f-price', '0.004', 'Check “Sell price”. Enter at least $0.01.', 'true'],
       ['#f-price', '', 'Enter a sell price to see results.', null, 'not typed yet: a prompt, not an error'],
     ];
     for (const [id, value, want, invalid, why] of cases) {
@@ -336,7 +393,7 @@ if (chromium) {
     await page.fill('#f-price', '');
     await page.fill('#f-cost', 'abc');
     await leave('#f-cost');
-    assert.equal(await verdict(page), 'Check “You paid”. Enter an amount from $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “You paid”. Enter $0 to $100,000.');
     await page.fill('#f-price', '40');
     await page.fill('#f-cost', '8');
     // Enter goes to what needs fixing, not to the verdict (phones scroll there)...
@@ -356,7 +413,7 @@ if (chromium) {
     // Several bad fields: each named with its reason.
     await page.fill('#f-cost', 'abc');
     await leave('#f-cost');
-    assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Enter an amount from \$0 to \$100,000\. “TikTok Shop fee”: Enter a percentage from 0 to \d+\./);
+    assert.match(await verdict(page), /^Check 2 fields\. “You paid”: Enter \$0 to \$100,000\. “TikTok Shop fee”: Enter 0 to \d+%\./);
     // A bad value no compared marketplace reads doesn't hold results back...
     await page.fill('#f-cost', '8');
     await page.locator('input[name="platform"][value="tiktok"]').uncheck();
@@ -381,7 +438,7 @@ if (chromium) {
     assert.match(await verdict(page), /^Pay up to /, 'Max buy ignores the cost');
     // Rows for another mode are never kept: List price reads the bad cost.
     await page.getByRole('tab', { name: 'List price' }).click();
-    assert.equal(await verdict(page), 'Check “You paid”. Enter an amount from $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “You paid”. Enter $0 to $100,000.');
     assert.equal((await state()).rows, 0);
     await page.fill('#f-cost', '8');
     await enter('#f-price', 'junk'); // hidden in this mode, as if left from before
@@ -393,19 +450,37 @@ if (chromium) {
     const link = await open('/#mode=maxbuy&price=');
     assert.equal(await verdict(link.page), 'Enter a sell price to see results.');
     assert.equal(await link.page.locator('[data-results]').isHidden(), true);
-    // Focus in the results (or on their share button) when they go moves to
-    // the prompt, not to the top of the page.
-    for (const inside of ['.result summary', '[data-share]']) {
+    // Focus on a row stays on that row when the results are redrawn (Back,
+    // or a pasted link)...
+    await link.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await link.page.evaluate(() => {
+      document.querySelector('.result[data-id="mercari"] summary').focus();
+      location.hash = '#price=50';
+    });
+    await settle(link.page);
+    assert.match(await verdict(link.page), /\$50|Worth it/);
+    assert.equal(await link.page.evaluate(() => document.activeElement.matches('.result[data-id="mercari"] summary')), true, 'focus kept on its row');
+    // ...and focus in the results (or on their share button) when they go
+    // moves to the prompt, in view, not to the top of the page. Focus reads
+    // the prompt out, so the live region doesn't repeat it.
+    for (const inside of ['.result:last-child summary', '[data-share]']) {
       await link.page.goto(`${base}/`, { waitUntil: 'networkidle' });
       await link.page.evaluate((sel) => {
-        document.querySelector(sel).focus();
+        document.querySelector(sel).focus(); // scrolls down to it
         location.hash = '#s=1&mode=profit&price=';
       }, inside);
       await settle(link.page);
       assert.equal(await verdict(link.page), 'Enter a sell price to see results.');
       assert.equal(await link.page.locator('[data-results]').isHidden(), true);
-      assert.equal(await link.page.evaluate(() => document.activeElement.hasAttribute('data-verdict')), true, `focus from ${inside}`);
+      const focused = await link.page.evaluate(() => {
+        const el = document.activeElement;
+        const box = el.getBoundingClientRect();
+        return { verdict: el.hasAttribute('data-verdict'), inView: box.top >= 0 && box.bottom <= innerHeight };
+      });
+      assert.deepEqual(focused, { verdict: true, inView: true }, `focus from ${inside}`);
     }
+    await link.page.waitForTimeout(1200); // past the live region's delay
+    assert.notEqual(await link.page.locator('[data-verdict-live]').textContent(), 'Enter a sell price to see results.', 'said once, on focus');
     await link.page.goto(`${base}/#s=1&tiktokRate=abc`);
     await settle(link.page);
     assert.equal(await link.page.locator('.tune').getAttribute('open'), '');
@@ -438,7 +513,7 @@ if (chromium) {
     await retype('#f-price', '12,');
     await page.keyboard.press('Tab'); // left half-typed: the prompt
     await idle();
-    assert.equal(await verdict(page), 'Check “Sell price”. Enter an amount from $0 to $100,000.');
+    assert.equal(await verdict(page), 'Check “Sell price”. Enter $0 to $100,000.');
     await retype('#f-price', '40');
     await page.keyboard.press('Tab');
     await idle();

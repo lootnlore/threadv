@@ -763,10 +763,19 @@ select:focus-visible {
 }
 
 .hint {
+  display: grid; /* the live text and invisible copies of its other texts share one cell */
   margin: 4px 0 0;
   font-size: 0.78rem;
   color: var(--muted);
   line-height: 1.35;
+}
+
+.hint > * {
+  grid-area: 1 / 1;
+}
+
+.hint-room {
+  visibility: hidden;
 }
 
 .hint-error {
