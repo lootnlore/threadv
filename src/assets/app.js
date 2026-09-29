@@ -21,7 +21,6 @@ const TUNE_KEYS = ['taxRate', 'other', ...PLATFORMS.flatMap((p) => p.options ?? 
 const NUMERIC = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => typeof DEFAULTS[key] === 'number');
 const LINK_KEYS = [SHARE_FLAG, 'mode', ...MAIN_KEYS];
 const ALL_IDS = PLATFORMS.map((p) => p.id);
-const PENDING_DELAY = 800; // ms of pause before a half-typed field replaces the results with a prompt
 
 const storage = {
   read() {
@@ -49,10 +48,12 @@ const storage = {
 
 function debounce(fn, ms) {
   let t;
-  return () => {
+  const call = (...args) => {
     clearTimeout(t);
-    t = setTimeout(fn, ms);
+    t = setTimeout(() => fn(...args), ms);
   };
+  call.cancel = () => clearTimeout(t);
+  return call;
 }
 
 /**
@@ -96,10 +97,9 @@ function setup(root) {
   let mode = 'profit';
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
-  let pendingShown = false; // the prompt is up in place of the results
-  let pendingTimer = 0;
-  let openBefore = null; // breakdowns that were open when the results were cleared
   let badBefore = new Set(); // fields flagged at the last render (reset by load)
+  let rendered = null; // the form as last rendered: what the address bar holds
+  let shownLink = ''; // the results on screen, as a shared link
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -131,7 +131,6 @@ function setup(root) {
 
   function load() {
     badBefore = new Set(); // a new link's bad fields open Fine-tune again
-    openBefore = null;
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
@@ -181,9 +180,10 @@ function setup(root) {
     return `#${params.toString()}`;
   }
 
-  // Reads the form when it runs, so a delayed call can never write stale values.
+  // Writes the form as last rendered, so it never holds a half-typed value
+  // (see render) and a delayed call never writes an older one.
   function syncUrl() {
-    history.replaceState(null, '', `${location.pathname}${location.search}${fragment(readForm(), sharedView)}`);
+    history.replaceState(null, '', `${location.pathname}${location.search}${fragment(rendered, sharedView)}`);
   }
   const syncUrlSoon = debounce(syncUrl, 250);
 
@@ -192,22 +192,27 @@ function setup(root) {
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
 
   /**
-   * Flags each numeric field with what is wrong (its hint says it) and returns
-   * what holds the results back, [{ key, problem, missing }]: bad values the
-   * compared marketplaces read in this mode (inputsUsedBy) and that are on
-   * show, and a sell price the mode needs but that isn't typed yet (neutral:
-   * not an error yet).
+   * Each numeric field on the page, [{ key, problem, missing, blocks }]:
+   * `problem` says what is wrong with its value; `missing` marks a sell price
+   * the mode needs but that isn't typed yet (neutral: not an error yet).
+   * `blocks`: either one holds the results back, because the compared
+   * marketplaces read the field in this mode (inputsUsedBy) and it is on show.
    */
-  function validate(values, ids, input) {
+  function check(values, ids, input) {
     const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id], mode, input)));
-    const blocking = [];
-    for (const key of NUMERIC) {
+    return NUMERIC.filter((key) => field(key)).map((key) => {
+      const needed = key === 'price' && used.has('price');
+      const problem = problemWith(key, values[key], { sellPrice: needed });
+      const missing = !problem && needed && String(values.price).trim() === '';
+      const blocks = Boolean(problem || missing) && used.has(key) && !field(key).closest('[hidden]');
+      return { key, problem, missing, blocks };
+    });
+  }
+
+  /** Marks each field with what is wrong; its hint says it. */
+  function flag(checks) {
+    for (const { key, problem, missing } of checks) {
       const el = field(key);
-      if (!el) continue;
-      const shown = !el.closest('[hidden]');
-      const problem = problemWith(key, values[key], { sellPrice: key === 'price' && used.has('price') });
-      const missing = !problem && key === 'price' && used.has('price') && String(values.price).trim() === '';
-      if ((problem || missing) && used.has(key) && shown) blocking.push({ key, problem, missing });
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -217,7 +222,6 @@ function setup(root) {
         h.classList.toggle('hint-error', Boolean(problem));
       }
     }
-    return blocking;
   }
 
   const openIds = () => [...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id);
@@ -225,17 +229,16 @@ function setup(root) {
   /**
    * While the numbers can't be worked out, the verdict asks for what's
    * missing, in a neutral tone, and the results (and the link to share them)
-   * go: rows for other numbers would mislead. The breakdowns that were open
-   * come back with the results.
+   * go: rows for other numbers would mislead. The list is hidden, not
+   * emptied, so breakdowns left open are open again when it comes back.
    */
   function showPending(html) {
-    if (!pendingShown) openBefore = new Set(openIds());
     verdictEl.className = 'verdict verdict-wait';
     verdictEl.innerHTML = `<span>${html}</span>`;
-    resultsEl.innerHTML = '';
+    const lost = resultsEl.contains(document.activeElement) || document.activeElement === shareBtn;
     resultsEl.hidden = true;
     shareBtn.hidden = true;
-    pendingShown = true;
+    if (lost) verdictEl.focus({ preventScroll: true }); // not dropped to the page top
   }
 
   /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
@@ -251,35 +254,38 @@ function setup(root) {
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
-   * mirrored to the URL. `typing`: a keystroke may leave a field briefly
-   * empty or half-typed ("" before "45", "12," before "12,50"), so the prompt
-   * waits for a pause before it replaces the results; everything else
-   * (loading, a tab, Enter) shows it at once.
+   * mirrored to the URL. `typing` names the text field a keystroke changed.
+   * Mid-typing a field can be briefly empty or half a number ("" before
+   * "45", "12," before "12,50"), so while it isn't a usable value nothing
+   * changes: no flag, no prompt in place of the results, nothing saved. The
+   * value is judged when the user commits it (leaves the field or presses
+   * Enter). A usable value shows its results at once.
    */
-  function render({ save = false, typing = false } = {}) {
+  function render({ save = false, typing = '' } = {}) {
+    renderSoon.cancel(); // this render reads everything a queued one would
     const state = readForm();
     const input = normalizeInputs(state.values);
     fieldBox('ebayCustomRate').hidden = !PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts);
     // A marketplace's own fee page always shows it, even if the visitor hid it.
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
-    const blocking = validate(state.values, ids, input);
+    const checks = check(state.values, ids, input);
+    const typed = checks.find((c) => c.key === typing);
+    if (typed && (typed.problem || typed.missing)) return;
+    rendered = state;
+    flag(checks);
+    const blocking = checks.filter((c) => c.blocks);
     // A field that has just gone bad inside the closed Fine-tune panel (a shared
     // link's junk, say) opens it, once: closing it again is up to the user.
     const bad = blocking.filter((b) => b.problem).map(({ key }) => key);
     for (const key of bad) if (!badBefore.has(key)) field(key).closest('details:not([open])')?.setAttribute('open', '');
     badBefore = new Set(bad);
 
-    clearTimeout(pendingTimer);
     const pending = pendingFor(ids, blocking);
-    pendingField = pending?.[1] ?? null; // Enter goes there even before the prompt shows
-    if (pending && typing && !pendingShown) {
-      pendingTimer = setTimeout(() => showPending(pending[0]), PENDING_DELAY);
-    } else if (pending) {
+    pendingField = pending?.[1] ?? null;
+    if (pending) {
       showPending(pending[0]);
     } else {
-      const open = openBefore ?? new Set(openIds());
-      openBefore = null;
-      pendingShown = false;
+      const open = openIds();
       const rows = rankedRows(mode, rank(mode, input, ids), input.target);
       const verdict = renderVerdict(mode, rows, input);
       verdictEl.className = `verdict verdict-${verdict.tone}`;
@@ -287,6 +293,7 @@ function setup(root) {
       resultsEl.innerHTML = renderResults(mode, rows, { focus });
       resultsEl.hidden = false;
       shareBtn.hidden = !shareSupported;
+      shownLink = fragment(state, true);
       for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
       fitResults();
     }
@@ -296,24 +303,27 @@ function setup(root) {
     }
     announce();
   }
-  const renderSoon = debounce(() => render({ save: true, typing: true }), 60);
+  const renderSoon = debounce((key) => render({ save: true, typing: key }), 60);
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
   // so the list stays even. (Without JavaScript a CSS container query does a
   // rougher version of this.)
+  let fittedWidth = 0;
   function fitResults() {
+    fittedWidth = resultsEl.clientWidth;
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
   }
-  // Refit when the list's width changes. Next frame, not inside the callback:
-  // toggling .stacked changes the list's height, and changing an observed
-  // element's size from its own callback raises "ResizeObserver loop" errors.
-  let fittedWidth = 0;
-  new ResizeObserver(([entry]) => {
-    const width = Math.round(entry.contentRect.width);
-    if (width !== fittedWidth) {
+  // Refit when the list's width changes (not when it is hidden, or shown
+  // again at the width render just fitted). Next frame, not inside the
+  // callback: toggling .stacked changes the list's height, and changing an
+  // observed element's size from its own callback raises "ResizeObserver
+  // loop" errors.
+  new ResizeObserver(() => {
+    const width = resultsEl.clientWidth;
+    if (width && width !== fittedWidth) {
       fittedWidth = width;
       requestAnimationFrame(fitResults);
     }
@@ -370,13 +380,12 @@ function setup(root) {
 
   // ---- events ----
 
-  // Text fields render as you type; selects and checkboxes on change.
+  // Text fields render as you type, and are judged on change (when the user
+  // leaves one they edited); selects and checkboxes render on change.
   form.addEventListener('input', (e) => {
-    if (e.target.type === 'text') renderSoon();
+    if (e.target.type === 'text') renderSoon(e.target.name);
   });
-  form.addEventListener('change', (e) => {
-    if (e.target.type !== 'text') render({ save: true });
-  });
+  form.addEventListener('change', () => render({ save: true }));
 
   // On narrow screens the results sit below the form: "See results" (and
   // Enter / Go on a phone keyboard) jumps to the verdict. On wide screens the
@@ -409,7 +418,7 @@ function setup(root) {
   let shareReset;
   if (shareSupported) {
     shareBtn.addEventListener('click', async () => {
-      const url = `${location.origin}${location.pathname}${fragment(readForm(), true)}`;
+      const url = `${location.origin}${location.pathname}${shownLink}`; // what's on screen, not a half-typed field
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);

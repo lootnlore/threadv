@@ -8,7 +8,7 @@ import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
 import { MODE_INPUTS } from './calc.mjs';
 
 /** The sale price or item cost a mode doesn't work from (hidden in the form). */
-const unused = (mode) => ['price', 'cost'].filter((key) => !MODE_INPUTS[mode].includes(key));
+const unused = (mode) => MODE_INPUTS.profit.filter((key) => !MODE_INPUTS[mode].includes(key)); // profit works from both
 
 /** Calculator modes: tab label, helper text, fields hidden, and minimum-profit hint. */
 export const MODES = {
