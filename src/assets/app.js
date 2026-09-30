@@ -290,17 +290,15 @@ function setup(root) {
   // makes has landed: a list redrawn, or the prompt taking its place,
   // mid-press would move the target out from under the pointer, and the
   // click would be lost. Only painting waits: what the user typed is judged,
-  // flagged and saved at once. A press can't hold painting back for long:
-  // it ends with its own release and the click that makes (or 250ms on, if
-  // none comes), its pointer cancelled or seen with no button down, or once
-  // it can't click any more: a context menu or a drag took it, or another
-  // window did. A finger or pen (which send nothing more after a release
-  // the page missed) also ends after 3s of silence; a mouse held still
-  // stays pressed.
+  // flagged and saved at once. One rule for every pointer, so a press can
+  // hold painting only so long: it ends with its own release and the click
+  // that makes (or 250ms on, if none comes), its pointer cancelled or seen
+  // with no button down, or 3s without a word from its pointer (a release
+  // the page never heard of: a menu, a drag or another window took it).
   const inputSide = root.querySelector('.calc-input');
-  const presses = new Map(); // pointer id -> { type, heard: when it was last heard from }
+  const presses = new Map(); // pointer id -> when it was last heard from
   let clickDue = 0; // timer from the last release to its click (or to when none came)
-  let silence = 0; // timer for the 3s check
+  let silence = 0; // timer for the 3s check, while a press is down
   const pressing = () => presses.size > 0 || clickDue !== 0;
   function stopClickTimer() {
     clearTimeout(clickDue);
@@ -312,30 +310,25 @@ function setup(root) {
     clearTimeout(silence);
     paint();
   }
-  const silent = (p) => p.type !== 'mouse'; // a finger or pen: can end in silence
   function checkSilence() {
-    for (const [id, p] of presses) if (silent(p) && performance.now() - p.heard >= 3000) presses.delete(id);
-    if (!presses.size) endPresses();
-    else if ([...presses.values()].some(silent)) silence = setTimeout(checkSilence, 1000);
+    for (const [id, heard] of presses) if (performance.now() - heard >= 3000) presses.delete(id);
+    if (presses.size) silence = setTimeout(checkSilence, 1000);
+    else endPresses();
   }
   addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || inputSide.contains(e.target)) return; // a right press makes no click
     stopClickTimer(); // a new press: the last release's wait is over
-    const p = { type: e.pointerType, heard: performance.now() };
-    presses.set(e.pointerId, p);
-    clearTimeout(silence);
-    if (silent(p)) silence = setTimeout(checkSilence, 3000);
+    if (!presses.size) silence = setTimeout(checkSilence, 3000);
+    presses.set(e.pointerId, performance.now());
   }, true);
   addEventListener('pointermove', (e) => {
-    const p = presses.get(e.pointerId);
-    if (!p) return;
-    if (e.buttons) p.heard = performance.now();
+    if (!presses.has(e.pointerId)) return;
+    if (e.buttons) presses.set(e.pointerId, performance.now());
     else if (presses.delete(e.pointerId) && !presses.size) endPresses(); // its release went unheard
   }, true);
   addEventListener('pointerup', (e) => {
     if (!presses.delete(e.pointerId) || presses.size) return;
     clearTimeout(silence); // all up: now it's the click that's awaited
-    stopClickTimer();
     clickDue = setTimeout(endPresses, 250);
   }, true);
   addEventListener('pointercancel', (e) => {
@@ -348,8 +341,6 @@ function setup(root) {
     stopClickTimer();
     setTimeout(endPresses);
   }, true);
-  for (const type of ['contextmenu', 'dragstart']) addEventListener(type, () => pressing() && endPresses(), true);
-  addEventListener('blur', () => pressing() && endPresses()); // the window's own (a field's blur doesn't bubble)
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
@@ -512,12 +503,12 @@ function setup(root) {
       if (dirty === el.name) render({ save: true });
     });
   });
-  // Pressing the label or the box of the field being typed in (its $ or %,
-  // its border) keeps focus in it, so the field isn't judged as left. (Its
-  // hint stays selectable.)
+  // Pressing anywhere on the field being typed in (its label, its $ or %,
+  // its border, the gap between them), with any button, keeps focus in it,
+  // so it isn't judged as left. Its hint stays selectable.
   form.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    const input = e.target.closest('label, .input-wrap')?.closest('.field')?.querySelector('input[type="text"]');
+    if (e.target.closest('.hint')) return;
+    const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (input && input === document.activeElement && e.target !== input) e.preventDefault();
   });
 
@@ -556,9 +547,10 @@ function setup(root) {
       // numbers no longer in the form; if the prompt takes the results'
       // place (and focus), there is nothing to share.
       if (dirty) render({ save: true });
-      paint(); // the click has landed (unless a press is stuck: painted when it ends)
-      if (!view || view.prompt) return; // the numbers as judged, not whatever is still on screen
-      const url = `${location.origin}${location.pathname}${view.link}`;
+      // Nothing to share: the prompt says why, now (even if a press is holding painting).
+      if (!view || view.prompt) return endPresses();
+      paint();
+      const url = `${location.origin}${location.pathname}${view.link}`; // the numbers as judged, whatever is on screen
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);
