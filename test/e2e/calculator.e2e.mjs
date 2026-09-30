@@ -699,10 +699,10 @@ if (chromium) {
       assert.equal(await shown(), before);
     }
     // A hint's words can be selected, dragging from past their end as usual.
-    // That leaves the field, which is judged as on any leaving; the hint's
-    // new words wait until the selection moves on, so what was selected
-    // stays selected: an error's, the old words when the error changes, or
-    // the hint's own when a value is emptied or read only when left ("1,5").
+    // That leaves the field, which is judged as on any leaving, and the hint
+    // always says what's true of it: words selected stay selected while that
+    // doesn't change them (an error judged again, a value that's fine, "1,5"),
+    // and go with them when it does (a different error, an emptied price).
     const hintLines = (id) =>
       page.locator(`#${id} [data-live]`).evaluate((el) => {
         const r = document.createRange();
@@ -734,16 +734,16 @@ if (chromium) {
     assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
     await page.locator('#f-price').click();
     await page.fill('#f-price', '99999999'); // a different error, not shown while typed
-    assert.equal(await dragHint(), 'Write it like 1,234.50.', 'the old words stay selected');
+    await dragHint();
+    assert.equal(await hintText(), 'Enter $0 to $100,000.', 'the hint says the new error at once');
     await deselect();
-    assert.equal(await hintText(), 'Enter $0 to $100,000.', 'then the new error shows');
     await page.fill('#f-price', '40');
     await settle(page);
-    await page.fill('#f-price', ''); // emptied: the hint will ask for a price
-    assert.equal(await dragHint(), 'What it will sell for');
+    await page.fill('#f-price', ''); // emptied
+    await dragHint();
     assert.equal(await verdict(page), 'Enter a sell price to see results.', 'judged');
+    assert.equal(await hintText(), 'Needed to see results.', 'and its hint says so');
     await deselect();
-    assert.equal(await hintText(), 'Needed to see results.');
     await page.fill('#f-price', '40');
     await settle(page);
     before = await shown();
@@ -755,18 +755,38 @@ if (chromium) {
     await deselect();
     await page.fill('#f-price', '40');
     await settle(page);
-    // A pen's tap on the hint keeps focus (a pen on a tablet taps like a
-    // finger: moving focus would bounce its keyboard).
+    // A double-click on a hint word while its field has focus selects the
+    // word: the first click (selecting nothing) gives focus back, the second
+    // leaves again and selects.
+    await page.locator('#f-price').click();
+    const [wordAt] = (await hintLines('h-price')).lines;
+    await page.mouse.dblclick(wordAt.left + 8, wordAt.y);
+    await settle(page);
+    assert.equal(await selected(), 'What', 'the word double-clicked');
+    await deselect();
+    // A pen's tap on the hint keeps focus and judges nothing (a pen on a
+    // tablet taps like a finger: moving focus would bounce its keyboard).
     await page.fill('#f-price', '12..');
     await page.evaluate(() => {
-      window.left = 0;
-      document.querySelector('#f-price').addEventListener('focusout', () => window.left++);
+      const count = { left: 0 };
+      const input = document.querySelector('#f-price');
+      const onLeave = () => count.left++;
+      input.addEventListener('focusout', onLeave);
+      window.stopCounting = () => {
+        input.removeEventListener('focusout', onLeave);
+        return count.left;
+      };
     });
     const [penAt] = (await hintLines('h-price')).lines;
     const penCdp = await page.context().newCDPSession(page);
     for (const type of ['mousePressed', 'mouseReleased']) await penCdp.send('Input.dispatchMouseEvent', { type, x: penAt.left + 5, y: penAt.y, button: 'left', clickCount: 1, pointerType: 'pen' });
+    await penCdp.detach();
     await settle(page);
-    assert.deepEqual(await page.evaluate(() => [window.left, document.activeElement.id]), [0, 'f-price'], 'a pen tap on the hint');
+    assert.deepEqual(
+      await page.evaluate(() => [window.stopCounting(), document.activeElement.id, document.querySelector('#f-price').getAttribute('aria-invalid')]),
+      [0, 'f-price', null],
+      'a pen tap on the hint',
+    );
     await page.fill('#f-price', '40');
     await settle(page);
     // A click beside a wrapped hint's short line gives focus back too.

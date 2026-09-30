@@ -226,24 +226,15 @@ function setup(root) {
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
       const h = hintFor(key);
-      if (h) setHint(h, problem || (missing ? PRICE_NEEDED : h.dataset.default), Boolean(problem));
+      if (!h) continue;
+      // A hint always says what's true of its field. Its words are only
+      // replaced when that changes, so words selected in it (to copy an
+      // error, say) stay selected while it does not.
+      const text = problem || (missing ? PRICE_NEEDED : h.dataset.default);
+      if (h.textContent !== text) h.textContent = text;
+      h.classList.toggle('hint-error', Boolean(problem));
     }
   }
-
-  // A hint's new words wait while the user has some of its old ones
-  // selected (to copy them, say): swapped under the selection, they'd
-  // vanish. They take over once the selection leaves the hint.
-  const heldHints = new Map(); // hint -> [text, error] waiting
-  function setHint(h, text, error) {
-    const selection = getSelection();
-    if (!selection.isCollapsed && selection.containsNode(h, true)) return void heldHints.set(h, [text, error]);
-    heldHints.delete(h);
-    if (h.textContent !== text) h.textContent = text;
-    h.classList.toggle('hint-error', error);
-  }
-  document.addEventListener('selectionchange', () => {
-    for (const [h, [text, error]] of heldHints) setHint(h, text, error);
-  });
 
   const openIds = () => [...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id);
 
@@ -304,7 +295,8 @@ function setup(root) {
   //
   // A press (the main button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
-  // it's cancelled or opens a context menu (no click follows either), or
+  // it's cancelled or, for a mouse, opens its context menu (no click follows
+  // either), or
   // when a release the page never heard of shows: its pointer moving with
   // no button down before any release (a hovering mouse) or, for a finger
   // or pen (which send a stream of moves while down), 3s without a word
@@ -532,10 +524,10 @@ function setup(root) {
   // its border, the gaps, its hint), with any button or finger, keeps focus
   // in it, so it isn't judged as left. The one exception is a mouse's main
   // button on its hint, which may be starting to select the hint's words:
-  // that press leaves the field (and it's judged, as on any leaving; words
-  // selected in the hint stay until the selection moves on: see setHint),
-  // and if it selects nothing, focus comes back. (A pen on a tablet taps
-  // like a finger: moving focus would bounce its keyboard.)
+  // that press leaves the field (and it's judged, as on any leaving: see
+  // flag for what that does to the words selected), and if it selects
+  // nothing, focus comes back. (A pen on a tablet taps like a finger:
+  // moving focus would bounce its keyboard.)
   form.addEventListener('mousedown', (e) => {
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (!input || input !== document.activeElement || e.target === input) return;
