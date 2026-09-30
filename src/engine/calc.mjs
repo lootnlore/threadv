@@ -49,9 +49,11 @@ const bare = (value) => value.replace(/[$%\s]/g, '');
  * Parse "$1,234.50", "12", 12 or "" into a finite number (NaN if unusable).
  * A comma separates thousands ("1,234.50") or, where it can't, is the
  * decimal point: "12,50", "12,5", "12," (the decimal keypad in many regions
- * has only a comma). Where either could be meant ("0,500", "1.000,50") the
- * text is NaN, not a guess. In a `rate` (no rate reaches a thousand) a
- * single comma is always the decimal point.
+ * has only a comma). A comma that could be either ("0,500", "1.000,50")
+ * makes the text NaN, not a guess. In a `rate` (no rate reaches a thousand)
+ * a single comma is always the decimal point. A dot always is one, as on a
+ * US keyboard: "1.500" is 1.5 (the form, stricter, asks for such an amount
+ * again; see inputProblem).
  */
 export function parseNumber(value, { rate = false } = {}) {
   if (typeof value === 'number') return value;
@@ -91,16 +93,19 @@ export function inputProblem(key, raw, { sellPrice = false } = {}) {
 }
 
 /**
- * Mid-typing, an amount whose comma could still become a thousands
- * separator ("1," "1,2" "1,23" on the way to "1,234"): it isn't read yet.
+ * Mid-typing, an amount whose comma could still turn out to separate
+ * thousands of one in range ("1," "1,2" "1,23" on the way to "1,234"): it
+ * isn't read until the field is left.
  */
-export const stillTyping = (key, raw) => !isRate(key) && /^[-+]?[1-9]\d{0,2},\d{0,2}$/.test(bare(String(raw)));
+export function stillTyping(key, raw) {
+  const lead = /^([1-9]\d{0,2}),\d{0,2}$/.exec(bare(String(raw)))?.[1];
+  return !isRate(key) && lead !== undefined && Number(lead) * 1000 <= LIMITS.money; // "250,5" can't become an amount in range: read now
+}
 
 /** The text with a comma read as the decimal point written as one ("12,50" is "12.50"), so the field shows how it was read. */
 export function withDecimalPoint(key, raw) {
   const text = String(raw);
-  const b = bare(text);
-  return b.includes(',') && !(!isRate(key) && US_THOUSANDS.test(b)) && commaIsDecimal(b, isRate(key)) ? text.replace(',', '.') : text;
+  return commaIsDecimal(bare(text), isRate(key)) ? text.replace(',', '.') : text;
 }
 
 /** Every message a numeric field's hint can switch to, as { text, error }, so the form can keep room for the longest. */

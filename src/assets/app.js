@@ -115,12 +115,15 @@ function setup(root) {
 
   function load() {
     reveal = true;
+    dirty = ''; // whatever was being typed is replaced
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
     const tune = sharedView ? Object.fromEntries(params) : (saved.values ?? {});
-    for (const key of MAIN_KEYS) setValue(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
-    for (const key of TUNE_KEYS) setValue(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
+    // A comma read as the decimal point is shown as one, as when a field is left.
+    const put = (key, value) => setValue(key, typeof DEFAULTS[key] === 'number' ? withDecimalPoint(key, value) : value);
+    for (const key of MAIN_KEYS) put(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
+    for (const key of TUNE_KEYS) put(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
     if (sharedView) {
       setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS);
     } else {
@@ -266,9 +269,12 @@ function setup(root) {
   // redrawn, or the prompt taking its place, mid-press would move the
   // target out from under the pointer and the click would be lost. Nor is a
   // field the press took focus from judged yet: the click may give focus
-  // straight back (its label). A release the page never hears of (a select's
-  // popup, a context menu, a drag or another window took it) or a key press
-  // ends it; a release that makes no click, 250ms on.
+  // straight back (its label). A release that makes no click ends it 250ms
+  // on. A release the page never hears of (a menu, a drag or another window
+  // took it) can't hold things up either: the pointer moving with no button
+  // down, the next first-finger or primary press, the window losing focus,
+  // a select's change (its popup takes the release) or a key (not a
+  // modifier held for a Shift-click) ends every press.
   const presses = new Set(); // pointer ids
   let clickDue = 0; // timer from the last release to its click (or to when none came)
   let held = null; // the render waiting, its options merged
@@ -294,7 +300,11 @@ function setup(root) {
   const afterPresses = (fn) => (pressing() ? afterPress.push(fn) : setTimeout(fn));
   addEventListener('pointerdown', (e) => {
     stopClickTimer(); // a new press: the last release's wait is over
+    if (e.isPrimary) presses.clear(); // no earlier pointer is still down
     presses.add(e.pointerId);
+  }, true);
+  addEventListener('pointermove', (e) => {
+    if (e.buttons === 0 && presses.size) endPresses(); // its release went unheard
   }, true);
   addEventListener('pointerup', (e) => {
     if (!presses.delete(e.pointerId) || presses.size) return;
@@ -311,10 +321,9 @@ function setup(root) {
     stopClickTimer();
     setTimeout(flush);
   }, true);
-  for (const type of ['contextmenu', 'dragstart', 'keydown']) addEventListener(type, endPresses, true);
-  // A select's change comes after its popup took the release (a text field's
-  // comes as focus leaves it, mid-press).
-  addEventListener('change', (e) => e.target.type !== 'text' && endPresses(), true);
+  const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta'];
+  addEventListener('keydown', (e) => !e.repeat && !MODIFIERS.includes(e.key) && endPresses(), true);
+  addEventListener('change', (e) => e.target.tagName === 'SELECT' && endPresses(), true); // a text field's comes at blur, mid-press
   addEventListener('blur', endPresses); // the window's own (a field's blur doesn't bubble)
 
   /**
@@ -334,15 +343,6 @@ function setup(root) {
       held = { save: save || Boolean(held?.save), typing: held?.typing === '' ? '' : typing }; // a commit stays one
       return;
     }
-    // Judged, a comma read as the decimal point is shown as one: "2,50"
-    // becomes "2.50", so a slip meant as 250 can't pass unseen.
-    if (!typing) {
-      for (const key of NUMERIC) {
-        const el = field(key);
-        const text = el && withDecimalPoint(key, el.value);
-        if (el && text !== el.value) el.value = text;
-      }
-    }
     const state = readForm();
     const input = normalizeInputs(state.values);
     fieldBox('ebayCustomRate').hidden = !PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts);
@@ -351,6 +351,7 @@ function setup(root) {
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
     if (typed && (typed.problem || typed.missing || stillTyping(typed.key, state.values[typed.key]))) return;
+    if (dirty) save = true; // a typed value it takes in is the user's edit, whatever asked for this render
     dirty = '';
     rendered = state;
     flag(checks);
@@ -470,9 +471,17 @@ function setup(root) {
   // when the user leaves it.
   form.addEventListener('focusout', (e) => {
     const el = e.target;
-    if (el.type !== 'text' || dirty !== el.name) return;
+    if (el.type !== 'text') return;
     afterPresses(() => {
-      if (dirty === el.name && document.activeElement !== el) render({ save: true });
+      if (document.activeElement === el) return; // not left after all
+      // Left, a comma read as the decimal point is shown as one: "2,50"
+      // becomes "2.50", so a slip meant as 250 can't pass unseen.
+      const pointed = withDecimalPoint(el.name, el.value);
+      if (pointed !== el.value) {
+        el.value = pointed;
+        dirty = el.name;
+      }
+      if (dirty === el.name) render({ save: true });
     });
   });
 

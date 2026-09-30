@@ -651,20 +651,51 @@ if (chromium) {
     await tick(page);
     await settle(page);
     assert.equal(await page.evaluate(() => window.writes), 0);
-    // A press whose release the page never hears (a context menu or another
+    // A press whose release the page never hears (a menu, a drag or another
     // window took it) doesn't hold the results back.
     for (const [why, end, price] of [
-      ['a context menu', () => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })), '30'],
-      ['another window', () => window.dispatchEvent(new FocusEvent('blur')), '31'],
-      ["a select's popup", () => document.querySelector('#f-etsyOffsite').dispatchEvent(new Event('change', { bubbles: true })), '32'],
-      ['a drag', () => document.querySelector('h1').dispatchEvent(new DragEvent('dragstart', { bubbles: true })), '33'],
+      ['the pointer moving with no button down', () => page.evaluate(() => document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 7, buttons: 0, bubbles: true }))), '30'],
+      ['the next primary press', () => page.evaluate(() => {
+        for (const type of ['pointerdown', 'pointerup']) document.querySelector('h1').dispatchEvent(new PointerEvent(type, { pointerId: 1, isPrimary: true, bubbles: true }));
+      }), '31'],
+      ['another window', () => page.evaluate(() => window.dispatchEvent(new FocusEvent('blur'))), '32'],
+      ["a select's popup", () => page.evaluate(() => document.querySelector('#f-etsyOffsite').dispatchEvent(new Event('change', { bubbles: true }))), '33'],
     ]) {
       before = await shown();
       await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, bubbles: true })));
-      await page.evaluate(end);
+      await end();
+      await settle(page);
       await page.fill('#f-price', price);
       await settle(page);
       assert.notEqual(await shown(), before, `results follow the typing after ${why}`);
+    }
+    // A Shift held down for a Shift-click (Windows repeats its keydown)
+    // doesn't end the press.
+    const third = page.locator('.result:nth-child(3)');
+    const id = await third.getAttribute('data-id');
+    const thirdBox = await third.locator('summary').boundingBox();
+    await page.focus('#f-price');
+    await page.keyboard.press('End');
+    await page.keyboard.type('0'); // the order changes
+    await page.mouse.move(thirdBox.x + 20, thirdBox.y + thirdBox.height / 2);
+    await page.mouse.down();
+    await page.keyboard.down('Shift');
+    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', repeat: true, bubbles: true })));
+    await page.waitForTimeout(150);
+    await page.mouse.up();
+    await page.keyboard.up('Shift');
+    await tick(page);
+    assert.equal(await page.locator(`.result[data-id="${id}"] details`).getAttribute('open'), '', 'the Shift-click opened its row');
+    // A Fine-tune value left by clicking a mode tab is saved, though the
+    // tab's own render (not a save) is what takes it in: one held while
+    // typed, and one whose comma is then written as a point.
+    for (const [typed, kept] of [['12..', '12..'], ['1,5', '1.5']]) {
+      await page.getByRole('tab', { name: 'Profit' }).click();
+      await page.fill('#f-other', typed);
+      await page.getByRole('tab', { name: 'Max buy' }).click();
+      await tick(page);
+      assert.equal(await page.inputValue('#f-other'), kept);
+      assert.equal((await saved(page)).values.other, kept, `"${typed}" saved`);
     }
     await context.close();
   });

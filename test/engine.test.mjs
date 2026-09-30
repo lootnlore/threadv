@@ -636,8 +636,8 @@ test('a bad field is named with a short reason, and the hint keeps room for each
 });
 
 test('mid-typing, an amount whose comma may still separate thousands waits; judged, a decimal comma is written as a point', () => {
-  for (const raw of ['1,', '1,2', '1,23', '$12,5', '999,99']) assert.ok(stillTyping('cost', raw), raw);
-  for (const raw of ['1,234', '0,5', '1234,5', '12', '12.5']) assert.ok(!stillTyping('cost', raw), raw);
+  for (const raw of ['1,', '1,2', '1,23', '$12,5', '100,99']) assert.ok(stillTyping('cost', raw), raw);
+  for (const raw of ['1,234', '0,5', '101,5', '250,50', '1234,5', '12', '12.5']) assert.ok(!stillTyping('cost', raw), `${raw}: its comma can't separate thousands of an amount in range`);
   assert.ok(!stillTyping('tiktokRate', '7,5'), 'a rate comma is always the decimal point');
   assert.equal(withDecimalPoint('cost', '2,50'), '2.50');
   assert.equal(withDecimalPoint('cost', '$ 12,5'), '$ 12.5');
