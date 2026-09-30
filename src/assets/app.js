@@ -284,72 +284,56 @@ function setup(root) {
   }
 
   // ---- presses ----
-  // Painting the output (the verdict, the list, the share button) waits
-  // while the user presses anywhere it could move (all but this calculator's
-  // tabs and form, which it never moves), and until the click the press
-  // makes has landed: a list redrawn, or the prompt taking its place,
-  // mid-press would move the target out from under the pointer, and the
-  // click would be lost. Only painting waits: what the user typed is judged,
-  // flagged and saved at once. A press ends with its own release and the
-  // click that makes (or 250ms on, if none comes), its pointer cancelled or
-  // seen with no button down, or at once when it can no longer click: a
-  // context menu or a drag took it, or another window. Nothing holds
-  // painting for good: a finger or pen (nothing to see of it after a
-  // release the page missed) ends after 3s without a word from it, a mouse
-  // (whose missed release shows when it next moves) after 30s.
-  const inputSide = root.querySelector('.calc-input');
-  const presses = new Map(); // pointer id -> { limit (ms of silence), heard (when last) }
-  let clickDue = 0; // timer from the last release to its click (or to when none came)
-  let silence = 0; // timer for the next press to fall silent
-  const pressing = () => presses.size > 0 || clickDue !== 0;
-  function stopClickTimer() {
-    clearTimeout(clickDue);
-    clickDue = 0;
-  }
-  function endPresses() {
-    presses.clear();
-    stopClickTimer();
-    clearTimeout(silence);
-    paint();
-  }
-  // Ends presses silent past their limit, then waits for the next one due.
-  function checkSilence() {
-    clearTimeout(silence);
-    const now = performance.now();
-    for (const [id, p] of presses) if (now - p.heard >= p.limit) presses.delete(id);
-    if (!presses.size) return endPresses();
-    const due = Math.min(...[...presses.values()].map((p) => p.heard + p.limit - now));
-    silence = setTimeout(checkSilence, due);
-  }
+  // A click lands where it was pressed only if nothing moves in between. Two
+  // things could move the output under a press, and each waits for that
+  // press's click (and its handlers), or 250ms after a release that makes
+  // none, and at most 3s (a release the page never heard of, taken by a
+  // menu or another window, can delay it no longer): judging a field the
+  // press took focus from (the prompt may take the list's place), and a
+  // keystroke's render still due when the press began. Anything else that
+  // renders (a tab, a checkbox) does so from the click itself, once the
+  // press is over.
+  const inputSide = root.querySelector('.calc-input'); // tabs and form: nothing renders under them
+  let down = null; // the press under way: { id, then: what waits for it, drop() }
   addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || inputSide.contains(e.target)) return; // a right press makes no click
-    stopClickTimer(); // a new press: the last release's wait is over
-    presses.set(e.pointerId, { limit: e.pointerType === 'mouse' ? 30000 : 3000, heard: performance.now() });
-    checkSilence();
+    if (e.button !== 0) return; // a right or middle press makes no click
+    // A new press: what still waited for the last one waits for this one.
+    const waiting = down?.drop?.() ?? [];
+    down = { id: e.pointerId, then: [] };
+    for (const fn of waiting) afterPress(fn);
+    if (!dirty || inputSide.contains(e.target)) return;
+    renderSoon.cancel(); // the keystroke's render, due mid-press
+    const key = dirty;
+    afterPress(() => dirty === key && render({ save: true, typing: key }));
   }, true);
-  addEventListener('pointermove', (e) => {
-    const p = presses.get(e.pointerId);
-    if (!p) return;
-    if (e.buttons) p.heard = performance.now(); // its deadline moves on at the next check
-    else if (presses.delete(e.pointerId) && !presses.size) endPresses(); // its release went unheard
-  }, true);
-  addEventListener('pointerup', (e) => {
-    if (!presses.delete(e.pointerId) || presses.size) return;
-    clearTimeout(silence); // all up: now it's the click that's awaited
-    clickDue = setTimeout(endPresses, 250);
-  }, true);
-  addEventListener('pointercancel', (e) => {
-    if (presses.delete(e.pointerId) && !presses.size) endPresses();
-  }, true);
-  // The click the last release makes (a keyboard's has no clicks to count)
-  // has landed: paint after its own handlers.
-  addEventListener('click', (e) => {
-    if (!clickDue || e.detail === 0) return;
-    stopClickTimer();
-    setTimeout(endPresses);
-  }, true);
-  for (const type of ['contextmenu', 'dragstart']) addEventListener(type, () => pressing() && endPresses(), true);
-  addEventListener('blur', () => pressing() && endPresses()); // the window's own (a field's blur doesn't bubble)
+  /** Runs `fn` once the press under way is over (see above), or a task from now if none is. */
+  function afterPress(fn) {
+    if (!down) return void setTimeout(fn);
+    const press = down;
+    press.then.push(fn);
+    if (press.then.length > 1) return;
+    const stop = new AbortController();
+    press.drop = () => {
+      stop.abort();
+      clearTimeout(cap);
+      return press.then.splice(0);
+    };
+    const done = () => {
+      const fns = press.drop();
+      if (down === press) down = null;
+      setTimeout(() => fns.forEach((f) => f())); // after the click's own handlers
+    };
+    const on = (type, fn2) => addEventListener(type, fn2, { capture: true, signal: stop.signal });
+    const cap = setTimeout(done, 3000);
+    on('click', (e) => e.detail && done()); // a keyboard's click (no clicks counted) isn't this press's
+    on('pointerup', (e) => e.pointerId === press.id && setTimeout(done, 250));
+    on('pointercancel', (e) => e.pointerId === press.id && done());
+  }
+  for (const type of ['pointerup', 'pointercancel']) {
+    addEventListener(type, (e) => {
+      if (down?.id === e.pointerId && !down.then.length) down = null; // nothing waits for it
+    }, true);
+  }
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
@@ -360,8 +344,8 @@ function setup(root) {
    * place of the results, nothing saved. It stays `dirty` and is judged
    * when the user leaves the field, presses Enter or uses another control
    * (a tab, a checkbox), which pass `save` for it. A usable value shows its
-   * results at once. The output is painted as soon as no press is under way
-   * (see presses), and the list redrawn only when the result changed.
+   * results at once. The list is redrawn only when the result changed; a
+   * press can hold back only what it caused (see presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
@@ -393,7 +377,7 @@ function setup(root) {
   }
 
   function paint() {
-    if (pressing() || !view) return; // painted when the press is over
+    if (!view) return;
     // Already on screen, a repaint would only reset a selection or a reading position.
     const same = painted && (view.prompt ? view.prompt === painted.prompt : view.link === painted.link);
     if (!same) {
@@ -500,13 +484,14 @@ function setup(root) {
     if (e.target.type !== 'text') render({ save: true });
   });
 
-  // A field left half-typed is judged once focus has moved on. Losing focus
-  // to another window or tab isn't leaving: the field stays the active
-  // element, and is judged when the user leaves it.
+  // A field left half-typed is judged once focus has moved on, and after
+  // the click of a press that took it (see presses). Losing focus to another
+  // window or tab isn't leaving: the field stays the active element, and is
+  // judged when the user leaves it.
   form.addEventListener('focusout', (e) => {
     const el = e.target;
     if (el.type !== 'text') return;
-    setTimeout(() => {
+    afterPress(() => {
       if (document.activeElement === el) return;
       showPoint(el); // the same value to the form (see readForm): nothing to redraw
       if (dirty === el.name) render({ save: true });
@@ -514,9 +499,10 @@ function setup(root) {
   });
   // Pressing anywhere on the field being typed in (its label, its $ or %,
   // its border, the gap between them), with any button, keeps focus in it,
-  // so it isn't judged as left. Its hint stays selectable.
+  // so it isn't judged as left. Its hint is text to read and select: a
+  // press there leaves the field.
   form.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.hint [data-live]')) return; // its words (not the blank room around them)
+    if (e.target.closest('.hint')) return;
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (input && input === document.activeElement && e.target !== input) e.preventDefault();
   });
@@ -552,10 +538,10 @@ function setup(root) {
   let shareReset;
   // Shows `message` on the button for a moment and has it read out (screen
   // readers don't announce a button's label changing; a status region is).
-  function sayOnShare(message, spoken = message) {
+  function sayOnShare(message, status = message) {
     clearTimeout(shareReset); // one timer, so a second click never has its message cut short by the first
     shareBtn.textContent = message;
-    shareStatus.textContent = spoken;
+    shareStatus.textContent = status;
     shareReset = setTimeout(() => {
       shareBtn.textContent = SHARE_LABEL;
       shareStatus.textContent = '';
@@ -566,14 +552,8 @@ function setup(root) {
       // A field left half-typed is judged first, so the link is never for
       // numbers no longer in the form.
       if (dirty) render({ save: true });
-      paint();
-      if (!view || view.prompt) {
-        // Nothing to share. The prompt has taken the results' place (and
-        // focus) or, while a press elsewhere holds painting, the button says so.
-        if (!shareBtn.hidden) sayOnShare('Nothing to share yet', `Nothing copied. ${new DOMParser().parseFromString(view?.prompt ?? '', 'text/html').body.textContent}`);
-        return;
-      }
-      const url = `${location.origin}${location.pathname}${view.link}`; // the numbers as judged, whatever is on screen
+      if (!view || view.prompt) return; // nothing to share: the prompt has taken the results' place (and focus)
+      const url = `${location.origin}${location.pathname}${view.link}`;
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);
