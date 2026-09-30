@@ -600,6 +600,20 @@ if (chromium) {
     await settle(tp);
     assert.deepEqual(await tp.$$eval('.result details[open]', (d) => d.map((el) => el.closest('.result').dataset.id)), [first], 'the tapped row opened');
     assert.notEqual(await tp.getAttribute('.result:first-child', 'data-id'), first, 'and the list then re-ranked for 400');
+    // A tap on the hint of the field being typed in keeps focus throughout
+    // (a finger can't be starting to select it).
+    await tp.fill('#f-price', '12..');
+    await tp.evaluate(() => {
+      window.left = 0;
+      document.querySelector('#f-price').addEventListener('focusout', () => window.left++);
+    });
+    const hintBox = await tp.locator('#h-price').boundingBox();
+    const tap = { x: hintBox.x + 10, y: hintBox.y + hintBox.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [tap] });
+    await tp.waitForTimeout(60);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual(await tp.evaluate(() => [window.left, document.activeElement.id, document.querySelector('#f-price').getAttribute('aria-invalid')]), [0, 'f-price', null]);
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -675,6 +689,7 @@ if (chromium) {
       }],
       ['a right press on its label', () => page.locator('label[for="f-price"]').click({ button: 'right' })],
       ['a click on its hint (selecting nothing)', () => slowClick(page, page.locator('#h-price'))],
+      ['a right press on its hint', () => page.locator('#h-price').click({ button: 'right' })],
     ]) {
       await page.fill('#f-price', '12..');
       await press();
@@ -684,22 +699,27 @@ if (chromium) {
       assert.equal(await shown(), before);
     }
     // Its hint's words can be selected, dragging from past their end as
-    // usual; that leaves the field, and the selection survives the field
-    // being judged after it (a value read only when left, "1,5").
-    await page.fill('#f-price', '1,5');
+    // usual. That isn't leaving the field: a half-typed value isn't judged
+    // (which would swap those words for an error) until the user's next move.
+    await page.fill('#f-price', '12..');
     const line = await page.locator('#h-price [data-live]').evaluate((el) => {
       const r = document.createRange();
       r.selectNodeContents(el);
       const b = r.getClientRects()[0]; // the words' first line
       return { left: b.left, right: b.right, y: b.top + b.height / 2 };
     });
+    assert.equal(await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest('#h-price')), [line.right + 6, line.y]), true, 'the drag starts on the hint');
     await page.mouse.move(line.right + 6, line.y);
     await page.mouse.down();
     await page.mouse.move(line.left + 1, line.y, { steps: 5 });
     await page.mouse.up();
     await settle(page);
-    assert.equal(await page.inputValue('#f-price'), '1.5', 'the field was left and judged');
-    assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '', "the hint's words still selected");
+    assert.equal(await page.evaluate(() => getSelection().toString().trim()), 'What it will sell for', "the hint's words selected");
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, 'not judged yet');
+    await page.getByRole('tab', { name: 'Profit' }).click(); // the next move
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true', 'judged then');
+    await page.fill('#f-price', '40');
+    await settle(page);
     // A click beside a wrapped hint's short line gives focus back too.
     await page.locator('.tune > summary').click();
     await page.fill('#f-taxRate', '12..');
@@ -857,7 +877,7 @@ if (chromium) {
       await page.fill('#f-price', '12..');
     };
     // A mouse press whose release the page never heard (a menu took it)
-    // doesn't hold a later Tab's judgement, nor a keystroke's result...
+    // doesn't hold a later Tab's judgement...
     await pointer('pointerdown', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0 });
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
@@ -881,17 +901,42 @@ if (chromium) {
     // it opens a context menu (a Ctrl-click on a Mac: no click follows).
     await halfType();
     await pressFrom({ pointerId: 9, pointerType: 'mouse' });
-    await pointer('pointerup', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0 });
-    await page.waitForTimeout(150);
-    assert.equal(await judged(), false, 'still waiting for a click');
-    await page.waitForTimeout(250);
-    assert.equal(await judged(), true, 'none came: over');
+    const afterRelease = await page.evaluate(async () => {
+      const at = (ms) => new Promise((r) => setTimeout(r, ms));
+      const flagged = () => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true';
+      document.querySelector('h1').dispatchEvent(new PointerEvent('pointerup', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
+      await at(150);
+      const early = flagged();
+      await at(250);
+      return [early, flagged()];
+    });
+    assert.deepEqual(afterRelease, [false, true], 'waits 250ms for a click; none came: over');
+    // Released, a hovering pointer (a pen before its tap's click) doesn't end
+    // the press: its click is still coming.
+    await halfType();
+    await pressFrom({ pointerId: 9, pointerType: 'pen' });
+    const hovering = await page.evaluate(async () => {
+      const h1 = document.querySelector('h1');
+      const init = { pointerId: 9, pointerType: 'pen', isPrimary: true, bubbles: true };
+      h1.dispatchEvent(new PointerEvent('pointerup', { ...init, button: 0 }));
+      h1.dispatchEvent(new PointerEvent('pointermove', { ...init, buttons: 0 }));
+      await new Promise((r) => setTimeout(r, 50));
+      const early = document.querySelector('#f-price').getAttribute('aria-invalid');
+      h1.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true }));
+      await new Promise((r) => setTimeout(r, 50));
+      return [early, document.querySelector('#f-price').getAttribute('aria-invalid')];
+    });
+    assert.deepEqual(hovering, [null, 'true'], 'judged after the click, not at the hover');
     await halfType();
     await pressFrom({ pointerId: 9, pointerType: 'mouse' });
-    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
+    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 2, bubbles: true })));
     await tick(page);
     await tick(page);
-    assert.equal(await judged(), true, 'a context menu ends it');
+    assert.equal(await judged(), false, "a right click's (or the Menu key's) context menu isn't this press's");
+    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 0, bubbles: true })));
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), true, 'its own (a Ctrl-click) ends it');
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
     await halfType();
