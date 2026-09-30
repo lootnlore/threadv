@@ -594,39 +594,70 @@ if (chromium) {
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
     const shown = () => verdict(page);
-    // Share with a decimal comma still in the field: the link has the point.
+    // A press at a person's speed (focus leaves the field at mousedown, the
+    // click comes ~90ms later).
+    const slowClick = async (locator) => {
+      await locator.scrollIntoViewIfNeeded();
+      const b = await locator.boundingBox();
+      await page.mouse.move(b.x + Math.min(8, b.width / 2), b.y + b.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(90);
+      await page.mouse.up();
+      await tick(page);
+    };
+    const share = page.getByRole('button', { name: 'Copy link to this result' });
+    // Share with the field just typed in: the link is for what it holds
+    // (a decimal comma as a point)...
     await page.fill('#f-price', '2,50');
-    await page.getByRole('button', { name: 'Copy link to this result' }).click();
+    await slowClick(share);
     await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
     const link = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(new URLSearchParams(new URL(link).hash.slice(1)).get('price'), '2.50');
-    await tick(page);
     assert.equal(await page.inputValue('#f-price'), '2.50', 'shown as a point once left');
-    // Enter takes a typed value in too: the point shows, the caret where it was.
+    // ...and with it half-typed, nothing is copied: the prompt shows instead.
+    await page.evaluate(() => navigator.clipboard.writeText('untouched'));
+    await page.fill('#f-price', '12..');
+    await slowClick(share);
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'untouched');
+    assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.');
+    // A click that changes nothing repaints nothing: a word in the prompt
+    // can be double-clicked (selected), not wiped by a repaint.
+    await page.locator('[data-verdict] strong').dblclick({ position: { x: 10, y: 9 } }); // on "Check"
+    assert.equal(await page.evaluate(() => getSelection().toString().trim()), 'Check', 'the word selected');
+    await page.evaluate(() => document.querySelector('#f-cost').dispatchEvent(new Event('input', { bubbles: true }))); // a render with the same prompt
+    await settle(page);
+    assert.equal(await page.evaluate(() => getSelection().toString().trim()), 'Check', 'still selected after a render that changed nothing');
+    // Enter takes a typed value in too: the point shows, the caret where it
+    // was (before the comma, or after it, where typing goes on after the point).
     await page.fill('#f-price', '2,50');
     await page.keyboard.press('Home');
     await page.keyboard.press('ArrowRight');
     await page.keyboard.press('Enter');
     const entered = await page.evaluate(() => {
       const el = document.querySelector('#f-price');
-      return { value: el.value, caret: el.selectionStart, focused: document.activeElement === el };
+      return { value: el.value, caret: [el.selectionStart, el.selectionEnd], focused: document.activeElement === el };
     });
-    assert.deepEqual(entered, { value: '2.50', caret: 1, focused: true });
+    assert.deepEqual(entered, { value: '2.50', caret: [1, 1], focused: true });
+    await settle(page);
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '2.50');
+    await page.fill('#f-price', '12,');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('5');
+    assert.equal(await page.inputValue('#f-price'), '12.5', 'the point stays when typing goes on');
     await page.fill('#f-price', '40');
     await settle(page);
     // A click on the field's own label gives it focus straight back: a
     // half-typed value isn't judged, and a usable one shows.
     let before = await shown();
     await page.evaluate(() => scrollTo(0, 0)); // the label clear of the sticky header
-    await page.fill('#f-price', '12..');
-    const label = await page.locator('label[for="f-price"]').boundingBox();
-    await page.mouse.move(label.x + 5, label.y + label.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(90); // a click's press, at a person's speed
-    await page.mouse.up();
-    await settle(page);
-    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, 'not left, so not judged');
-    assert.equal(await shown(), before);
+    for (const part of ['label[for="f-price"]', '.field:has(#f-price) .affix']) {
+      await page.fill('#f-price', '12..');
+      await slowClick(page.locator(part));
+      await settle(page);
+      assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, `${part}: not left, so not judged`);
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
+      assert.equal(await shown(), before);
+    }
     await page.fill('#f-price', '40');
     await settle(page);
     await page.keyboard.press('End');
@@ -659,14 +690,19 @@ if (chromium) {
     assert.match(seen[4], /\$1,174\.77/, 'the result for $1,234');
     // Tabbing off a button isn't leaving a typed field: nothing is saved.
     await page.locator('.tune > summary').click();
-    await page.evaluate(() => {
-      window.writes = 0;
-      const write = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (...args) {
-        window.writes++;
-        return write.apply(this, args);
-      };
-    });
+    // Counts saves from now on (installed once).
+    const countWrites = () =>
+      page.evaluate(() => {
+        window.writes = 0;
+        if (window.counting) return;
+        window.counting = true;
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (...args) {
+          window.writes++;
+          return write.apply(this, args);
+        };
+      });
+    await countWrites();
     await page.focus('[data-reset]');
     await page.keyboard.press('Tab');
     await tick(page);
@@ -699,9 +735,9 @@ if (chromium) {
     await tick(page);
     assert.equal(await page.locator(`.result[data-id="${id}"] details`).getAttribute('open'), '', 'the Shift-click opened its row');
     // During a press only painting waits (what was typed reaches the address
-    // bar at once), and only while the press lasts: a press ends by its own
-    // pointer, a click landing anywhere, or 3s of silence; a right press
-    // (no click) holds nothing.
+    // bar at once), and only while the press lasts: it ends by its own
+    // pointer, or for a finger or pen, 3s of silence; a right press (no
+    // click) holds nothing.
     const press = (type, init) =>
       page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new (t === 'click' ? MouseEvent : PointerEvent)(t, { bubbles: true, isPrimary: true, ...i })), [type, init]);
     let price = 50;
@@ -716,24 +752,37 @@ if (chromium) {
     assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), String(price), 'the typed value is saved meanwhile');
     await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
     assert.equal(await held(), true, "a hovering mouse doesn't end a finger's press");
-    await press('click', {});
-    assert.equal(await held(), false, 'a click that lands settles it');
+    await press('click', { detail: 0 });
+    assert.equal(await held(), true, "a keyboard's click doesn't end it");
+    await page.waitForTimeout(3100);
+    assert.equal(await held(), false, 'nothing heard from the finger for 3s ends it');
+    // Nor, in the moment between a release and its click, does a keyboard's.
+    const beforeRelease = await shown();
+    const early = await page.evaluate(async () => {
+      const h1 = document.querySelector('h1');
+      for (const type of ['pointerdown', 'pointerup']) h1.dispatchEvent(new PointerEvent(type, { pointerId: 8, pointerType: 'pen', isPrimary: true, bubbles: true }));
+      h1.dispatchEvent(new MouseEvent('click', { detail: 0, bubbles: true }));
+      const price = document.querySelector('#f-price');
+      price.value = '77';
+      price.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150)); // past the typing delay, before the release's wait ends
+      return document.querySelector('[data-verdict]').innerText.replace(/\s+/g, ' ');
+    });
+    assert.equal(early, beforeRelease, "still waiting for the release's click");
     await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
     await press('pointerdown', { pointerId: 6, pointerType: 'touch' });
     await press('pointerup', { pointerId: 6, pointerType: 'touch' });
-    await page.waitForTimeout(300); // past the wait for a click
-    assert.equal(await held(), true, "a finger lifting doesn't end the mouse's press");
-    await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
-    assert.equal(await held(), false, 'its own move with no button down does');
-    await press('pointerdown', { pointerId: 7, pointerType: 'pen' });
-    assert.equal(await held(), true);
+    await press('click', { detail: 1 });
+    assert.equal(await held(), true, "a finger's tap doesn't end the mouse's press");
     await page.waitForTimeout(3100);
-    assert.equal(await held(), false, 'nothing heard from it for 3s ends it');
+    assert.equal(await held(), true, 'a mouse held still stays pressed');
+    await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+    assert.equal(await held(), false, 'its own move with no button down ends it');
     await press('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2 });
     assert.equal(await held(), false, 'a right press holds nothing');
     await press('pointerup', { pointerId: 1, pointerType: 'mouse', button: 2 });
     // A plain tab switch saves nothing (another open tab's settings stay)...
-    await page.evaluate(() => (window.writes = 0));
+    await countWrites();
     await page.getByRole('tab', { name: 'List price' }).click();
     await page.getByRole('tab', { name: 'Profit' }).click();
     await settle(page);
