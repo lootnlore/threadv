@@ -288,20 +288,21 @@ function setup(root) {
 
   // ---- presses ----
   // A click lands where it was pressed only if nothing moves in between. Two
-  // things could move the output under a press, and wait for it: judging a
+  // things could change what's under a press, and wait for it: judging a
   // field the press took focus from (the prompt may take the list's place),
-  // and a keystroke's render still due when the press began. Anything else
-  // that renders (a tab, a checkbox) does so from the click itself.
+  // and a keystroke's render still due when the press began (on the output,
+  // or on a hint, whose words it may swap). Anything else that renders (a
+  // tab, a checkbox) does so from the click itself.
   //
   // A press (the main button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
   // it's cancelled or, for a mouse, opens its context menu (no click follows
-  // either), or
-  // when a release the page never heard of shows: its pointer moving with
-  // no button down before any release (a hovering mouse) or, for a finger
-  // or pen (which send a stream of moves while down), 3s without a word
-  // from it. A mouse held still is a slow click, and keeps its press.
-  const inputSide = root.querySelector('.calc-input'); // tabs and form: nothing renders under them
+  // either), or when a release the page never heard of shows: its pointer
+  // moving with no button down before any release (a hovering mouse) or,
+  // for a finger or pen (which send a stream of moves while down), 3s
+  // without a word from it. A mouse held still is a slow click, and keeps
+  // its press.
+  const inputSide = root.querySelector('.calc-input'); // tabs and form: renders change nothing under them but hints
   let down = null; // the press under way: { id, type, then: what waits for it, end(), movingFocus }
   addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return; // a right or middle press makes no click
@@ -341,7 +342,7 @@ function setup(root) {
     // cancelled, or falls silent.)
     on('contextmenu', (c) => press.type === 'mouse' && c.button === 0 && (c.pointerId ?? press.id) === press.id && press.end());
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
-    if (!dirty || inputSide.contains(e.target)) return;
+    if (!dirty || (inputSide.contains(e.target) && !e.target.closest('.hint'))) return;
     renderSoon.cancel(); // the keystroke's render, due mid-press
     const key = dirty;
     press.then.push(() => dirty === key && render({ save: true, typing: key }));
@@ -381,7 +382,12 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) return;
+    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) {
+      // Not judged yet, but an error shown for the value before no longer
+      // describes it: gone at the first edit (a new one comes when it's left).
+      if (field(typing).getAttribute('aria-invalid')) flag([{ key: typing, problem: '', missing: false }]);
+      return;
+    }
     dirty = '';
     rendered = state;
     flag(checks);
@@ -534,10 +540,19 @@ function setup(root) {
     const selecting = e.target.closest('.hint') && e.button === 0 && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
     const caret = caretOf(input);
-    down.then.push(() => {
-      if (document.activeElement !== document.body || !getSelection().isCollapsed) return; // it selected something
+    const giveBack = () => {
       input.focus({ preventScroll: true });
       input.setSelectionRange(...caret);
+    };
+    const leftForNothing = () => document.activeElement === document.body && getSelection().isCollapsed;
+    // First of what waits for the press, while its words are as it saw them
+    // (a keystroke's render may be waiting too, and change them).
+    down.then.unshift(() => {
+      if (leftForNothing()) return giveBack(); // before the field's judgement: an empty click isn't leaving
+      // It selected something, but what waits after this (the field's
+      // judgement, a keystroke's render) may swap those words for true ones:
+      // then nothing is selected, and focus comes back too.
+      setTimeout(() => leftForNothing() && giveBack());
     });
   });
 

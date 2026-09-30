@@ -604,8 +604,14 @@ if (chromium) {
     // (a finger can't be starting to select it).
     await tp.fill('#f-price', '12..');
     await tp.evaluate(() => {
-      window.left = 0;
-      document.querySelector('#f-price').addEventListener('focusout', () => window.left++);
+      const count = { left: 0 };
+      const input = document.querySelector('#f-price');
+      const onLeave = () => count.left++;
+      input.addEventListener('focusout', onLeave);
+      window.stopCounting = () => {
+        input.removeEventListener('focusout', onLeave);
+        return count.left;
+      };
     });
     const hintBox = await tp.locator('#h-price').boundingBox();
     const tap = { x: hintBox.x + 10, y: hintBox.y + hintBox.height / 2 };
@@ -613,7 +619,7 @@ if (chromium) {
     await tp.waitForTimeout(60);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
-    assert.deepEqual(await tp.evaluate(() => [window.left, document.activeElement.id, document.querySelector('#f-price').getAttribute('aria-invalid')]), [0, 'f-price', null]);
+    assert.deepEqual(await tp.evaluate(() => [window.stopCounting(), document.activeElement.id, document.querySelector('#f-price').getAttribute('aria-invalid')]), [0, 'f-price', null]);
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -701,8 +707,9 @@ if (chromium) {
     // A hint's words can be selected, dragging from past their end as usual.
     // That leaves the field, which is judged as on any leaving, and the hint
     // always says what's true of it: words selected stay selected while that
-    // doesn't change them (an error judged again, a value that's fine, "1,5"),
-    // and go with them when it does (a different error, an emptied price).
+    // doesn't change them (an error still true, a value that's fine, "1,5"),
+    // and go when it does (a different error, an emptied price), focus then
+    // coming back to the field.
     const hintLines = (id) =>
       page.locator(`#${id} [data-live]`).evaluate((el) => {
         const r = document.createRange();
@@ -728,22 +735,22 @@ if (chromium) {
     };
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
-    await page.locator('#f-price').click(); // back in, the error showing
-    await page.keyboard.type('.'); // "12...": the same error, judged again on leaving
+    await page.locator('#f-price').click(); // back in, the error showing, nothing edited
     assert.equal(await dragHint(), 'Write it like 1,234.50.', "the error's words selected");
     assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
     await page.locator('#f-price').click();
     await page.fill('#f-price', '99999999'); // a different error, not shown while typed
     await dragHint();
     assert.equal(await hintText(), 'Enter $0 to $100,000.', 'the hint says the new error at once');
-    await deselect();
+    const back = () => page.evaluate(() => [document.activeElement.id, getSelection().toString()]);
+    assert.deepEqual(await back(), ['f-price', ''], 'the words selected went, so focus came back');
     await page.fill('#f-price', '40');
     await settle(page);
     await page.fill('#f-price', ''); // emptied
     await dragHint();
     assert.equal(await verdict(page), 'Enter a sell price to see results.', 'judged');
     assert.equal(await hintText(), 'Needed to see results.', 'and its hint says so');
-    await deselect();
+    assert.deepEqual(await back(), ['f-price', '']);
     await page.fill('#f-price', '40');
     await settle(page);
     before = await shown();
@@ -764,6 +771,34 @@ if (chromium) {
     await settle(page);
     assert.equal(await selected(), 'What', 'the word double-clicked');
     await deselect();
+    // With a half-typed value the second click leaves the field: it's judged,
+    // the word gives way to the error, and focus comes back.
+    await page.locator('#f-price').click();
+    await page.fill('#f-price', '12..');
+    await page.mouse.dblclick(wordAt.left + 8, wordAt.y);
+    await settle(page);
+    assert.deepEqual([await hintText(), ...(await back())], ['Write it like 1,234.50.', 'f-price', '']);
+    // An error shown for a value no longer describes it once that's edited:
+    // gone at the first keystroke's render (a new one comes when the field is left).
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Backspace');
+    await settle(page);
+    assert.deepEqual([await page.locator('#f-price').getAttribute('aria-invalid'), await hintText()], [null, 'What it will sell for']);
+    // A keystroke's render due when a press on the hint begins waits for it:
+    // the words being dragged over aren't swapped mid-press.
+    await page.keyboard.type('12..');
+    await page.locator('#f-price').press('Tab');
+    await page.locator('#f-price').click();
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('4'); // fixes it: its render (the hint back to its own words) is due
+    await page.mouse.move(wordAt.left + 4, wordAt.y);
+    await page.mouse.down();
+    await page.waitForTimeout(150);
+    const midPress = await hintText();
+    await page.mouse.up();
+    await settle(page);
+    assert.equal(midPress, 'Write it like 1,234.50.', 'unchanged under the press');
+    assert.equal(await hintText(), 'What it will sell for', 'then updated');
     // A pen's tap on the hint keeps focus and judges nothing (a pen on a
     // tablet taps like a finger: moving focus would bounce its keyboard).
     await page.fill('#f-price', '12..');
