@@ -263,12 +263,6 @@ if (chromium) {
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), null);
     assert.equal(await page.locator('#h-cost').innerText(), 'Item cost');
     assert.match(await verdict(page), /Poshmark: \$23\.50 profit/, '$40 − $8 fee − $8.50 cost');
-    await page.fill('#f-price', '2,50');
-    await page.locator('#f-price').press('Enter'); // or once Enter takes it in
-    assert.equal(await page.inputValue('#f-price'), '2.50');
-    await settle(page);
-    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '2.50');
-    await page.fill('#f-price', '40');
     await page.locator('.tune > summary').click();
     await page.fill('#f-tiktokRate', 'abc');
     await page.locator('#f-tiktokRate').press('Tab');
@@ -608,6 +602,16 @@ if (chromium) {
     assert.equal(new URLSearchParams(new URL(link).hash.slice(1)).get('price'), '2.50');
     await tick(page);
     assert.equal(await page.inputValue('#f-price'), '2.50', 'shown as a point once left');
+    // Enter takes a typed value in too: the point shows, the caret where it was.
+    await page.fill('#f-price', '2,50');
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const entered = await page.evaluate(() => {
+      const el = document.querySelector('#f-price');
+      return { value: el.value, caret: el.selectionStart, focused: document.activeElement === el };
+    });
+    assert.deepEqual(entered, { value: '2.50', caret: 1, focused: true });
     await page.fill('#f-price', '40');
     await settle(page);
     // A click on the field's own label gives it focus straight back: a
@@ -674,47 +678,32 @@ if (chromium) {
     await tick(page);
     await settle(page);
     assert.equal(await saved(page), null, 'nothing saved after Reset');
-    // A press whose release the page never hears (a menu, a drag or another
-    // window took it) doesn't hold the results back.
-    for (const [why, end, price] of [
-      ['the pointer moving with no button down', () => page.evaluate(() => document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 7, buttons: 0, bubbles: true }))), '30'],
-      ['the next primary press', () => page.evaluate(() => {
-        for (const type of ['pointerdown', 'pointerup']) document.querySelector('h1').dispatchEvent(new PointerEvent(type, { pointerId: 1, isPrimary: true, bubbles: true }));
-      }), '31'],
-      ['another window', () => page.evaluate(() => window.dispatchEvent(new FocusEvent('blur'))), '32'],
-      ["a select's popup", () => page.evaluate(() => document.querySelector('#f-etsyOffsite').dispatchEvent(new Event('change', { bubbles: true }))), '33'],
-    ]) {
-      before = await shown();
-      await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, bubbles: true })));
-      await end();
-      await settle(page);
-      await page.fill('#f-price', price);
-      await settle(page);
-      assert.notEqual(await shown(), before, `results follow the typing after ${why}`);
-    }
-    // A Shift held down for a Shift-click (Windows repeats its keydown), or
-    // a key held since before the press, doesn't end the press.
+    // Keys don't end a press: a Shift held for a Shift-click (Windows
+    // repeats its keydown), or a key held since before it.
     const third = page.locator('.result:nth-child(3)');
     const id = await third.getAttribute('data-id');
-    const thirdBox = await third.locator('summary').boundingBox();
     await page.focus('#f-price');
     await page.keyboard.press('End');
+    await third.scrollIntoViewIfNeeded();
+    const thirdBox = await third.locator('summary').boundingBox(); // measured after any scrolling
     await page.keyboard.type('0'); // the order changes
     await page.mouse.move(thirdBox.x + 20, thirdBox.y + thirdBox.height / 2);
     await page.mouse.down();
     await page.keyboard.down('Shift');
     await page.evaluate(() => {
-      for (const key of ['Shift', 'a']) document.dispatchEvent(new KeyboardEvent('keydown', { key, repeat: true, bubbles: true })); // held before the press
+      for (const key of ['Shift', 'a']) document.dispatchEvent(new KeyboardEvent('keydown', { key, repeat: true, bubbles: true }));
     });
     await page.waitForTimeout(150);
     await page.mouse.up();
     await page.keyboard.up('Shift');
     await tick(page);
     assert.equal(await page.locator(`.result[data-id="${id}"] details`).getAttribute('open'), '', 'the Shift-click opened its row');
-    // A press ends only by its own pointer: a mouse hovering, or a finger
-    // lifting, doesn't end a pen's or the mouse's press. A right press
+    // During a press only painting waits (what was typed reaches the address
+    // bar at once), and only while the press lasts: a press ends by its own
+    // pointer, a click landing anywhere, or 3s of silence; a right press
     // (no click) holds nothing.
-    const press = (type, init) => page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new PointerEvent(t, { bubbles: true, ...i })), [type, init]);
+    const press = (type, init) =>
+      page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new (t === 'click' ? MouseEvent : PointerEvent)(t, { bubbles: true, isPrimary: true, ...i })), [type, init]);
     let price = 50;
     const held = async () => {
       before = await shown();
@@ -722,23 +711,35 @@ if (chromium) {
       await settle(page);
       return (await shown()) === before;
     };
-    await press('pointerdown', { pointerId: 5, pointerType: 'touch', isPrimary: true });
+    await press('pointerdown', { pointerId: 5, pointerType: 'touch' });
+    assert.equal(await held(), true, 'painting waits for a finger');
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), String(price), 'the typed value is saved meanwhile');
     await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
-    assert.equal(await held(), true, "a hovering mouse does not end a finger's press");
-    await press('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
-    await press('pointerdown', { pointerId: 6, pointerType: 'touch', isPrimary: true });
+    assert.equal(await held(), true, "a hovering mouse doesn't end a finger's press");
+    await press('click', {});
+    assert.equal(await held(), false, 'a click that lands settles it');
+    await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
+    await press('pointerdown', { pointerId: 6, pointerType: 'touch' });
     await press('pointerup', { pointerId: 6, pointerType: 'touch' });
-    await settle(page);
-    assert.equal(await held(), true, "a new finger does not end the mouse's press");
+    await page.waitForTimeout(300); // past the wait for a click
+    assert.equal(await held(), true, "a finger lifting doesn't end the mouse's press");
     await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
-    await settle(page);
     assert.equal(await held(), false, 'its own move with no button down does');
-    await press('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 2 });
+    await press('pointerdown', { pointerId: 7, pointerType: 'pen' });
+    assert.equal(await held(), true);
+    await page.waitForTimeout(3100);
+    assert.equal(await held(), false, 'nothing heard from it for 3s ends it');
+    await press('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2 });
     assert.equal(await held(), false, 'a right press holds nothing');
     await press('pointerup', { pointerId: 1, pointerType: 'mouse', button: 2 });
-    // A Fine-tune value left by clicking a mode tab is saved, though the
-    // tab's own render (not a save) is what takes it in: one held while
-    // typed, and one whose comma is then written as a point.
+    // A plain tab switch saves nothing (another open tab's settings stay)...
+    await page.evaluate(() => (window.writes = 0));
+    await page.getByRole('tab', { name: 'List price' }).click();
+    await page.getByRole('tab', { name: 'Profit' }).click();
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.writes), 0, 'a plain tab switch saves nothing');
+    // ...but one that takes in a Fine-tune value left typed saves it: one
+    // held while typed, and one whose comma is then written as a point.
     for (const [typed, kept] of [['12..', '12..'], ['1,5', '1.5']]) {
       await page.getByRole('tab', { name: 'Profit' }).click();
       await page.fill('#f-other', typed);

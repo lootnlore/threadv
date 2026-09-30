@@ -83,6 +83,7 @@ function setup(root) {
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load)
   let rendered = null; // the form as last judged: what the address bar holds
   let shownLink = ''; // the result on screen as a shared link ('' while the prompt shows)
+  let view = null; // what the output should show, from the last render (see paint)
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
@@ -105,8 +106,9 @@ function setup(root) {
   // in (left, Enter, a link): "2,50" becomes "2.50", so a slip meant as 250
   // can't pass unseen. Never while the field is still being typed in.
   function showPoint(el) {
-    const text = withDecimalPoint(el.name, el.value);
-    if (text !== el.value) el.value = text;
+    if (withDecimalPoint(el.name, el.value) === el.value) return;
+    const at = el.value.indexOf(',');
+    el.setRangeText('.', at, at + 1, 'preserve'); // the caret stays where it was
   }
 
   function readForm() {
@@ -182,7 +184,11 @@ function setup(root) {
   // Writes the form as last rendered, so it never holds a half-typed value
   // (see render) and a delayed call never writes an older one.
   function syncUrl() {
-    history.replaceState(null, '', `${location.pathname}${location.search}${fragment(rendered, sharedView)}`);
+    try {
+      history.replaceState(null, '', `${location.pathname}${location.search}${fragment(rendered, sharedView)}`);
+    } catch {
+      /* too many in a row (Safari limits them): the next sync catches up */
+    }
   }
   const syncUrlSoon = debounce(syncUrl, 250);
 
@@ -242,15 +248,15 @@ function setup(root) {
   }
 
   /** Rows for a result that can be worked out, and the verdict over them. */
-  function showResults(input, ids, link) {
+  function showResults({ mode: m, input, ids, link }) {
     const open = openIds();
     const inList = resultsEl.contains(document.activeElement);
     const row = inList && document.activeElement.closest('.result')?.dataset.id;
-    const rows = rankedRows(mode, rank(mode, input, ids), input.target);
-    const verdict = renderVerdict(mode, rows, input);
+    const rows = rankedRows(m, rank(m, input, ids), input.target);
+    const verdict = renderVerdict(m, rows, input);
     verdictEl.className = `verdict verdict-${verdict.tone}`;
     verdictEl.innerHTML = verdict.html;
-    resultsEl.innerHTML = renderResults(mode, rows, { focus });
+    resultsEl.innerHTML = renderResults(m, rows, { focus });
     resultsEl.hidden = false;
     shareBtn.hidden = !shareSupported;
     shownLink = link;
@@ -276,49 +282,47 @@ function setup(root) {
   }
 
   // ---- presses ----
-  // A press that can click (the main mouse button, a finger, a pen) is under
-  // way from pointerdown until the click it makes has landed. Meanwhile nothing renders: a list
-  // redrawn, or the prompt taking its place, mid-press would move the
-  // target out from under the pointer and the click would be lost. Nor is a
-  // field the press took focus from judged yet: the click may give focus
-  // straight back (its label). A release that makes no click ends it 250ms
-  // on. A release the page never hears of (a drag or another window took
-  // it) can't hold things up either: the pointer moving with no button down
-  // ends its own press; the next primary press of its kind, the window
-  // losing focus, a select's change (its popup takes the release) or a new
-  // key (not a repeat, nor a modifier held for a Shift-click) ends them all.
-  const presses = new Map(); // pointer id -> its type (mouse, touch, pen)
+  // Painting the output (the verdict, the list, the share button) waits
+  // while the user presses anywhere it could move (all but this calculator's
+  // tabs and form, which it never moves), and until the click the press
+  // makes has landed: a list redrawn, or the prompt taking its place,
+  // mid-press would move the target out from under the pointer, and the
+  // click would be lost. Only painting waits: what the user typed is judged,
+  // flagged and saved at once. A press can't hold painting back for long:
+  // it ends with its own release and click (or 250ms on, if none comes), its
+  // pointer cancelled or seen with no button down, any click that lands (it
+  // settles earlier presses of every kind), or 3s of silence from its pointer.
+  const inputSide = root.querySelector('.calc-input');
+  const presses = new Map(); // pointer id -> when it was last heard from
   let clickDue = 0; // timer from the last release to its click (or to when none came)
-  let held = null; // the render waiting, its options merged
-  const afterPress = []; // what else waits (judging a field)
+  let silence = 0; // timer for the 3s check
   const pressing = () => presses.size > 0 || clickDue !== 0;
   function stopClickTimer() {
     clearTimeout(clickDue);
     clickDue = 0;
   }
-  function flush() {
-    if (pressing()) return; // another press began: it waits for that one
-    for (const fn of afterPress.splice(0)) fn();
-    const opts = held;
-    held = null;
-    if (opts) render(opts);
-  }
   function endPresses() {
     presses.clear();
     stopClickTimer();
-    flush();
+    clearTimeout(silence);
+    paint();
   }
-  /** Runs `fn` a task from now, or once the press under way is over. */
-  const afterPresses = (fn) => (pressing() ? afterPress.push(fn) : setTimeout(fn));
+  function checkSilence() {
+    for (const [id, heard] of presses) if (performance.now() - heard >= 3000) presses.delete(id);
+    if (presses.size) silence = setTimeout(checkSilence, 1000);
+    else if (!clickDue) endPresses();
+  }
   addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return; // a right or middle press makes no click
+    if (e.button !== 0 || inputSide.contains(e.target)) return; // a right press makes no click
     stopClickTimer(); // a new press: the last release's wait is over
-    // The first finger (or the mouse, or the pen) down: no earlier one of its kind still is.
-    if (e.isPrimary) for (const [id, type] of presses) if (type === e.pointerType) presses.delete(id);
-    presses.set(e.pointerId, e.pointerType);
+    presses.set(e.pointerId, performance.now());
+    clearTimeout(silence);
+    silence = setTimeout(checkSilence, 3000);
   }, true);
   addEventListener('pointermove', (e) => {
-    if (e.buttons === 0 && presses.delete(e.pointerId) && !presses.size) endPresses(); // its release went unheard
+    if (!presses.has(e.pointerId)) return;
+    if (e.buttons) presses.set(e.pointerId, performance.now());
+    else if (presses.delete(e.pointerId) && !presses.size && !clickDue) endPresses(); // its release went unheard
   }, true);
   addEventListener('pointerup', (e) => {
     if (!presses.delete(e.pointerId) || presses.size) return;
@@ -328,38 +332,27 @@ function setup(root) {
   addEventListener('pointercancel', (e) => {
     if (presses.delete(e.pointerId) && !presses.size) endPresses();
   }, true);
-  // The click has landed: renders its own handlers ask for (share's, a
-  // tab's) run now, and what waited runs after them.
   addEventListener('click', () => {
-    if (!clickDue) return;
+    if (!pressing()) return;
+    presses.clear();
     stopClickTimer();
-    setTimeout(flush);
+    setTimeout(endPresses); // after the click's own handlers
   }, true);
-  const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta'];
-  addEventListener('keydown', (e) => !e.repeat && !MODIFIERS.includes(e.key) && endPresses(), true);
-  addEventListener('change', (e) => e.target.tagName === 'SELECT' && endPresses(), true); // a text field's comes at blur, mid-press
-  addEventListener('blur', endPresses); // the window's own (a field's blur doesn't bubble)
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
    * mirrored to the URL. `typing` names the text field a keystroke changed;
-   * without it, a render judges every field (a commit). Mid-typing a field
-   * can be briefly empty or on its way to a number ("" before "45", "1,2"
-   * before "1,234"), so until it is usable nothing changes: no flag, no
-   * prompt in place of the results, nothing saved. It stays `dirty` and is
-   * judged when the user leaves the field or presses Enter. A usable value
-   * shows its results at once. Any render that isn't a keystroke's (the
-   * user using a tab, a checkbox, Enter...) judges every field, the dirty one
-   * too; callers pass `save` when it comes from the user. The list is
-   * redrawn only when the result changed. During a press it all waits (see
-   * presses).
+   * without it, a render judges every field. Mid-typing a field can be
+   * briefly empty or on its way to a number ("" before "45", "1,2" before
+   * "1,234"), so until it is usable nothing changes: no flag, no prompt in
+   * place of the results, nothing saved. It stays `dirty` and is judged
+   * when the user leaves the field, presses Enter or uses another control
+   * (a tab, a checkbox), which pass `save` for it. A usable value shows its
+   * results at once. The output is painted as soon as no press is under way
+   * (see presses), and the list redrawn only when the result changed.
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
-    if (pressing()) {
-      held = { save: save || Boolean(held?.save), typing: held?.typing === '' ? '' : typing }; // a commit stays one
-      return;
-    }
     const state = readForm();
     const input = normalizeInputs(state.values);
     fieldBox('ebayCustomRate').hidden = !PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts);
@@ -379,13 +372,18 @@ function setup(root) {
 
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
-    const link = fragment(state, true); // everything the result depends on
-    if (pending) showPending(pending[0]);
-    else if (link !== shownLink) showResults(input, ids, link);
+    view = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
+    paint();
     if (save) {
       if (!sharedView) persist(state);
       syncUrlSoon();
     }
+  }
+
+  function paint() {
+    if (pressing() || !view) return; // painted when the press is over
+    if (view.prompt) showPending(view.prompt);
+    else if (view.link !== shownLink) showResults(view);
     announce();
   }
   const renderSoon = debounce((key) => render({ save: true, typing: key }), 60);
@@ -447,8 +445,11 @@ function setup(root) {
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
-  function selectMode(next, opts) {
-    setMode(next, { ...opts, save: true });
+  // The address bar follows at once, or soon while a held arrow key repeats.
+  function selectMode(next, { repeat = false, ...opts } = {}) {
+    setMode(next, { ...opts, save: dirty !== '' });
+    if (repeat) return syncUrlSoon();
+    syncUrlSoon.cancel(); // the render's queued write is this one
     syncUrl();
   }
 
@@ -466,7 +467,7 @@ function setup(root) {
       const to = { ...step, Home: 0, End: tabs.length - 1 }[e.key];
       if (to === undefined) return;
       e.preventDefault();
-      selectMode(tabs[(to + tabs.length) % tabs.length].dataset.mode, { moveFocus: true });
+      selectMode(tabs[(to + tabs.length) % tabs.length].dataset.mode, { moveFocus: true, repeat: e.repeat });
     });
   }
 
@@ -482,18 +483,24 @@ function setup(root) {
     if (e.target.type !== 'text') render({ save: true });
   });
 
-  // A field left half-typed is judged once focus has moved on, and a press
-  // that took it is over (see presses). Losing focus to another window or
-  // tab isn't leaving: the field stays the active element, and is judged
-  // when the user leaves it.
+  // A field left half-typed is judged once focus has moved on. Losing focus
+  // to another window or tab isn't leaving: the field stays the active
+  // element, and is judged when the user leaves it.
   form.addEventListener('focusout', (e) => {
     const el = e.target;
     if (el.type !== 'text') return;
-    afterPresses(() => {
-      if (document.activeElement === el) return; // not left after all
+    setTimeout(() => {
+      if (document.activeElement === el) return;
       showPoint(el); // the same value to the form (see readForm): nothing to redraw
       if (dirty === el.name) render({ save: true });
     });
+  });
+  // Pressing the label of the field being typed in keeps focus in it (its
+  // click would only give focus straight back), so the field isn't judged
+  // as left.
+  form.addEventListener('mousedown', (e) => {
+    const target = e.target.closest('label')?.control;
+    if (target && target === document.activeElement) e.preventDefault();
   });
 
   // On narrow screens the results sit below the form: "See results" (and
