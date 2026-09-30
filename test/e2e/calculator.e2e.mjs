@@ -135,6 +135,20 @@ if (chromium) {
   // A field left half-typed is judged a task after focus leaves it: this
   // waits exactly that long (a timer queued after the calculator's runs after it).
   const tick = (page) => page.evaluate(() => new Promise((r) => setTimeout(r)));
+  // A mouse press held `ms` (a person's click is ~90ms) on a box measured
+  // beforehand, or on a locator measured now: focus leaves a field at the
+  // press, the click comes at the release.
+  const pressAt = async (page, box, ms = 90) => {
+    await page.mouse.move(box.x + Math.min(20, box.width / 2), box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(ms);
+    await page.mouse.up();
+    await tick(page);
+  };
+  const slowClick = async (page, locator, ms) => {
+    await locator.scrollIntoViewIfNeeded();
+    await pressAt(page, await locator.boundingBox(), ms);
+  };
 
   test('results are pre-rendered without JavaScript', async () => {
     const { context, page } = await open('/', { javaScriptEnabled: false });
@@ -556,11 +570,7 @@ if (chromium) {
     await page.focus('#f-price');
     await page.keyboard.press('End');
     await page.keyboard.type('0');
-    await page.mouse.move(box.x + 20, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(1300); // a slow, deliberate press
-    await page.mouse.up();
-    await tick(page);
+    await pressAt(page, box, 1300); // a slow, deliberate press
     assert.equal(await row.locator('details').getAttribute('open'), '', 'the press opened the row');
     await settle(page);
     assert.notEqual(await verdict(page), before, 'then the result for 400 shows');
@@ -596,20 +606,11 @@ if (chromium) {
     const shown = () => verdict(page);
     // A press at a person's speed (focus leaves the field at mousedown, the
     // click comes ~90ms later).
-    const slowClick = async (locator) => {
-      await locator.scrollIntoViewIfNeeded();
-      const b = await locator.boundingBox();
-      await page.mouse.move(b.x + Math.min(8, b.width / 2), b.y + b.height / 2);
-      await page.mouse.down();
-      await page.waitForTimeout(90);
-      await page.mouse.up();
-      await tick(page);
-    };
     const share = page.getByRole('button', { name: 'Copy link to this result' });
     // Share with the field just typed in: the link is for what it holds
     // (a decimal comma as a point)...
     await page.fill('#f-price', '2,50');
-    await slowClick(share);
+    await slowClick(page, share);
     await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
     const link = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(new URLSearchParams(new URL(link).hash.slice(1)).get('price'), '2.50');
@@ -617,7 +618,7 @@ if (chromium) {
     // ...and with it half-typed, nothing is copied: the prompt shows instead.
     await page.evaluate(() => navigator.clipboard.writeText('untouched'));
     await page.fill('#f-price', '12..');
-    await slowClick(share);
+    await slowClick(page, share);
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'untouched');
     assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.');
     // A click that changes nothing repaints nothing: a word in the prompt
@@ -638,6 +639,19 @@ if (chromium) {
       return { value: el.value, caret: [el.selectionStart, el.selectionEnd], focused: document.activeElement === el };
     });
     assert.deepEqual(entered, { value: '2.50', caret: [1, 1], focused: true });
+    await page.fill('#f-price', '2,50');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Shift+ArrowLeft');
+    await page.keyboard.press('Shift+ArrowLeft');
+    await page.keyboard.press('Enter');
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const el = document.querySelector('#f-price');
+        return [el.value, el.selectionStart, el.selectionEnd, el.selectionDirection];
+      }),
+      ['2.50', 2, 4, 'backward'],
+      'a selection keeps its direction',
+    );
     await settle(page);
     assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '2.50');
     await page.fill('#f-price', '12,');
@@ -650,14 +664,22 @@ if (chromium) {
     // half-typed value isn't judged, and a usable one shows.
     let before = await shown();
     await page.evaluate(() => scrollTo(0, 0)); // the label clear of the sticky header
-    for (const part of ['label[for="f-price"]', '.field:has(#f-price) .affix']) {
+    const wrap = page.locator('.field:has(#f-price) .input-wrap');
+    for (const [part, press] of [
+      ['its label', () => slowClick(page, page.locator('label[for="f-price"]'))],
+      ['its $', () => slowClick(page, page.locator('.field:has(#f-price) .affix'))],
+      ['its border', async () => pressAt(page, { ...(await wrap.boundingBox()), width: 2 })],
+    ]) {
       await page.fill('#f-price', '12..');
-      await slowClick(page.locator(part));
+      await press();
       await settle(page);
       assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, `${part}: not left, so not judged`);
       assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
       assert.equal(await shown(), before);
     }
+    // Its hint stays selectable (to copy a message, say).
+    await page.locator('#h-price [data-live]').dblclick({ position: { x: 8, y: 6 } });
+    assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '', 'a word of the hint selected');
     await page.fill('#f-price', '40');
     await settle(page);
     await page.keyboard.press('End');
@@ -671,11 +693,7 @@ if (chromium) {
     const at = await mercari.locator('summary').boundingBox();
     await page.keyboard.type('0'); // 4000: the order changes
     await page.mouse.click(640, 20, { button: 'middle' });
-    await page.mouse.move(at.x + 20, at.y + at.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(600);
-    await page.mouse.up();
-    await tick(page);
+    await pressAt(page, at, 600);
     assert.equal(await mercari.locator('details').getAttribute('open'), '', 'the press opened its row');
     // Typing "1,234" key by key shows no result for $1.20 or $1.23 on the
     // way (its comma may still separate thousands): $1 stays until $1,234.
@@ -781,6 +799,39 @@ if (chromium) {
     await press('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2 });
     assert.equal(await held(), false, 'a right press holds nothing');
     await press('pointerup', { pointerId: 1, pointerType: 'mouse', button: 2 });
+    // Shared (by keyboard) while painting waits for a press: the link is for
+    // the numbers just judged, not the ones still on screen.
+    await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
+    await page.fill('#f-price', '444');
+    await share.focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
+    assert.equal(new URLSearchParams(new URL(await page.evaluate(() => navigator.clipboard.readText())).hash.slice(1)).get('price'), '444');
+    await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+    // A mouse press that can't click any more ends at once: a context menu
+    // (Ctrl-click on a Mac) or a drag took its release, or another window.
+    for (const [why, end] of [
+      ['a context menu', () => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))],
+      ['a drag', () => document.querySelector('h1').dispatchEvent(new DragEvent('dragstart', { bubbles: true }))],
+      ['another window', () => window.dispatchEvent(new FocusEvent('blur'))],
+    ]) {
+      await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
+      assert.equal(await held(), true, `${why}: pressed`);
+      await page.evaluate(end);
+      await settle(page);
+      assert.equal(await held(), false, `${why} ends the press`);
+    }
+    // A rate-limited address bar write (Safari's limit) is made again soon after.
+    await page.evaluate(() => {
+      const write = history.replaceState;
+      let refuse = 1;
+      history.replaceState = function (...args) {
+        if (refuse-- > 0) throw new DOMException('Too many calls', 'SecurityError');
+        return write.apply(this, args);
+      };
+    });
+    await page.fill('#f-price', '66');
+    await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === '66', null, { timeout: 3000 });
     // A plain tab switch saves nothing (another open tab's settings stay)...
     await countWrites();
     await page.getByRole('tab', { name: 'List price' }).click();
