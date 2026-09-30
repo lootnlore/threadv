@@ -775,6 +775,11 @@ select:focus-visible {
   grid-area: 1 / 1;
 }
 
+.hint > [data-live] {
+  justify-self: start; /* only as big as its words: the rest of the cell is the field's */
+  align-self: start;
+}
+
 .hint-room {
   visibility: hidden;
 }

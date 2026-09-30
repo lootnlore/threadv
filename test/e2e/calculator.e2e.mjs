@@ -674,6 +674,10 @@ if (chromium) {
         await pressAt(page, { x: box.x + 10, y: box.y - 3, width: 20, height: 2 });
       }],
       ['a right press on its label', () => page.locator('label[for="f-price"]').click({ button: 'right' })],
+      ['the blank room beside its hint', async () => {
+        const box = await page.locator('#h-price').boundingBox();
+        await pressAt(page, { x: box.x + box.width - 6, y: box.y + box.height - 3, width: 2, height: 2 });
+      }],
     ]) {
       await page.fill('#f-price', '12..');
       await press();
@@ -682,7 +686,10 @@ if (chromium) {
       assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
       assert.equal(await shown(), before);
     }
-    // Its hint stays selectable (to copy a message, say).
+    // Its hint stays selectable (to copy a message, say). A value already
+    // judged, so leaving the field for the hint doesn't change the hint's words.
+    await page.fill('#f-price', '40');
+    await settle(page);
     await page.locator('#h-price [data-live]').dblclick({ position: { x: 8, y: 6 } });
     assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '', 'a word of the hint selected');
     await page.fill('#f-price', '40');
@@ -789,16 +796,20 @@ if (chromium) {
     await page.keyboard.press('Enter');
     await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
     assert.equal(new URLSearchParams(new URL(await page.evaluate(() => navigator.clipboard.readText())).hash.slice(1)).get('price'), '444');
-    // ...and with nothing to share, shows the prompt that says why, at once.
+    assert.equal(await shown(), before, 'sharing left painting waiting for the press');
+    // ...and with nothing to share, says so (the press still holds the list
+    // under the finger), and the prompt shows once the finger lifts.
     await stillPressed();
     before = await shown();
     await page.fill('#f-price', '12..');
     await share.focus();
-    await tick(page);
-    assert.equal(await shown(), before, 'painting still waits');
     await page.keyboard.press('Enter');
+    assert.equal(await page.locator('[data-share]').textContent(), 'Nothing to share yet');
+    assert.equal(await page.locator('[data-share-status]').textContent(), 'Nothing copied. Check “Sell price”. Write it like 1,234.50.');
+    assert.equal(await shown(), before, 'painting still waits');
+    await press('pointerup', { pointerId: 5, pointerType: 'touch' });
+    await settle(page);
     assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.');
-    assert.equal(await page.evaluate(() => document.activeElement.hasAttribute('data-verdict')), true);
     await page.fill('#f-price', String(++price));
     await settle(page);
     // A finger press whose release went unheard ends 3s on, though a mouse
@@ -826,14 +837,23 @@ if (chromium) {
     await press('pointerup', { pointerId: 6, pointerType: 'touch' });
     await press('click', { detail: 1 });
     assert.equal(await held(), true, "a finger's tap doesn't end the mouse's press");
+    await page.waitForTimeout(3100);
+    assert.equal(await held(), true, 'a mouse held still stays pressed (a slow click)');
     await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
     assert.equal(await held(), false, 'its own move with no button down ends it');
-    // A mouse press whose release a context menu took (Ctrl-click on a Mac) ends 3s on too.
-    await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
-    await page.evaluate(() => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
-    assert.equal(await held(), true);
-    await page.waitForTimeout(3100);
-    assert.equal(await held(), false, 'a mouse press heard nothing from for 3s is over');
+    // A mouse press that can no longer click ends at once: a context menu
+    // (Ctrl-click on a Mac) or a drag took its release, or another window.
+    for (const [why, end] of [
+      ['a context menu', () => document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))],
+      ['a drag', () => document.querySelector('h1').dispatchEvent(new DragEvent('dragstart', { bubbles: true }))],
+      ['another window', () => window.dispatchEvent(new FocusEvent('blur'))],
+    ]) {
+      await press('pointerdown', { pointerId: 1, pointerType: 'mouse' });
+      assert.equal(await held(), true, `${why}: pressed`);
+      await page.evaluate(end);
+      await settle(page);
+      assert.equal(await held(), false, `${why} ends the press`);
+    }
     await press('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2 });
     assert.equal(await held(), false, 'a right press holds nothing');
     await press('pointerup', { pointerId: 1, pointerType: 'mouse', button: 2 });
@@ -847,8 +867,8 @@ if (chromium) {
         return write.apply(this, args);
       };
     });
-    await page.fill('#f-price', '66');
-    await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === '66', null, { timeout: 4000 });
+    await page.fill('#f-price', '987'); // a price no step above has used
+    await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === '987', null, { timeout: 4000 });
     assert.ok(await page.evaluate(() => window.refused >= 2), 'the first write was refused, and a later one made');
     // A plain tab switch saves nothing (another open tab's settings stay)...
     await countWrites();

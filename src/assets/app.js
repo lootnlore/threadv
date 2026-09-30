@@ -290,15 +290,17 @@ function setup(root) {
   // makes has landed: a list redrawn, or the prompt taking its place,
   // mid-press would move the target out from under the pointer, and the
   // click would be lost. Only painting waits: what the user typed is judged,
-  // flagged and saved at once. One rule for every pointer, so a press can
-  // hold painting only so long: it ends with its own release and the click
-  // that makes (or 250ms on, if none comes), its pointer cancelled or seen
-  // with no button down, or 3s without a word from its pointer (a release
-  // the page never heard of: a menu, a drag or another window took it).
+  // flagged and saved at once. A press ends with its own release and the
+  // click that makes (or 250ms on, if none comes), its pointer cancelled or
+  // seen with no button down, or at once when it can no longer click: a
+  // context menu or a drag took it, or another window. Nothing holds
+  // painting for good: a finger or pen (nothing to see of it after a
+  // release the page missed) ends after 3s without a word from it, a mouse
+  // (whose missed release shows when it next moves) after 30s.
   const inputSide = root.querySelector('.calc-input');
-  const presses = new Map(); // pointer id -> when it was last heard from
+  const presses = new Map(); // pointer id -> { limit (ms of silence), heard (when last) }
   let clickDue = 0; // timer from the last release to its click (or to when none came)
-  let silence = 0; // timer for the 3s check, while a press is down
+  let silence = 0; // timer for the next press to fall silent
   const pressing = () => presses.size > 0 || clickDue !== 0;
   function stopClickTimer() {
     clearTimeout(clickDue);
@@ -310,20 +312,25 @@ function setup(root) {
     clearTimeout(silence);
     paint();
   }
+  // Ends presses silent past their limit, then waits for the next one due.
   function checkSilence() {
-    for (const [id, heard] of presses) if (performance.now() - heard >= 3000) presses.delete(id);
-    if (presses.size) silence = setTimeout(checkSilence, 1000);
-    else endPresses();
+    clearTimeout(silence);
+    const now = performance.now();
+    for (const [id, p] of presses) if (now - p.heard >= p.limit) presses.delete(id);
+    if (!presses.size) return endPresses();
+    const due = Math.min(...[...presses.values()].map((p) => p.heard + p.limit - now));
+    silence = setTimeout(checkSilence, due);
   }
   addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || inputSide.contains(e.target)) return; // a right press makes no click
     stopClickTimer(); // a new press: the last release's wait is over
-    if (!presses.size) silence = setTimeout(checkSilence, 3000);
-    presses.set(e.pointerId, performance.now());
+    presses.set(e.pointerId, { limit: e.pointerType === 'mouse' ? 30000 : 3000, heard: performance.now() });
+    checkSilence();
   }, true);
   addEventListener('pointermove', (e) => {
-    if (!presses.has(e.pointerId)) return;
-    if (e.buttons) presses.set(e.pointerId, performance.now());
+    const p = presses.get(e.pointerId);
+    if (!p) return;
+    if (e.buttons) p.heard = performance.now(); // its deadline moves on at the next check
     else if (presses.delete(e.pointerId) && !presses.size) endPresses(); // its release went unheard
   }, true);
   addEventListener('pointerup', (e) => {
@@ -341,6 +348,8 @@ function setup(root) {
     stopClickTimer();
     setTimeout(endPresses);
   }, true);
+  for (const type of ['contextmenu', 'dragstart']) addEventListener(type, () => pressing() && endPresses(), true);
+  addEventListener('blur', () => pressing() && endPresses()); // the window's own (a field's blur doesn't bubble)
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
@@ -507,7 +516,7 @@ function setup(root) {
   // its border, the gap between them), with any button, keeps focus in it,
   // so it isn't judged as left. Its hint stays selectable.
   form.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.hint')) return;
+    if (e.target.closest('.hint [data-live]')) return; // its words (not the blank room around them)
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (input && input === document.activeElement && e.target !== input) e.preventDefault();
   });
@@ -541,15 +550,29 @@ function setup(root) {
 
   const SHARE_LABEL = shareBtn.textContent;
   let shareReset;
+  // Shows `message` on the button for a moment and has it read out (screen
+  // readers don't announce a button's label changing; a status region is).
+  function sayOnShare(message, spoken = message) {
+    clearTimeout(shareReset); // one timer, so a second click never has its message cut short by the first
+    shareBtn.textContent = message;
+    shareStatus.textContent = spoken;
+    shareReset = setTimeout(() => {
+      shareBtn.textContent = SHARE_LABEL;
+      shareStatus.textContent = '';
+    }, 2500);
+  }
   if (shareSupported) {
     shareBtn.addEventListener('click', async () => {
       // A field left half-typed is judged first, so the link is never for
-      // numbers no longer in the form; if the prompt takes the results'
-      // place (and focus), there is nothing to share.
+      // numbers no longer in the form.
       if (dirty) render({ save: true });
-      // Nothing to share: the prompt says why, now (even if a press is holding painting).
-      if (!view || view.prompt) return endPresses();
       paint();
+      if (!view || view.prompt) {
+        // Nothing to share. The prompt has taken the results' place (and
+        // focus) or, while a press elsewhere holds painting, the button says so.
+        if (!shareBtn.hidden) sayOnShare('Nothing to share yet', `Nothing copied. ${new DOMParser().parseFromString(view?.prompt ?? '', 'text/html').body.textContent}`);
+        return;
+      }
       const url = `${location.origin}${location.pathname}${view.link}`; // the numbers as judged, whatever is on screen
       let message = 'Link copied';
       try {
@@ -564,15 +587,7 @@ function setup(root) {
           message = err?.name === 'AbortError' ? SHARE_LABEL : 'Copy failed. Use the address bar.';
         }
       }
-      // One timer, so a second click never has its message cut short by the first.
-      clearTimeout(shareReset);
-      shareBtn.textContent = message;
-      // Screen readers don't announce a button's label changing; a status region is read out.
-      shareStatus.textContent = message === SHARE_LABEL ? '' : message;
-      shareReset = setTimeout(() => {
-        shareBtn.textContent = SHARE_LABEL;
-        shareStatus.textContent = '';
-      }, 2500);
+      sayOnShare(message, message === SHARE_LABEL ? '' : message);
     });
   }
 
