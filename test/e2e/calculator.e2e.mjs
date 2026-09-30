@@ -698,62 +698,90 @@ if (chromium) {
       assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
       assert.equal(await shown(), before);
     }
-    // Its hint's words can be selected, dragging from past their end as
-    // usual. That leaves the field, which is judged as on any leaving: an
-    // error's words (unchanged by that) stay selected, and a value read only
-    // when left ("1,5") shows its result with the hint's words still selected.
-    const dragHint = async () => {
-      const line = await page.locator('#h-price [data-live]').evaluate((el) => {
+    // A hint's words can be selected, dragging from past their end as usual.
+    // That leaves the field, which is judged as on any leaving; the hint's
+    // new words wait until the selection moves on, so what was selected
+    // stays selected: an error's, the old words when the error changes, or
+    // the hint's own when a value is emptied or read only when left ("1,5").
+    const hintLines = (id) =>
+      page.locator(`#${id} [data-live]`).evaluate((el) => {
         const r = document.createRange();
         r.selectNodeContents(el);
-        const b = r.getClientRects()[0]; // the words' first line
-        return { left: b.left, right: b.right, y: b.top + b.height / 2 };
+        const box = el.parentElement.getBoundingClientRect();
+        return { lines: [...r.getClientRects()].map((b) => ({ left: b.left, right: b.right, y: b.top + b.height / 2 })), right: box.right };
       });
+    const selected = () => page.evaluate(() => getSelection().toString().trim());
+    const hintText = () => page.locator('#h-price [data-live]').textContent();
+    const dragHint = async () => {
+      const [line] = (await hintLines('h-price')).lines;
       assert.equal(await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest('#h-price')), [line.right + 6, line.y]), true, 'the drag starts on the hint');
       await page.mouse.move(line.right + 6, line.y);
       await page.mouse.down();
       await page.mouse.move(line.left + 1, line.y, { steps: 5 });
       await page.mouse.up();
       await settle(page);
-      return page.evaluate(() => getSelection().toString().trim());
+      return selected();
+    };
+    const deselect = async () => {
+      await page.evaluate(() => getSelection().removeAllRanges());
+      await tick(page);
     };
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
     await page.locator('#f-price').click(); // back in, the error showing
+    await page.keyboard.type('.'); // "12...": the same error, judged again on leaving
     assert.equal(await dragHint(), 'Write it like 1,234.50.', "the error's words selected");
     assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
-    await page.fill('#f-price', '40'); // the hint back to its own words
+    await page.locator('#f-price').click();
+    await page.fill('#f-price', '99999999'); // a different error, not shown while typed
+    assert.equal(await dragHint(), 'Write it like 1,234.50.', 'the old words stay selected');
+    await deselect();
+    assert.equal(await hintText(), 'Enter $0 to $100,000.', 'then the new error shows');
+    await page.fill('#f-price', '40');
     await settle(page);
+    await page.fill('#f-price', ''); // emptied: the hint will ask for a price
+    assert.equal(await dragHint(), 'What it will sell for');
+    assert.equal(await verdict(page), 'Enter a sell price to see results.', 'judged');
+    await deselect();
+    assert.equal(await hintText(), 'Needed to see results.');
+    await page.fill('#f-price', '40');
+    await settle(page);
+    before = await shown();
     await page.fill('#f-price', '1,5');
     assert.equal(await dragHint(), 'What it will sell for', "the hint's words selected");
-    assert.equal(await page.inputValue('#f-price'), '1.5', 'the field was left and judged');
-    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null);
+    assert.equal(await page.inputValue('#f-price'), '1.5');
+    assert.notEqual(await shown(), before, 'judged: the result for $1.50');
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '1.5');
+    await deselect();
+    await page.fill('#f-price', '40');
+    await settle(page);
+    // A pen's tap on the hint keeps focus (a pen on a tablet taps like a
+    // finger: moving focus would bounce its keyboard).
+    await page.fill('#f-price', '12..');
+    await page.evaluate(() => {
+      window.left = 0;
+      document.querySelector('#f-price').addEventListener('focusout', () => window.left++);
+    });
+    const [penAt] = (await hintLines('h-price')).lines;
+    const penCdp = await page.context().newCDPSession(page);
+    for (const type of ['mousePressed', 'mouseReleased']) await penCdp.send('Input.dispatchMouseEvent', { type, x: penAt.left + 5, y: penAt.y, button: 'left', clickCount: 1, pointerType: 'pen' });
+    await settle(page);
+    assert.deepEqual(await page.evaluate(() => [window.left, document.activeElement.id]), [0, 'f-price'], 'a pen tap on the hint');
     await page.fill('#f-price', '40');
     await settle(page);
     // A click beside a wrapped hint's short line gives focus back too.
     await page.locator('.tune > summary').click();
     await page.fill('#f-taxRate', '12..');
     await page.locator('#h-taxRate').scrollIntoViewIfNeeded();
-    const wrapped = await page.locator('#h-taxRate [data-live]').evaluate((el) => {
-      const r = document.createRange();
-      r.selectNodeContents(el);
-      const lines = [...r.getClientRects()];
-      const box = el.parentElement.getBoundingClientRect();
-      const short = lines.reduce((a, b) => (b.right < a.right ? b : a));
-      return { lines: lines.length, x: short.right + 4, y: short.top + short.height / 2, room: box.right - short.right };
-    });
+    const tax = await hintLines('h-taxRate');
+    const short = tax.lines.reduce((a, b) => (b.right < a.right ? b : a));
+    const wrapped = { lines: tax.lines.length, x: short.right + 4, y: short.y, room: tax.right - short.right };
     assert.ok(wrapped.lines > 1 && wrapped.room > 8, `a wrapped hint with room beside a line: ${JSON.stringify(wrapped)}`);
     await pressAt(page, { x: wrapped.x, y: wrapped.y - 1, width: 2, height: 2 });
     await settle(page);
     assert.deepEqual([await page.evaluate(() => document.activeElement.id), await page.locator('#f-taxRate').getAttribute('aria-invalid')], ['f-taxRate', null]);
     await page.fill('#f-taxRate', '7.5');
     await page.locator('.tune > summary').click();
-    // Its hint stays selectable (to copy a message, say). A value already
-    // judged, so leaving the field for the hint doesn't change the hint's words.
-    await page.fill('#f-price', '40');
-    await settle(page);
-    await page.locator('#h-price [data-live]').dblclick({ position: { x: 8, y: 6 } });
-    assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '', 'a word of the hint selected');
     await page.fill('#f-price', '40');
     await settle(page);
     await page.keyboard.press('End');
@@ -947,12 +975,6 @@ if (chromium) {
     await tick(page);
     await tick(page);
     assert.equal(await judged(), true, 'its own (a Ctrl-click) ends it');
-    await halfType();
-    await pressFrom({ pointerId: 12, pointerType: 'touch' });
-    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new PointerEvent('contextmenu', { pointerId: 12, pointerType: 'touch', button: -1, bubbles: true })));
-    await tick(page);
-    await tick(page);
-    assert.equal(await judged(), true, "a finger's long-press menu (no button) ends its press");
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
     await halfType();

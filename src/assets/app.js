@@ -226,13 +226,24 @@ function setup(root) {
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
       const h = hintFor(key);
-      if (h) {
-        const text = problem || (missing ? PRICE_NEEDED : h.dataset.default);
-        if (h.textContent !== text) h.textContent = text; // unchanged, a selection in it stays
-        h.classList.toggle('hint-error', Boolean(problem));
-      }
+      if (h) setHint(h, problem || (missing ? PRICE_NEEDED : h.dataset.default), Boolean(problem));
     }
   }
+
+  // A hint's new words wait while the user has some of its old ones
+  // selected (to copy them, say): swapped under the selection, they'd
+  // vanish. They take over once the selection leaves the hint.
+  const heldHints = new Map(); // hint -> [text, error] waiting
+  function setHint(h, text, error) {
+    const selection = getSelection();
+    if (!selection.isCollapsed && selection.containsNode(h, true)) return void heldHints.set(h, [text, error]);
+    heldHints.delete(h);
+    if (h.textContent !== text) h.textContent = text;
+    h.classList.toggle('hint-error', error);
+  }
+  document.addEventListener('selectionchange', () => {
+    for (const [h, [text, error]] of heldHints) setHint(h, text, error);
+  });
 
   const openIds = () => [...resultsEl.querySelectorAll('details[open]')].map((d) => d.closest('.result').dataset.id);
 
@@ -333,9 +344,10 @@ function setup(root) {
       wait(250); // for its click
     });
     on('pointercancel', (c) => c.pointerId === press.id && press.end());
-    // Its own context menu (a finger's long press, a Ctrl-click on a Mac),
-    // not a right click's (button 2) or the Menu key's (-1).
-    on('contextmenu', (c) => (c.pointerId ?? press.id) === press.id && (c.button === 0 || press.type !== 'mouse') && press.end());
+    // Its own context menu (a Ctrl-click on a Mac, main button), not a right
+    // click's (button 2) or the Menu key's (-1). (A finger's long press is
+    // cancelled, or falls silent.)
+    on('contextmenu', (c) => press.type === 'mouse' && c.button === 0 && (c.pointerId ?? press.id) === press.id && press.end());
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
     if (!dirty || inputSide.contains(e.target)) return;
     renderSoon.cancel(); // the keystroke's render, due mid-press
@@ -518,15 +530,16 @@ function setup(root) {
   });
   // Pressing anywhere on the field being typed in (its label, its $ or %,
   // its border, the gaps, its hint), with any button or finger, keeps focus
-  // in it, so it isn't judged as left. The one exception is the main button
-  // of a mouse or pen on its hint, which may be starting to select the
-  // hint's words: that press leaves the field (a half-typed value is judged,
-  // as on any leaving; an error's words, unchanged by that, stay selected),
-  // and if it selects nothing, focus comes back.
+  // in it, so it isn't judged as left. The one exception is a mouse's main
+  // button on its hint, which may be starting to select the hint's words:
+  // that press leaves the field (and it's judged, as on any leaving; words
+  // selected in the hint stay until the selection moves on: see setHint),
+  // and if it selects nothing, focus comes back. (A pen on a tablet taps
+  // like a finger: moving focus would bounce its keyboard.)
   form.addEventListener('mousedown', (e) => {
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (!input || input !== document.activeElement || e.target === input) return;
-    const selecting = e.target.closest('.hint') && e.button === 0 && down && down.type !== 'touch'; // (a finger's tap sends a mousedown too)
+    const selecting = e.target.closest('.hint') && e.button === 0 && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
     const caret = caretOf(input);
     down.then.push(() => {
