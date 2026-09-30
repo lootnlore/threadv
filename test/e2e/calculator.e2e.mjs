@@ -699,25 +699,35 @@ if (chromium) {
       assert.equal(await shown(), before);
     }
     // Its hint's words can be selected, dragging from past their end as
-    // usual. That isn't leaving the field: a half-typed value isn't judged
-    // (which would swap those words for an error) until the user's next move.
+    // usual. That leaves the field, which is judged as on any leaving: an
+    // error's words (unchanged by that) stay selected, and a value read only
+    // when left ("1,5") shows its result with the hint's words still selected.
+    const dragHint = async () => {
+      const line = await page.locator('#h-price [data-live]').evaluate((el) => {
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        const b = r.getClientRects()[0]; // the words' first line
+        return { left: b.left, right: b.right, y: b.top + b.height / 2 };
+      });
+      assert.equal(await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest('#h-price')), [line.right + 6, line.y]), true, 'the drag starts on the hint');
+      await page.mouse.move(line.right + 6, line.y);
+      await page.mouse.down();
+      await page.mouse.move(line.left + 1, line.y, { steps: 5 });
+      await page.mouse.up();
+      await settle(page);
+      return page.evaluate(() => getSelection().toString().trim());
+    };
     await page.fill('#f-price', '12..');
-    const line = await page.locator('#h-price [data-live]').evaluate((el) => {
-      const r = document.createRange();
-      r.selectNodeContents(el);
-      const b = r.getClientRects()[0]; // the words' first line
-      return { left: b.left, right: b.right, y: b.top + b.height / 2 };
-    });
-    assert.equal(await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest('#h-price')), [line.right + 6, line.y]), true, 'the drag starts on the hint');
-    await page.mouse.move(line.right + 6, line.y);
-    await page.mouse.down();
-    await page.mouse.move(line.left + 1, line.y, { steps: 5 });
-    await page.mouse.up();
+    await page.locator('#f-price').press('Tab');
+    await page.locator('#f-price').click(); // back in, the error showing
+    assert.equal(await dragHint(), 'Write it like 1,234.50.', "the error's words selected");
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
+    await page.fill('#f-price', '40'); // the hint back to its own words
     await settle(page);
-    assert.equal(await page.evaluate(() => getSelection().toString().trim()), 'What it will sell for', "the hint's words selected");
-    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null, 'not judged yet');
-    await page.getByRole('tab', { name: 'Profit' }).click(); // the next move
-    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true', 'judged then');
+    await page.fill('#f-price', '1,5');
+    assert.equal(await dragHint(), 'What it will sell for', "the hint's words selected");
+    assert.equal(await page.inputValue('#f-price'), '1.5', 'the field was left and judged');
+    assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), null);
     await page.fill('#f-price', '40');
     await settle(page);
     // A click beside a wrapped hint's short line gives focus back too.
@@ -937,6 +947,12 @@ if (chromium) {
     await tick(page);
     await tick(page);
     assert.equal(await judged(), true, 'its own (a Ctrl-click) ends it');
+    await halfType();
+    await pressFrom({ pointerId: 12, pointerType: 'touch' });
+    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new PointerEvent('contextmenu', { pointerId: 12, pointerType: 'touch', button: -1, bubbles: true })));
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), true, "a finger's long-press menu (no button) ends its press");
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
     await halfType();
