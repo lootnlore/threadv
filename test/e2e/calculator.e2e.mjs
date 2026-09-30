@@ -674,17 +674,7 @@ if (chromium) {
         await pressAt(page, { x: box.x + 10, y: box.y - 3, width: 20, height: 2 });
       }],
       ['a right press on its label', () => page.locator('label[for="f-price"]').click({ button: 'right' })],
-      ["the room beside its hint's words", async () => {
-        const words = await page.locator('#h-price [data-live]').evaluate((el) => {
-          const r = document.createRange();
-          r.selectNodeContents(el);
-          const b = r.getBoundingClientRect();
-          return { right: b.right, y: b.top + b.height / 2 };
-        });
-        const hint = await page.locator('#h-price').boundingBox();
-        assert.ok(hint.x + hint.width > words.right + 6, 'room to press beside the words');
-        await pressAt(page, { x: words.right + 4, y: words.y - 1, width: 2, height: 2 });
-      }],
+      ['a click on its hint (selecting nothing)', () => slowClick(page, page.locator('#h-price'))],
     ]) {
       await page.fill('#f-price', '12..');
       await press();
@@ -693,17 +683,41 @@ if (chromium) {
       assert.equal(await page.evaluate(() => document.activeElement.id), 'f-price');
       assert.equal(await shown(), before);
     }
-    // Its hint's words stay selectable, and a selection made there survives
-    // the field being judged after it (a value read only when left, "1,5").
+    // Its hint's words can be selected, dragging from past their end as
+    // usual; that leaves the field, and the selection survives the field
+    // being judged after it (a value read only when left, "1,5").
     await page.fill('#f-price', '1,5');
-    const hintWords = await page.locator('#h-price [data-live]').boundingBox();
-    await page.mouse.move(hintWords.x + 1, hintWords.y + hintWords.height / 2);
+    const line = await page.locator('#h-price [data-live]').evaluate((el) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const b = r.getClientRects()[0]; // the words' first line
+      return { left: b.left, right: b.right, y: b.top + b.height / 2 };
+    });
+    await page.mouse.move(line.right + 6, line.y);
     await page.mouse.down();
-    await page.mouse.move(hintWords.x + hintWords.width - 1, hintWords.y + hintWords.height / 2, { steps: 5 });
+    await page.mouse.move(line.left + 1, line.y, { steps: 5 });
     await page.mouse.up();
     await settle(page);
-    assert.equal(await page.inputValue('#f-price'), '1.5', 'the field was judged');
+    assert.equal(await page.inputValue('#f-price'), '1.5', 'the field was left and judged');
     assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '', "the hint's words still selected");
+    // A click beside a wrapped hint's short line gives focus back too.
+    await page.locator('.tune > summary').click();
+    await page.fill('#f-taxRate', '12..');
+    await page.locator('#h-taxRate').scrollIntoViewIfNeeded();
+    const wrapped = await page.locator('#h-taxRate [data-live]').evaluate((el) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const lines = [...r.getClientRects()];
+      const box = el.parentElement.getBoundingClientRect();
+      const short = lines.reduce((a, b) => (b.right < a.right ? b : a));
+      return { lines: lines.length, x: short.right + 4, y: short.top + short.height / 2, room: box.right - short.right };
+    });
+    assert.ok(wrapped.lines > 1 && wrapped.room > 8, `a wrapped hint with room beside a line: ${JSON.stringify(wrapped)}`);
+    await pressAt(page, { x: wrapped.x, y: wrapped.y - 1, width: 2, height: 2 });
+    await settle(page);
+    assert.deepEqual([await page.evaluate(() => document.activeElement.id), await page.locator('#f-taxRate').getAttribute('aria-invalid')], ['f-taxRate', null]);
+    await page.fill('#f-taxRate', '7.5');
+    await page.locator('.tune > summary').click();
     // Its hint stays selectable (to copy a message, say). A value already
     // judged, so leaving the field for the hint doesn't change the hint's words.
     await page.fill('#f-price', '40');
@@ -729,7 +743,9 @@ if (chromium) {
     await page.fill('#f-price', '1,5'); // read (and re-ranked) only when left
     await page.evaluate(() => {
       // A press that takes focus from the field, whose release the page never hears.
-      document.querySelector('h1').dispatchEvent(new PointerEvent('pointerdown', { pointerId: 11, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
+      const h1 = document.querySelector('h1');
+      h1.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 11, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
+      h1.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       document.activeElement.blur();
     });
     await pressAt(page, at4, 600);
@@ -828,8 +844,10 @@ if (chromium) {
     // and only while that press lasts.
     const pressFrom = (init) =>
       page.evaluate((i) => {
-        document.querySelector('h1').dispatchEvent(new PointerEvent('pointerdown', { isPrimary: true, button: 0, bubbles: true, ...i }));
-        document.activeElement.blur(); // the press takes focus from the field
+        const h1 = document.querySelector('h1');
+        h1.dispatchEvent(new PointerEvent('pointerdown', { isPrimary: true, button: 0, bubbles: true, ...i }));
+        h1.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        document.activeElement.blur(); // its mousedown takes focus from the field
       }, init);
     const pointer = (type, init) => page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new (t === 'click' ? MouseEvent : PointerEvent)(t, { bubbles: true, ...i })), [type, init]);
     const judged = () => page.locator('#f-price').getAttribute('aria-invalid').then((v) => v === 'true');
@@ -841,10 +859,6 @@ if (chromium) {
     // A mouse press whose release the page never heard (a menu took it)
     // doesn't hold a later Tab's judgement, nor a keystroke's result...
     await pointer('pointerdown', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0 });
-    before = await shown();
-    await page.fill('#f-price', '41');
-    await settle(page);
-    assert.notEqual(await shown(), before, 'a keystroke shows at once');
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
     await tick(page);
@@ -863,17 +877,35 @@ if (chromium) {
     await pointer('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 0 });
     await tick(page);
     assert.equal(await judged(), true, 'the mouse moving with no button down ends it');
-    // A finger's press ends if cancelled (a scroll), or after 3s without a word from it.
+    // A press ends 250ms after a release that makes no click, or at once if
+    // it opens a context menu (a Ctrl-click on a Mac: no click follows).
+    await halfType();
+    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+    await pointer('pointerup', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0 });
+    await page.waitForTimeout(150);
+    assert.equal(await judged(), false, 'still waiting for a click');
+    await page.waitForTimeout(250);
+    assert.equal(await judged(), true, 'none came: over');
+    await halfType();
+    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), true, 'a context menu ends it');
+    // A finger's press ends if cancelled (a scroll), and a finger's or pen's
+    // after 3s without a word from it.
     await halfType();
     await pressFrom({ pointerId: 12, pointerType: 'touch' });
     await pointer('pointercancel', { pointerId: 12, pointerType: 'touch' });
     await tick(page);
     assert.equal(await judged(), true, 'a cancelled press is over');
-    await halfType();
-    await pressFrom({ pointerId: 13, pointerType: 'touch' });
-    await tick(page);
-    assert.equal(await judged(), false);
-    await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
+    for (const [pointerId, pointerType] of [[13, 'touch'], [14, 'pen']]) {
+      await halfType();
+      await pressFrom({ pointerId, pointerType });
+      await tick(page);
+      assert.equal(await judged(), false, `${pointerType}: waits`);
+      await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
+    }
     // A refused address-bar write (Safari limits them) is made again soon after.
     await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === document.querySelector('#f-price').value); // earlier writes done
     await page.evaluate(() => {

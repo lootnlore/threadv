@@ -292,16 +292,18 @@ function setup(root) {
   //
   // A press (the main button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
-  // it's cancelled, or when a release the page never heard of shows: its
-  // pointer moving with no button down (a mouse or pen hovering) or, for a
-  // finger, which can't hover, 3s without a word from it. A mouse held still
-  // is a slow click, and keeps its press.
+  // it's cancelled or opens a context menu (no click follows either), or
+  // when a release the page never heard of shows: its pointer moving with
+  // no button down (a hovering mouse) or, for a finger or pen (which send a
+  // stream of moves while down), 3s without a word from it. A mouse held
+  // still is a slow click, and keeps its press.
   const inputSide = root.querySelector('.calc-input'); // tabs and form: nothing renders under them
-  let down = null; // the press under way: { id, at, then: what waits for it, end() }
+  let down = null; // the press under way: { id, then: what waits for it, end() }
+  let movingFocus = null; // the press whose mousedown is moving focus right now
   addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return; // a right or middle press makes no click
     const waiting = down?.end(false) ?? []; // a new press: what waited for the last waits for this one
-    const press = (down = { id: e.pointerId, at: e.timeStamp, then: waiting });
+    const press = (down = { id: e.pointerId, then: waiting });
     const stop = new AbortController();
     const on = (type, fn) => addEventListener(type, fn, { capture: true, signal: stop.signal });
     let timer = 0;
@@ -317,31 +319,32 @@ function setup(root) {
       if (run) setTimeout(() => fns.forEach((f) => f())); // after the click's own handlers
       return fns;
     };
-    const silent = e.pointerType === 'touch'; // no hover to show a missed release
+    const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     if (silent) wait(3000);
     on('pointermove', (m) => {
       if (m.pointerId !== press.id) return;
       if (!m.buttons) press.end(); // its release went unheard
       else if (silent) wait(3000);
     });
-    on('pointerup', (u) => {
-      if (u.pointerId !== press.id) return;
-      press.at = u.timeStamp;
-      wait(250); // for its click
-    });
+    on('pointerup', (u) => u.pointerId === press.id && wait(250)); // for its click
     on('pointercancel', (c) => c.pointerId === press.id && press.end());
+    on('contextmenu', () => press.end());
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
     if (!dirty || inputSide.contains(e.target)) return;
     renderSoon.cancel(); // the keystroke's render, due mid-press
     const key = dirty;
     press.then.push(() => dirty === key && render({ save: true, typing: key }));
   }, true);
-  /**
-   * Runs `fn` once the press that just moved focus (at its press or its
-   * release: a finger moves it then) is over, or a task from now otherwise.
-   */
-  function afterPress(fn, { timeStamp }) {
-    if (down && timeStamp - down.at < 100) down.then.push(fn);
+  // Focus moves in a press's mousedown (a finger's comes at its release):
+  // a focusout then is that press's doing.
+  addEventListener('mousedown', () => {
+    if (!down) return;
+    movingFocus = down;
+    setTimeout(() => (movingFocus = null));
+  }, true);
+  /** Runs `fn` once the press moving focus now is over, or a task from now if none is. */
+  function afterPress(fn) {
+    if (movingFocus && movingFocus === down) down.then.push(fn);
     else setTimeout(fn);
   }
 
@@ -503,22 +506,22 @@ function setup(root) {
       if (document.activeElement === el) return;
       showPoint(el); // the same value to the form (see readForm): nothing to redraw
       if (dirty === el.name) render({ save: true });
-    }, e);
+    });
   });
   // Pressing anywhere on the field being typed in (its label, its $ or %,
-  // its border, the gaps and the room around its hint), with any button,
-  // keeps focus in it, so it isn't judged as left. The hint's words are
-  // text to read and select: a press on them leaves the field.
-  const onWords = (el, x, y) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    return [...range.getClientRects()].some((r) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
-  };
+  // its border, the gaps), with any button, keeps focus in it, so it isn't
+  // judged as left. Its hint is text: a press there may start selecting it
+  // (and leaves the field), and one that selects nothing gives focus back.
   form.addEventListener('mousedown', (e) => {
-    const words = e.target.closest('.hint')?.querySelector('[data-live]');
-    if (words && onWords(words, e.clientX, e.clientY)) return;
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
-    if (input && input === document.activeElement && e.target !== input) e.preventDefault();
+    if (!input || input !== document.activeElement || e.target === input) return;
+    if (!e.target.closest('.hint')) return e.preventDefault();
+    const { selectionStart: from, selectionEnd: to, selectionDirection: way } = input;
+    down?.then.push(() => {
+      if (document.activeElement !== document.body || !getSelection().isCollapsed) return; // it selected something
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(from, to, way);
+    });
   });
 
   // On narrow screens the results sit below the form: "See results" (and
@@ -566,7 +569,7 @@ function setup(root) {
       // A field left half-typed is judged first, so the link is never for
       // numbers no longer in the form.
       if (dirty) render({ save: true });
-      if (!painted || painted.prompt) return; // nothing to share: the prompt has taken the results' place (and focus)
+      if (painted.prompt) return; // nothing to share: the prompt has taken the results' place (and focus)
       const url = `${location.origin}${location.pathname}${painted.link}`;
       let message = 'Link copied';
       try {
