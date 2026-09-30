@@ -263,6 +263,12 @@ if (chromium) {
     assert.equal(await page.locator('#f-cost').getAttribute('aria-invalid'), null);
     assert.equal(await page.locator('#h-cost').innerText(), 'Item cost');
     assert.match(await verdict(page), /Poshmark: \$23\.50 profit/, '$40 − $8 fee − $8.50 cost');
+    await page.fill('#f-price', '2,50');
+    await page.locator('#f-price').press('Enter'); // or once Enter takes it in
+    assert.equal(await page.inputValue('#f-price'), '2.50');
+    await settle(page);
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '2.50');
+    await page.fill('#f-price', '40');
     await page.locator('.tune > summary').click();
     await page.fill('#f-tiktokRate', 'abc');
     await page.locator('#f-tiktokRate').press('Tab');
@@ -592,13 +598,24 @@ if (chromium) {
     assert.notEqual(await tp.getAttribute('.result:first-child', 'data-id'), first, 'and the list then re-ranked for 400');
     await touch.context.close();
 
-    const { context, page } = await open('/', { viewport: { width: 1280, height: 900 } });
+    const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
     const shown = () => verdict(page);
+    // Share with a decimal comma still in the field: the link has the point.
+    await page.fill('#f-price', '2,50');
+    await page.getByRole('button', { name: 'Copy link to this result' }).click();
+    await page.getByRole('status').filter({ hasText: 'Link copied' }).waitFor();
+    const link = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(new URLSearchParams(new URL(link).hash.slice(1)).get('price'), '2.50');
+    await tick(page);
+    assert.equal(await page.inputValue('#f-price'), '2.50', 'shown as a point once left');
+    await page.fill('#f-price', '40');
+    await settle(page);
     // A click on the field's own label gives it focus straight back: a
     // half-typed value isn't judged, and a usable one shows.
     let before = await shown();
-    const label = await page.locator('label[for="f-price"]').boundingBox();
+    await page.evaluate(() => scrollTo(0, 0)); // the label clear of the sticky header
     await page.fill('#f-price', '12..');
+    const label = await page.locator('label[for="f-price"]').boundingBox();
     await page.mouse.move(label.x + 5, label.y + label.height / 2);
     await page.mouse.down();
     await page.waitForTimeout(90); // a click's press, at a person's speed
@@ -651,6 +668,12 @@ if (chromium) {
     await tick(page);
     await settle(page);
     assert.equal(await page.evaluate(() => window.writes), 0);
+    // Reset after typing into a field clears what's saved, and saves nothing back.
+    await page.fill('#f-other', 'abc');
+    await page.locator('[data-reset]').click();
+    await tick(page);
+    await settle(page);
+    assert.equal(await saved(page), null, 'nothing saved after Reset');
     // A press whose release the page never hears (a menu, a drag or another
     // window took it) doesn't hold the results back.
     for (const [why, end, price] of [
@@ -669,8 +692,8 @@ if (chromium) {
       await settle(page);
       assert.notEqual(await shown(), before, `results follow the typing after ${why}`);
     }
-    // A Shift held down for a Shift-click (Windows repeats its keydown)
-    // doesn't end the press.
+    // A Shift held down for a Shift-click (Windows repeats its keydown), or
+    // a key held since before the press, doesn't end the press.
     const third = page.locator('.result:nth-child(3)');
     const id = await third.getAttribute('data-id');
     const thirdBox = await third.locator('summary').boundingBox();
@@ -680,12 +703,39 @@ if (chromium) {
     await page.mouse.move(thirdBox.x + 20, thirdBox.y + thirdBox.height / 2);
     await page.mouse.down();
     await page.keyboard.down('Shift');
-    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', repeat: true, bubbles: true })));
+    await page.evaluate(() => {
+      for (const key of ['Shift', 'a']) document.dispatchEvent(new KeyboardEvent('keydown', { key, repeat: true, bubbles: true })); // held before the press
+    });
     await page.waitForTimeout(150);
     await page.mouse.up();
     await page.keyboard.up('Shift');
     await tick(page);
     assert.equal(await page.locator(`.result[data-id="${id}"] details`).getAttribute('open'), '', 'the Shift-click opened its row');
+    // A press ends only by its own pointer: a mouse hovering, or a finger
+    // lifting, doesn't end a pen's or the mouse's press. A right press
+    // (no click) holds nothing.
+    const press = (type, init) => page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new PointerEvent(t, { bubbles: true, ...i })), [type, init]);
+    let price = 50;
+    const held = async () => {
+      before = await shown();
+      await page.fill('#f-price', String(++price));
+      await settle(page);
+      return (await shown()) === before;
+    };
+    await press('pointerdown', { pointerId: 5, pointerType: 'touch', isPrimary: true });
+    await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+    assert.equal(await held(), true, "a hovering mouse does not end a finger's press");
+    await press('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    await press('pointerdown', { pointerId: 6, pointerType: 'touch', isPrimary: true });
+    await press('pointerup', { pointerId: 6, pointerType: 'touch' });
+    await settle(page);
+    assert.equal(await held(), true, "a new finger does not end the mouse's press");
+    await press('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+    await settle(page);
+    assert.equal(await held(), false, 'its own move with no button down does');
+    await press('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 2 });
+    assert.equal(await held(), false, 'a right press holds nothing');
+    await press('pointerup', { pointerId: 1, pointerType: 'mouse', button: 2 });
     // A Fine-tune value left by clicking a mode tab is saved, though the
     // tab's own render (not a save) is what takes it in: one held while
     // typed, and one whose comma is then written as a point.

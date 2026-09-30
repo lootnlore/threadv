@@ -101,12 +101,25 @@ function setup(root) {
     for (const box of form.querySelectorAll('input[name="platform"]')) box.checked = ids.includes(box.value);
   }
 
+  // A comma read as the decimal point, shown as one where a value is taken
+  // in (left, Enter, a link): "2,50" becomes "2.50", so a slip meant as 250
+  // can't pass unseen. Never while the field is still being typed in.
+  function showPoint(el) {
+    const text = withDecimalPoint(el.name, el.value);
+    if (text !== el.value) el.value = text;
+  }
+
   function readForm() {
     const data = new FormData(form);
     const values = {};
     // A setting with no field on the page (say, a new option declared before its
-    // field is added) keeps its default rather than reading as empty (0%).
-    for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) values[key] = field(key) ? (data.get(key) ?? '') : DEFAULTS[key];
+    // field is added) keeps its default rather than reading as empty (0%). A
+    // comma read as the decimal point is a point here, so a link, saved
+    // settings and the result don't depend on which one was typed.
+    for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) {
+      const raw = field(key) ? (data.get(key) ?? '') : DEFAULTS[key];
+      values[key] = NUMERIC.includes(key) ? withDecimalPoint(key, raw) : raw;
+    }
     values.depopBoost = data.has('depopBoost');
     return { values, platforms: data.getAll('platform') };
   }
@@ -120,10 +133,9 @@ function setup(root) {
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
     const tune = sharedView ? Object.fromEntries(params) : (saved.values ?? {});
-    // A comma read as the decimal point is shown as one, as when a field is left.
-    const put = (key, value) => setValue(key, typeof DEFAULTS[key] === 'number' ? withDecimalPoint(key, value) : value);
-    for (const key of MAIN_KEYS) put(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
-    for (const key of TUNE_KEYS) put(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
+    for (const key of MAIN_KEYS) setValue(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
+    for (const key of TUNE_KEYS) setValue(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
+    for (const key of NUMERIC) if (field(key)) showPoint(field(key));
     if (sharedView) {
       setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS);
     } else {
@@ -264,18 +276,18 @@ function setup(root) {
   }
 
   // ---- presses ----
-  // A press (a mouse button, a finger, a pen) is under way from pointerdown
-  // until the click it makes has landed. Meanwhile nothing renders: a list
+  // A press that can click (the main mouse button, a finger, a pen) is under
+  // way from pointerdown until the click it makes has landed. Meanwhile nothing renders: a list
   // redrawn, or the prompt taking its place, mid-press would move the
   // target out from under the pointer and the click would be lost. Nor is a
   // field the press took focus from judged yet: the click may give focus
   // straight back (its label). A release that makes no click ends it 250ms
-  // on. A release the page never hears of (a menu, a drag or another window
-  // took it) can't hold things up either: the pointer moving with no button
-  // down, the next first-finger or primary press, the window losing focus,
-  // a select's change (its popup takes the release) or a key (not a
-  // modifier held for a Shift-click) ends every press.
-  const presses = new Set(); // pointer ids
+  // on. A release the page never hears of (a drag or another window took
+  // it) can't hold things up either: the pointer moving with no button down
+  // ends its own press; the next primary press of its kind, the window
+  // losing focus, a select's change (its popup takes the release) or a new
+  // key (not a repeat, nor a modifier held for a Shift-click) ends them all.
+  const presses = new Map(); // pointer id -> its type (mouse, touch, pen)
   let clickDue = 0; // timer from the last release to its click (or to when none came)
   let held = null; // the render waiting, its options merged
   const afterPress = []; // what else waits (judging a field)
@@ -299,12 +311,14 @@ function setup(root) {
   /** Runs `fn` a task from now, or once the press under way is over. */
   const afterPresses = (fn) => (pressing() ? afterPress.push(fn) : setTimeout(fn));
   addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return; // a right or middle press makes no click
     stopClickTimer(); // a new press: the last release's wait is over
-    if (e.isPrimary) presses.clear(); // no earlier pointer is still down
-    presses.add(e.pointerId);
+    // The first finger (or the mouse, or the pen) down: no earlier one of its kind still is.
+    if (e.isPrimary) for (const [id, type] of presses) if (type === e.pointerType) presses.delete(id);
+    presses.set(e.pointerId, e.pointerType);
   }, true);
   addEventListener('pointermove', (e) => {
-    if (e.buttons === 0 && presses.size) endPresses(); // its release went unheard
+    if (e.buttons === 0 && presses.delete(e.pointerId) && !presses.size) endPresses(); // its release went unheard
   }, true);
   addEventListener('pointerup', (e) => {
     if (!presses.delete(e.pointerId) || presses.size) return;
@@ -334,8 +348,11 @@ function setup(root) {
    * before "1,234"), so until it is usable nothing changes: no flag, no
    * prompt in place of the results, nothing saved. It stays `dirty` and is
    * judged when the user leaves the field or presses Enter. A usable value
-   * shows its results at once. The list is redrawn only when the result
-   * changed. During a press it all waits (see presses).
+   * shows its results at once. Any render that isn't a keystroke's (the
+   * user using a tab, a checkbox, Enter...) judges every field, the dirty one
+   * too; callers pass `save` when it comes from the user. The list is
+   * redrawn only when the result changed. During a press it all waits (see
+   * presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
@@ -350,8 +367,7 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, state.values[typed.key]))) return;
-    if (dirty) save = true; // a typed value it takes in is the user's edit, whatever asked for this render
+    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) return;
     dirty = '';
     rendered = state;
     flag(checks);
@@ -415,7 +431,7 @@ function setup(root) {
 
   // ---- modes (tabs) ----
 
-  function setMode(next, { moveFocus = false } = {}) {
+  function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
     for (const tab of tabs) {
       const on = tab.dataset.mode === mode;
@@ -427,11 +443,12 @@ function setup(root) {
     hint.textContent = MODES[mode].hint;
     hintFor('target').dataset.default = MODES[mode].targetHint;
     for (const name of MAIN_KEYS) fieldBox(name).hidden = MODES[mode].hidden.includes(name);
-    render();
+    render({ save });
   }
 
+  // The user's own switch: it takes in (and saves) anything they left typed.
   function selectMode(next, opts) {
-    setMode(next, opts);
+    setMode(next, { ...opts, save: true });
     syncUrl();
   }
 
@@ -474,13 +491,7 @@ function setup(root) {
     if (el.type !== 'text') return;
     afterPresses(() => {
       if (document.activeElement === el) return; // not left after all
-      // Left, a comma read as the decimal point is shown as one: "2,50"
-      // becomes "2.50", so a slip meant as 250 can't pass unseen.
-      const pointed = withDecimalPoint(el.name, el.value);
-      if (pointed !== el.value) {
-        el.value = pointed;
-        dirty = el.name;
-      }
+      showPoint(el); // the same value to the form (see readForm): nothing to redraw
       if (dirty === el.name) render({ save: true });
     });
   });
@@ -491,6 +502,7 @@ function setup(root) {
   seeResults.hidden = false;
   form.addEventListener('submit', (e) => {
     e.preventDefault();
+    if (document.activeElement?.type === 'text' && form.contains(document.activeElement)) showPoint(document.activeElement);
     render({ save: true });
     // Nothing to show yet: go to what needs fixing (opening Fine-tune if it's
     // in there), not away from it.
@@ -507,7 +519,7 @@ function setup(root) {
     storage.clear();
     for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) setValue(key, DEFAULTS[key]);
     setPlatforms(ALL_IDS);
-    render();
+    render(); // not a save: it takes in (and drops) whatever was typed
     syncUrl();
   });
 

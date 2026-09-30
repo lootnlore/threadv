@@ -98,8 +98,9 @@ export function inputProblem(key, raw, { sellPrice = false } = {}) {
  * isn't read until the field is left.
  */
 export function stillTyping(key, raw) {
-  const lead = /^([1-9]\d{0,2}),\d{0,2}$/.exec(bare(String(raw)))?.[1];
-  return !isRate(key) && lead !== undefined && Number(lead) * 1000 <= LIMITS.money; // "250,5" can't become an amount in range: read now
+  const [, lead, tail] = /^\+?([1-9]\d{0,2}),(\d{0,2})$/.exec(bare(String(raw))) ?? [];
+  // "100," may become "100,000"; "100,1" or "250,5" can't end in range: read now.
+  return !isRate(key) && lead !== undefined && Number(lead) * 1000 + Number(tail.padEnd(3, '0')) <= LIMITS.money;
 }
 
 /** The text with a comma read as the decimal point written as one ("12,50" is "12.50"), so the field shows how it was read. */
