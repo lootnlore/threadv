@@ -189,33 +189,52 @@ if (chromium) {
     await pressAt(page, await locator.boundingBox(), ms);
   };
   // A real long press at `at`: Chromium's mouse sent as a finger, held past
-  // the long-press time, until the page hears its context menu event;
-  // `whileDown` runs then, and the finger lifts once it's done. Resolves,
-  // once the page has heard the lift, to the menu events it heard as
-  // [trusted, kind, from the finger pressing]. (Neither DevTools call
+  // the long-press time (until the page hears the context menu event it
+  // makes); `whileDown` runs then, and the finger lifts once it's done.
+  // Resolves once the page has heard the lift. (Neither DevTools call
   // answers while touch is emulated, so neither is awaited; detaching the
   // sessions ends the emulation, whatever happens.)
   const realLongPress = async (page, at, whileDown = async () => {}) => {
     await page.evaluate(() => {
-      const heard = (window.longPress = { id: undefined, menus: [], lifted: false, done: new AbortController() });
+      const heard = (window.longPress = { id: undefined, held: false, lifted: false, done: new AbortController() });
       const opts = { capture: true, signal: heard.done.signal };
       addEventListener('pointerdown', (e) => (heard.id ??= e.pointerId), opts);
+      addEventListener('contextmenu', (e) => e.pointerId === heard.id && (heard.held = true), opts);
       addEventListener('pointerup', (e) => e.pointerId === heard.id && (heard.lifted = true), opts);
-      addEventListener('contextmenu', (e) => heard.menus.push([e.isTrusted, e.pointerType, e.pointerId === heard.id]), opts);
     });
-    const [press, lift] = await Promise.all([page.context().newCDPSession(page), page.context().newCDPSession(page)]);
+    const sessions = [];
+    const session = async () => {
+      sessions.push(await page.context().newCDPSession(page));
+      return sessions.at(-1);
+    };
     try {
+      const [press, lift] = [await session(), await session()];
       await press.send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
       press.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 }).catch(() => {});
-      await page.waitForFunction(() => window.longPress.menus.length > 0, null, { timeout: 3000 });
+      await page.waitForFunction(() => window.longPress.held, null, { timeout: 3000 });
       await whileDown();
       lift.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 }).catch(() => {});
       await page.waitForFunction(() => window.longPress.lifted);
-      return await page.evaluate(() => window.longPress.menus);
     } finally {
-      await Promise.all([press.detach(), lift.detach()]).catch(() => {});
+      await Promise.all(sessions.map((session) => session.detach().catch(() => {})));
       await page.evaluate(() => window.longPress.done.abort()).catch(() => {});
     }
+  };
+  // Makes the page's events look as another browser sends them: `as`
+  // (source text) maps an event and its real `prop` (of `proto`'s
+  // prototype) to what the page reads. Resolves to what undoes every such
+  // change, to call in a finally. (A string, not a function, crosses into
+  // the page.)
+  const dress = async (page, proto, prop, as) => {
+    await page.evaluate(`(() => {
+      const real = Object.getOwnPropertyDescriptor(${proto}.prototype, '${prop}');
+      const as = ${as};
+      Object.defineProperty(${proto}.prototype, '${prop}', { configurable: true, get() { return as(this, real.get.call(this)); } });
+      (window.undress ??= []).push(() => Object.defineProperty(${proto}.prototype, '${prop}', real));
+    })()`);
+    return () => page.evaluate(() => {
+      while (window.undress?.length) window.undress.pop()();
+    });
   };
 
   test('results are pre-rendered without JavaScript', async () => {
@@ -715,15 +734,16 @@ if (chromium) {
     const listed = await verdict(tp);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
     await tp.keyboard.press('Tab'); // Next
+    await tick(tp); // (it's judged a task after focus leaves it: before a person's next key)
     await tp.keyboard.type('1,'); // and on into the next field, half-typed
-    await tp.waitForTimeout(150);
-    const afterNext = await verdict(tp);
+    await tp.waitForTimeout(400); // past the address bar's wait
+    const afterNext = [await verdict(tp), await inAddressBar(tp, 'price')];
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual(
       [afterNext, await openRows(), await verdict(tp), await tp.getAttribute('#f-price', 'aria-invalid')],
-      [listed, [aim.row], 'Check “Sell price”. Write it like 1,234.50.', 'true'],
-      'Next: judged at once, shown once the finger lifted',
+      [[listed, '12..'], [aim.row], 'Check “Sell price”. Write it like 1,234.50.', 'true'],
+      'Next: judged (and saved) at once, shown once the finger lifted',
     );
     await tp.fill('#f-cost', '0');
     aim = await tapFirstRow();
@@ -795,10 +815,10 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock, a script: Go went');
-    // A long press holds as any finger does, its menu (sent for any long
-    // press, menu or none) changing nothing: a digit and Go typed while it
-    // rests re-rank and jump only once it lifts, and then soon (250ms on:
-    // it makes no click), not seconds later.
+    // A long press holds as any finger does, its context menu (sent for
+    // any long press, menu or none) changing nothing: a digit and Go typed
+    // while it rests re-rank and jump only once it lifts, and then soon
+    // (250ms on: it makes no click), not seconds later.
     aim = await tapFirstRow();
     let duringLong;
     await realLongPress(tp, aim.finger, async () => {
@@ -806,7 +826,7 @@ if (chromium) {
       await tp.keyboard.press('End');
       await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
       await tp.keyboard.press('Enter'); // Go
-      await tp.waitForTimeout(400);
+      await tp.waitForTimeout(150);
       duringLong = [await firstRow(), await tp.evaluate(() => scrollY)];
     });
     await tp.waitForFunction((row) => document.querySelector('.result:first-child').dataset.id !== row, aim.row, { timeout: 1000 });
@@ -816,58 +836,92 @@ if (chromium) {
       [[aim.row, 0], [true, true]],
       'a long press: nothing re-ranked or scrolled while it rested; then both, Go jumping to the verdict',
     );
+    // A long press selecting words in the list, which takes focus from a
+    // field left half-typed ("40," is 40. once the press is over): the same
+    // numbers, so the list isn't repainted, and the words stay selected.
+    aim = await tapFirstRow();
+    await tp.evaluate(() => (document.querySelector('.result:first-child').dataset.kept = ''));
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await tp.keyboard.type(',');
+    let pressedWords;
+    await realLongPress(tp, aim.finger, async () => (pressedWords = await tp.evaluate(() => String(getSelection()))));
+    await tp.waitForTimeout(600);
+    assert.deepEqual(
+      [pressedWords !== '', await tp.inputValue('#f-price'), await tp.evaluate(() => [String(getSelection()), document.querySelector('.result:first-child').hasAttribute('data-kept')])],
+      [true, '40.', [pressedWords, true]],
+      'the field judged once it lifted; nothing repainted, the words still selected',
+    );
+    // A long press beside the field being typed in takes focus from it too
+    // (with no mousedown to keep it), with nothing judged or saved while it
+    // rests. Selecting nothing (the empty end of the label), focus comes
+    // back once it lifts, unjudged. Selecting words (the label's), it left
+    // the field, judged once it lifts. Selecting the hint's, that judgement
+    // swaps them for the flag, so nothing is selected, and focus comes back.
+    for (const [spot, at, after] of [
+      ['the empty end of its label', (b) => ({ x: b.x + b.width - 4, y: b.y + b.height / 2 }), ['f-price', null, '40']],
+      ["its label's words", (b) => ({ x: b.x + 8, y: b.y + b.height / 2 }), ['', 'true', '12..']],
+      ["its hint's words", null, ['f-price', 'true', '12..']],
+    ]) {
+      await tapFirstRow(); // 40, in the address bar
+      await tp.fill('#f-price', '12..');
+      const box = await tp.locator(at ? 'label[for="f-price"]' : '#h-price').boundingBox();
+      let resting;
+      await realLongPress(tp, at ? at(box) : { x: box.x + 10, y: box.y + box.height / 2 }, async () => {
+        await tp.waitForTimeout(400); // past the address bar's wait
+        resting = [await tp.evaluate(() => document.activeElement.id), await inAddressBar(tp, 'price')];
+      });
+      await tp.waitForTimeout(700); // the press over 250ms on, then the address bar's wait
+      assert.deepEqual(
+        [resting, [...(await focusAndFlag(tp, '#f-price')), await inAddressBar(tp, 'price')]],
+        [['', '40'], after],
+        `a long press on ${spot}`,
+      );
+    }
     // A click naming no pointer (Safari before it sent pointer events) is
     // taken as the tap of the press under way, and the click a label passes
     // on to its field (Firefox counts it as a second click) as the same tap:
     // a tap on the label still keeps Go.
-    for (const quirk of ['no pointer named', 'the label\'s click passed on, counted']) {
+    for (const [quirk, proto, prop, as] of [
+      ['no pointer named', 'PointerEvent', 'pointerId', "(e, v) => (e.type === 'click' ? undefined : v)"],
+      ["the label's click passed on, counted", 'UIEvent', 'detail', "(e, v) => (e.type === 'click' && v === 0 && e.target?.id === 'f-price' ? 1 : v)"],
+    ]) {
       await tapFirstRow();
       await tp.focus('#f-price');
-      await tp.evaluate((q) => {
-        const [proto, prop] = q === 'no pointer named' ? [PointerEvent.prototype, 'pointerId'] : [UIEvent.prototype, 'detail'];
-        const real = Object.getOwnPropertyDescriptor(proto, prop);
-        Object.defineProperty(proto, prop, {
-          configurable: true,
-          get() {
-            const v = real.get.call(this);
-            if (this.type !== 'click') return v;
-            return q === 'no pointer named' ? undefined : v === 0 && this.target?.id === 'f-price' ? 1 : v;
-          },
-        });
-        window.unquirk = () => Object.defineProperty(proto, prop, real);
-      }, quirk);
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
-      await tp.keyboard.press('Enter');
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      await settle(tp);
-      await tp.evaluate(() => window.unquirk());
+      const undress = await dress(tp, proto, prop, as);
+      try {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
+        await tp.keyboard.press('Enter');
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await settle(tp);
+      } finally {
+        await undress();
+      }
       assert.ok((await tp.evaluate(() => scrollY)) > 0, `${quirk}: Go went`);
     }
     // Naming no pointer, or one that pressed nothing (a browser numbering
     // its clicks its own way), a tap on a row is still a choice (Go
     // dropped), and still over at its click: what it held is drawn at once,
     // not 250ms on.
-    const clicksName = (id) =>
-      tp.evaluate((named) => {
-        const real = Object.getOwnPropertyDescriptor(PointerEvent.prototype, 'pointerId');
-        Object.defineProperty(PointerEvent.prototype, 'pointerId', { configurable: true, get() { return this.type === 'click' ? (named ?? undefined) : real.get.call(this); } });
-        window.unquirk = () => Object.defineProperty(PointerEvent.prototype, 'pointerId', real);
-      }, id ?? null);
-    const noPointer = () => clicksName(undefined);
+    const clicksName = (id) => dress(tp, 'PointerEvent', 'pointerId', `(e, v) => (e.type === 'click' ? ${id} : v)`);
     for (const [how, id] of [['no pointer named', undefined], ['a pointer named that pressed nothing', 1]]) {
       aim = await tapFirstRow();
       await tp.focus('#f-price');
       await tp.keyboard.press('End');
-      await clicksName(id);
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-      await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
-      await tp.keyboard.press('Enter');
-      await tp.waitForTimeout(150);
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      await tp.waitForTimeout(100);
-      const drawnAtClick = (await firstRow()) !== aim.row;
-      await settle(tp);
-      await tp.evaluate(() => window.unquirk());
+      const undress = await clicksName(id);
+      let drawnAtClick;
+      try {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+        await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
+        await tp.keyboard.press('Enter');
+        await tp.waitForTimeout(150);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await tp.waitForTimeout(100);
+        drawnAtClick = (await firstRow()) !== aim.row;
+        await settle(tp);
+      } finally {
+        await undress();
+      }
       assert.deepEqual([drawnAtClick, await tp.evaluate(() => document.activeElement.matches('[data-verdict]'))], [true, false], `${how}: over at its click, and a choice`);
     }
     // ...unless another press begins first: the user has moved on.
@@ -900,88 +954,57 @@ if (chromium) {
     await tp.evaluate(() => {
       for (const d of document.querySelectorAll('.result details[open]')) d.open = false;
     });
-    // A mouse's click (a laptop's trackpad) doesn't end a finger's press.
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.type('0');
-    await tp.mouse.click(formSpot.x + 10, formSpot.y + 5); // the mode's hint: a click that does nothing
-    await tp.waitForTimeout(150);
-    const afterMouse = await firstRow();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
-    assert.deepEqual([afterMouse, (await firstRow()) !== aim.row], [aim.row, true], "held through the mouse's click, until the finger lifted");
-    // Nor does a mouse's menu sent with the main button, as the finger's
-    // press was (a Ctrl-click's on a Mac: here a right click made to look so).
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.evaluate(() => {
-      const real = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'button');
-      Object.defineProperty(MouseEvent.prototype, 'button', { configurable: true, get() { return real.get.call(this) === 2 ? 0 : real.get.call(this); } });
-      window.unquirk = () => Object.defineProperty(MouseEvent.prototype, 'button', real);
-    });
-    await tp.mouse.click(onForm.x, onForm.y, { button: 'right' }); // on the field's label: focus stays in it
-    await tp.keyboard.type('0'); // the mouse's menu is gone: its press over, not the finger's
-    await tp.waitForTimeout(150);
-    const afterMenu = await firstRow();
-    await tp.evaluate(() => window.unquirk());
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
-    assert.deepEqual([afterMenu, (await firstRow()) !== aim.row], [aim.row, true], "held through a mouse's menu, until the finger lifted");
-    // Nor does the click of a mouse whose press a key already ended.
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.type('0');
-    await tp.mouse.move(formSpot.x + 10, formSpot.y + 5);
-    await tp.mouse.down();
-    await tp.keyboard.press('Escape'); // ends the mouse's press (a key does)
-    await tp.mouse.up(); // its click, from a pointer whose press is over
-    await tp.waitForTimeout(150);
-    const afterEndedClick = await firstRow();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
-    assert.deepEqual([afterEndedClick, (await firstRow()) !== aim.row], [aim.row, true], 'held through it too');
-    // Likewise where clicks name no pointer: it began on the mode's hint,
-    // not where the finger is.
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await noPointer();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.type('0');
-    await tp.mouse.move(formSpot.x + 10, formSpot.y + 5);
-    await tp.mouse.down();
-    await tp.keyboard.press('Escape');
-    const h1Box = await tp.locator('h1').boundingBox();
-    await tp.mouse.move(h1Box.x + 10, h1Box.y + 10, { steps: 4 }); // dragged on: its click lands on what holds both
-    await tp.mouse.up();
-    await tp.waitForTimeout(150);
-    const unnamed = await firstRow();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
-    await tp.evaluate(() => window.unquirk());
-    assert.deepEqual([unnamed, (await firstRow()) !== aim.row], [aim.row, true], 'held through it, no pointer named');
-    // Nor, naming no pointer, does a mouse's click on another row (inside
-    // what the finger is on): it's the mouse's.
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await noPointer();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.type('0');
-    const secondRow = await tp.locator('.result:nth-child(2) summary').boundingBox();
-    await tp.mouse.click(secondRow.x + 30, secondRow.y + secondRow.height / 2);
-    await tp.waitForTimeout(150);
-    const mouseOnRow = await firstRow();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
-    await tp.evaluate(() => window.unquirk());
-    assert.deepEqual([mouseOnRow, (await firstRow()) !== aim.row], [aim.row, true], "a mouse's click on another row, no pointer named: the finger's hold kept");
+    // A finger rests on the first row while a digit is typed (40 becomes
+    // 400: the list re-ranks once drawn) and `during` runs, then lifts:
+    // [the list stayed put while it rested, and re-ranked once it lifted].
+    const heldThrough = async (during) => {
+      const rest = await tapFirstRow();
+      await tp.focus('#f-price');
+      await tp.keyboard.press('End');
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [rest.finger] });
+      await tp.keyboard.type('0');
+      await during();
+      await tp.waitForTimeout(150);
+      const resting = await firstRow();
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+      return [resting === rest.row, (await firstRow()) !== rest.row];
+    };
+    // A mouse's click (a laptop's trackpad) doesn't end a finger's press,
+    // nor does its right click, or a key ending the mouse's press after it.
+    assert.deepEqual(await heldThrough(() => tp.mouse.click(formSpot.x + 10, formSpot.y + 5)), [true, true], "held through the mouse's click (on the mode's hint: it does nothing)");
+    const rightClick = async () => {
+      await tp.mouse.click(onForm.x, onForm.y, { button: 'right' }); // on the field's label: focus stays in it
+      await tp.keyboard.type('0');
+    };
+    assert.deepEqual(await heldThrough(rightClick), [true, true], "held through the mouse's right click, and the key after it");
+    // Nor does the click of a mouse whose press a key already ended...
+    const endedClick = async (dragged = false) => {
+      await tp.mouse.move(formSpot.x + 10, formSpot.y + 5);
+      await tp.mouse.down();
+      await tp.keyboard.press('Escape'); // ends the mouse's press (a key does)
+      if (dragged) {
+        const h1Box = await tp.locator('h1').boundingBox();
+        await tp.mouse.move(h1Box.x + 10, h1Box.y + 10, { steps: 4 }); // its click lands on what holds both
+      }
+      await tp.mouse.up(); // its click, from a pointer whose press is over
+    };
+    assert.deepEqual(await heldThrough(endedClick), [true, true], 'held through it too');
+    // ...likewise where clicks name no pointer: it began on the mode's hint,
+    // not where the finger is. Nor, naming no pointer, does a mouse's click
+    // on another row (inside what the finger is on): it's the mouse's.
+    const clickOnSecondRow = async () => {
+      const second = await tp.locator('.result:nth-child(2) summary').boundingBox();
+      await tp.mouse.click(second.x + 30, second.y + second.height / 2);
+    };
+    for (const [how, during] of [['a click dragged on, its press ended', () => endedClick(true)], ["a mouse's click on another row", clickOnSecondRow]]) {
+      const undress = await clicksName(undefined);
+      try {
+        assert.deepEqual(await heldThrough(during), [true, true], `${how}, no pointer named: the finger's hold kept`);
+      } finally {
+        await undress();
+      }
+    }
     // What's judged during a hold is what was last judged, not what's
     // drawn: a fixed price emptied again waits, as it would with no finger
     // (here on the field's own label, which keeps focus in it).
@@ -1377,7 +1400,6 @@ if (chromium) {
     assert.equal(await page.locator('[data-results]').isVisible(), true, 'the results back');
     // A keystroke's render due when a press on the hint begins waits for it,
     // whichever the button, so the words under it aren't swapped mid-press.
-    // (A right press is over once its menu is: a key the page hears says so.)
     const fixUnderPress = async (button) => {
       await page.fill('#f-price', '12..');
       await page.locator('#f-price').press('Tab');
@@ -1390,7 +1412,6 @@ if (chromium) {
       await page.waitForTimeout(150);
       const midPress = await hintText();
       await mouse('mouseReleased', at, { button });
-      if (button === 'right') await page.keyboard.press('Shift'); // the menu closed
       await settle(page);
       return [(await pressGap(page)) < 60, midPress, await hintText()];
     };
@@ -1398,7 +1419,8 @@ if (chromium) {
       assert.deepEqual(await fixUnderPress(button), [true, 'Write it like 1,234.50.', 'What it will sell for'], `${button}: due at the press, unchanged under it, then updated`);
     }
     // A right press on a row with a render due: its menu opens on the row
-    // aimed at, and the list re-ranks once the menu is gone.
+    // aimed at, and the list re-ranks once the press is over (250ms after
+    // its release, with no move).
     await page.fill('#f-price', '40');
     await settle(page);
     await page.keyboard.press('End');
@@ -1414,7 +1436,6 @@ if (chromium) {
     await mouse('mouseReleased', rowAt, { button: 'right' });
     await page.waitForTimeout(150);
     const underMenu = await page.evaluate(() => [window.menuOn, document.querySelector('.result').dataset.id]);
-    await hover({ x: rowAt.x + 5, y: rowAt.y }); // back from the menu
     await settle(page);
     assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
     assert.deepEqual(underMenu, [aimed, aimed], 'the menu on the row aimed at, the list as it was');
@@ -1452,7 +1473,7 @@ if (chromium) {
     assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
     assert.deepEqual([rankedMidDrag, (await page.getAttribute('.result:first-child', 'data-id')) !== rankedBeforeDrag], [rankedBeforeDrag, true], 'held under the drag, then re-ranked');
     // A right press that takes focus from a half-typed field: judged once
-    // the menu is gone, not under it.
+    // the press is over, not as it goes down.
     await page.fill('#f-price', '40');
     await settle(page);
     await page.fill('#f-price', '12..');
@@ -1461,11 +1482,10 @@ if (chromium) {
     await mouse('mousePressed', rowAt, { button: 'right' });
     await mouse('mouseReleased', rowAt, { button: 'right' });
     await page.waitForTimeout(150);
-    const leftUnderMenu = [await page.evaluate(() => document.activeElement.id), await shown()];
-    await hover({ x: rowAt.x + 5, y: rowAt.y });
+    const leftMidPress = [await page.evaluate(() => document.activeElement.id), await shown()];
     await settle(page);
-    assert.deepEqual(leftUnderMenu, ['', before], 'left, but not judged under its menu');
-    assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.', 'judged once it was gone');
+    assert.deepEqual(leftMidPress, ['', before], 'left, but not judged yet');
+    assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.', 'judged once the press was over');
     // A press below the calculator holds a keystroke's render too: the
     // results coming back in the prompt's place would move it.
     await page.fill('#f-price', '');
@@ -1592,7 +1612,8 @@ if (chromium) {
     await page.fill('#f-price', '40');
     await settle(page);
     // A right press holds back a keystroke's render due when it began, like
-    // any press off the form, and its menu with it: once that's gone, it shows.
+    // any press off the form, until 250ms after its release (no click comes;
+    // a menu open by then sits above the page).
     before = await shown();
     await page.focus('#f-price');
     await page.keyboard.type('1');
@@ -1601,12 +1622,11 @@ if (chromium) {
     await page.waitForTimeout(300);
     const during = await shown();
     await page.mouse.up({ button: 'right' });
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(100);
     const released = await shown();
-    await page.mouse.move(650, 20); // back from the menu
     await settle(page);
-    assert.deepEqual([during, released], [before, before], 'held while the button was down, and its menu open');
-    assert.notEqual(await shown(), before, 'then shown');
+    assert.deepEqual([during, released], [before, before], 'held while the button was down, and just past its release');
+    assert.notEqual(await shown(), before, 'then shown, the mouse unmoved');
     // Typing "1,234" key by key shows no result for $1.20 or $1.23 on the
     // way (its comma may still separate thousands): $1 stays until $1,234.
     await page.fill('#f-price', '');
@@ -1724,16 +1744,20 @@ if (chromium) {
     await tick(page);
     assert.equal(await judged(), true, 'the mouse moving with no button down ends it');
     await liftUnheard('mouse');
-    // A press ends 250ms after a release that makes no click.
-    await halfType();
-    await pressFrom('mouse');
-    await page.evaluate(() => window.unheard.add('click'));
-    await mouseAt('mouseReleased', { button: 'left' });
-    await page.evaluate(() => window.unheard.clear());
-    await page.waitForTimeout(150);
-    const beforeItsWait = await judged();
-    await page.waitForTimeout(250);
-    assert.deepEqual([beforeItsWait, await judged()], [false, true], 'waits 250ms for a click; none came: over');
+    // A press ends 250ms after a release that makes no click: one whose
+    // click went unheard, and a right click's (its menu, if one opens at
+    // the release, sits above the page: nothing waits for it).
+    for (const button of ['left', 'right']) {
+      await halfType();
+      await pressFrom('mouse', button);
+      await page.evaluate(() => window.unheard.add('click'));
+      await mouseAt('mouseReleased', { button });
+      await page.evaluate(() => window.unheard.clear());
+      await page.waitForTimeout(150);
+      const beforeItsWait = await judged();
+      await page.waitForTimeout(250);
+      assert.deepEqual([beforeItsWait, await judged()], [false, true], `${button}: waits 250ms for a click; none came: over`);
+    }
     // Released, a hovering pointer (a pen before its tap's click) doesn't end
     // the press: its click may still come (none does here: over 250ms on).
     await halfType();
@@ -1746,93 +1770,27 @@ if (chromium) {
     const hovered = await judged();
     await page.waitForTimeout(300);
     assert.deepEqual([hovered, await judged()], [false, true], 'not over at the hover; 250ms after its release');
-    // Another button's menu isn't this press's: a right press while the left is down.
+    // Another button pressed while the left is down (a chord, sent as a
+    // move with both down, and the right one's menu) doesn't end its press.
     await halfType();
     await pressFrom('mouse');
     await mouseAt('mousePressed', { button: 'right', buttons: 3 });
     await tick(page);
     await tick(page);
-    assert.equal(await judged(), false, "the right button's menu isn't the left's press");
+    assert.equal(await judged(), false, "the right button pressed too: the left's press goes on");
     await mouseAt('mouseReleased', { button: 'right', buttons: 1 });
     await hoverOff();
     await liftUnheard('mouse');
-    // One whose button opens its context menu (a right click, a pen's
-    // barrel button, a Ctrl-click on a Mac) is over once the menu is: at a
-    // move with no button down, a key the page hears, a scroll or another
-    // press (a finger's, say), not at its release (the menu may still be
-    // open); a pen's after 3s without a word. Firefox and Safari send the
-    // menu naming no pointer.
-    for (const [pointerType, end, named] of [['mouse', 'a move', true], ['mouse', 'a key', false], ['mouse', 'a scroll', true], ['mouse', "a finger's tap", true], ['pen', 'a move', true], ['pen', '3s without a word', true]]) {
-      const how = `${pointerType}'s menu${named ? '' : ' naming no pointer'}, then ${end}`;
-      await halfType();
-      if (!named) {
-        await page.evaluate(() => {
-          const real = ['pointerId', 'pointerType'].map((prop) => [prop, Object.getOwnPropertyDescriptor(PointerEvent.prototype, prop)]);
-          for (const [prop, d] of real) Object.defineProperty(PointerEvent.prototype, prop, { configurable: true, get() { return this.type === 'contextmenu' ? undefined : d.get.call(this); } });
-          window.unquirk = () => real.forEach(([prop, d]) => Object.defineProperty(PointerEvent.prototype, prop, d));
-        });
-      }
-      await pressFrom(pointerType, 'right'); // its menu opens as it goes down
-      await mouseAt('mouseReleased', { button: 'right', pointerType });
-      await page.waitForTimeout(400);
-      assert.equal(await judged(), false, `${how}: waits, past its release`);
-      if (end === 'a move') await hoverOff(pointerType);
-      else if (end === 'a key') await page.keyboard.press('Shift');
-      else if (end === 'a scroll') {
-        await mouseAt('mouseWheel', { deltaX: 0, deltaY: 40 });
-        await page.waitForTimeout(150); // (wheel events reach the page on their own schedule)
-      } else if (end === "a finger's tap") {
-        await devtools.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [await h1At()] });
-        await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-        await page.waitForTimeout(300); // (its own press is over at its click, or 250ms on)
-      } else await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
-      await tick(page);
-      await tick(page);
-      if (!named) await page.evaluate(() => window.unquirk());
-      assert.equal(await judged(), true, `${how}: over`);
-    }
-    // A long press's menu, which browsers send for any long press (menu or
-    // none), changes nothing: a key doesn't end the press while the finger
-    // (or pen) is down, and it's over 250ms after the lift, as any press
-    // whose release makes no click. As Chromium sends a finger's (named by
-    // it, with no button), as Firefox does (the right button, no kind), and
-    // a pen's held still (no button, or the right one as on Windows).
-    const longShapes = [
-      ['a finger, as Chromium sends it', {}],
-      ['a finger, as Firefox sends it', { menu: { button: 2, pointerType: null } }],
-      ['a pen held still', { kind: 'pen' }],
-      ['a pen held still, as Windows sends it', { kind: 'pen', menu: { button: 2 } }],
-    ];
-    for (const [how, shape] of longShapes) {
-      await halfType();
-      await page.evaluate((sh) => {
-        const real = [[PointerEvent.prototype, 'pointerType'], [MouseEvent.prototype, 'button']].map(([proto, prop]) => [proto, prop, Object.getOwnPropertyDescriptor(proto, prop)]);
-        for (const [proto, prop, d] of real) {
-          Object.defineProperty(proto, prop, {
-            configurable: true,
-            get() {
-              const v = d.get.call(this);
-              if (this.type === 'contextmenu' && sh.menu && prop in sh.menu) return sh.menu[prop] ?? undefined;
-              return prop === 'pointerType' && v === 'touch' && sh.kind ? sh.kind : v;
-            },
-          });
-        }
-        window.unquirk = () => real.forEach(([proto, prop, d]) => Object.defineProperty(proto, prop, d));
-      }, shape);
-      let whileDown;
-      // (The long press takes focus from the half-typed field, as a tap
-      // does at its lift: its flag waits for the press.)
-      const menus = await realLongPress(page, await h1At(), async () => {
-        await page.keyboard.press('KeyA');
-        await tick(page);
-        await tick(page);
-        whileDown = await judged();
-      });
-      await page.evaluate(() => window.unquirk());
-      if (!shape.menu && !shape.kind) assert.deepEqual(menus[0], [true, 'touch', true], "the long press's own menu, the user's, named by its finger");
-      assert.equal(whileDown, false, `${how}: a key while it's down doesn't end its press`);
-      await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 1000 });
-    }
+    // A mouse's press whose release went unheard (a menu opening as it went
+    // down took it) is over at another pointer's press too: a mouse is
+    // rarely held down while a finger or pen presses.
+    await halfType();
+    await pressFrom('mouse', 'right');
+    await liftUnheard('mouse', 'right');
+    await devtools.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [await h1At()] });
+    await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(300); // (the tap's own press is over at its click, or 250ms on)
+    assert.equal(await judged(), true, "a finger's tap: the mouse's press is over");
     // A finger's press ends if the browser takes it (a pan), and a finger's
     // or pen's after 3s without a word from it.
     await halfType();

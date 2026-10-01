@@ -333,31 +333,32 @@ function setup(root) {
   // So render works out the numbers, judges and saves at once, but what it
   // draws (flags and hints, the mode's fields, the results) waits while a
   // press that could see it is down, and so do moves of the view (Go's jump
-  // to the verdict, a tab an arrow focused scrolling into view).
+  // to the verdict, a tab an arrow focused scrolling into view). Drawn, the
+  // results are repainted only if they changed (see paint), so words
+  // selected in them stay until they're no longer true.
   // A finger's or pen's press holds them all: until it lifts, focus stays
   // where it was (unless it's a long press, which takes it), and keys typed
-  // with the other hand (a digit, Next, Go) reach the page. A mouse's holds them off the form side, on a hint, or
-  // once a drag reaches either: a render changes nothing else on the form
-  // side (a test checks), and a key ends a mouse's press (below). Renders a
-  // press's own click makes (a tab, a checkbox) come once it's over, and
-  // draw at once.
+  // with the other hand (a digit, Next, Go) reach the page. A mouse's holds
+  // them off the form side, on a hint, or once a drag reaches either: a
+  // render changes nothing else on the form side (a test checks), and a key
+  // ends a mouse's press (below). Renders a press's own click makes (a tab,
+  // a checkbox) come once it's over, and draw at once.
   //
   // A press (any button, a finger, a pen; each finger its own) is over at
-  // the click it makes, 250ms after a release that makes none, when it's
-  // cancelled, or when a release the page never heard of shows: its pointer
-  // moving with no button down before any release (a hovering mouse) or
-  // pressing again; for a finger or pen (which send a stream of moves while
-  // down), 3s without a word from it; for a mouse, a key (it's rarely held
-  // down while typing, and a key after an unheard release means the user
-  // has moved on). A mouse held still is a slow click, and keeps its press.
-  // A press whose button opens a context menu (a right click, say) is over
-  // once the menu is: when the page hears from the user again (a move, a
-  // key, a scroll, a press), or, for a pen, after 3s without a word. A long
-  // press's menu changes nothing: browsers send one for any long press,
-  // menu or none, so it's over as any press whose release makes no click.
+  // the click it makes, 250ms after a release that makes none (a long
+  // press's, a right click's), when it's cancelled, or when a release the
+  // page never heard of shows: its pointer moving with no button down before
+  // any release (a hovering mouse) or pressing again; for a finger or pen
+  // (which send a stream of moves while down), 3s without a word from it;
+  // for a mouse, a key or another pointer's press (it's rarely held down
+  // while typing or touching the screen: its release went unheard, a menu
+  // took it, and the user has moved on). A mouse held still is a slow
+  // click, and keeps its press. A context menu changes nothing: browsers
+  // send one for any long press, menu or none, and one that's open sits
+  // above the page, so nothing drawn under it can be pressed by mistake.
   // Only the user's own presses and clicks count (not a script's, an
   // extension's say).
-  const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, beside, released, menu, then: what waits for its end, end(), movingFocus }
+  const presses = new Map(); // pointerId: the press under way, { id, type, target, beside, holds, released, then: what waits for its end, end(), movingFocus }
   let lastReleased = null; // the press under way when its pointer was last released (see clicks)
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
@@ -385,12 +386,12 @@ function setup(root) {
   }
   addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
-    // The same pointer pressing again (one mouse, one pen): its release went
-    // unheard. Any press reaching the page: no menu is open.
-    for (const p of presses.values()) if (p.id === e.pointerId || p.menu || (p.type === e.pointerType && p.type !== 'touch')) p.end();
+    // Its pointer pressing again (one mouse, one pen), or any press after a
+    // mouse's: their releases went unheard.
+    for (const p of presses.values()) if (p.id === e.pointerId || p.type === 'mouse' || (p.type === e.pointerType && p.type !== 'touch')) p.end();
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     // beside: the text field it began on the label, border or hint of (see clicks).
-    const press = { id: e.pointerId, type: e.pointerType, button: e.button, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, menu: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
@@ -414,13 +415,13 @@ function setup(root) {
     };
     if (silent) wait(3000);
     on('pointermove', (m) => {
-      if (m.pointerId !== press.id || (press.released && !press.menu)) return;
-      if (!m.buttons) return press.end(); // its release went unheard, or its menu is gone
+      if (m.pointerId !== press.id || press.released) return;
+      if (!m.buttons) return press.end(); // its release went unheard
       if (silent) wait(3000);
       else if (!press.holds && holdsAt(m.target)) press.holds = true; // a drag reaching what renders change
     });
     on('pointerup', (u) => {
-      if (u.pointerId !== press.id || press.menu) return;
+      if (u.pointerId !== press.id) return;
       press.released = true;
       wait(250); // for its click
     });
@@ -428,20 +429,7 @@ function setup(root) {
       if (c.pointerId !== press.id) return;
       press.end();
     });
-    // Its button's context menu, opened as it went down or at its release
-    // (a right click, a Ctrl-click on a Mac, a pen's barrel button): the
-    // same button from the same kind of pointer (Chromium names a pen's
-    // menu by the mouse's id; not every browser says which kind). Not a
-    // long press's, sent with no button (-1) or the right one (2) for a
-    // press of the main one (0), nor the Menu key's (-1).
-    on('contextmenu', (c) => {
-      if (c.button !== press.button || (c.pointerType && c.pointerType !== press.type)) return;
-      press.menu = true;
-      if (silent) wait(3000);
-      else clearTimeout(timer);
-    });
-    on('keydown', (k) => (press.menu || (!silent && !k.repeat && !MODIFIERS.has(k.key))) && press.end());
-    on('wheel', () => press.menu && press.end());
+    if (!silent) on('keydown', (k) => !k.repeat && !MODIFIERS.has(k.key) && press.end());
   }, true);
   // A press is over at its own click (not a keyboard's, which counts no
   // clicks). Not every browser names the pointer that clicked as it named
@@ -467,8 +455,11 @@ function setup(root) {
   const acted = (e) => e.isTrusted && acts++;
   for (const type of ['pointerdown', 'pointercancel', 'wheel', 'input']) addEventListener(type, acted, { capture: true, passive: true });
   addEventListener('keydown', (k) => MODIFIERS.has(k.key) || acted(k), { capture: true, passive: true });
-  // Focus moves in a press's mousedown (a finger's comes at its release):
-  // a focusout then is that press's doing.
+  // Focus moves in a press's mousedown (a finger's tap sends one at its
+  // release), or, held long, a finger or pen takes it with none (to what
+  // it's on, or to nothing): a focusout then is that press's doing. One to
+  // elsewhere while a finger rests is a key's (Next, typed with the other
+  // hand).
   addEventListener('mousedown', (e) => {
     if (!e.isTrusted) return;
     const press = latest;
@@ -476,11 +467,10 @@ function setup(root) {
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
-  /** Runs `fn` once the press moving focus now is over, or a task from now if none is. */
-  function afterPress(fn) {
-    if (latest?.movingFocus) latest.then.push(fn);
-    else setTimeout(fn);
-  }
+  /** The press moving focus now to `to` (null: to nothing), if any. */
+  const pressMoving = (to) => (latest?.movingFocus ? latest : [...presses.values()].find((p) => p.type !== 'mouse' && (!to || to.contains(p.target)))) ?? null;
+  /** Runs `fn` once `press` is over, or a task from now if there's none. */
+  const afterPress = (press, fn) => (press ? press.then.push(fn) : setTimeout(fn));
 
   /**
    * `save` marks the user's own edits: stored (outside a shared link) and
@@ -517,7 +507,7 @@ function setup(root) {
     const blocking = checks.filter((c) => c.blocks);
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
-    shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
+    shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link shares it, as typed
     const [m, next, shared] = [mode, shown, sharedView];
     const draw = () => {
       const had = document.activeElement;
@@ -553,9 +543,11 @@ function setup(root) {
   }
 
   function paint(next) {
-    // Already on screen, a repaint would only reset a selection or a reading position.
-    const same = painted && (next.prompt ? next.prompt === painted.prompt : next.link === painted.link);
-    if (!same) {
+    // Already on screen (the same prompt, or results from the same numbers,
+    // however they were written), a repaint would only reset a selection or
+    // a reading position.
+    const drawnFrom = (out) => out.prompt ?? JSON.stringify([out.mode, out.input, out.ids]);
+    if (!painted || drawnFrom(next) !== drawnFrom(painted)) {
       if (next.prompt) showPending(next.prompt);
       else showResults(next);
       announce();
@@ -671,13 +663,15 @@ function setup(root) {
   });
 
   // A field left half-typed is judged once focus has moved on, and after
-  // the click of a press that took it (see presses). Losing focus to another
-  // window or tab isn't leaving: the field stays the active element, and is
-  // judged when the user leaves it.
+  // the press that took it (see presses). Losing focus to another window or
+  // tab isn't leaving: the field stays the active element, and is judged
+  // when the user leaves it.
   form.addEventListener('focusout', (e) => {
     const el = e.target;
     if (el.type !== 'text') return;
-    afterPress(() => {
+    const press = pressMoving(e.relatedTarget);
+    if (press?.beside === el) comeBack(press, el);
+    afterPress(press, () => {
       if (document.activeElement === el) return;
       showPoint(el); // the same value to the form (see readForm): nothing to redraw
       if (dirty === el.name) render({ save: true });
@@ -685,21 +679,27 @@ function setup(root) {
   });
   // Pressing anywhere on the field being typed in (its label, its $ or %,
   // its border, the gaps, its hint), with any button or finger, keeps focus
-  // in it, so it isn't judged as left. The one exception is a mouse's main
-  // button on its hint, which may be starting to select the hint's words:
-  // that press leaves the field. If it selects nothing, focus comes back
-  // before any judgement (an empty click isn't leaving). If it selects
-  // something, the field is judged, as on any leaving, and if that changes
-  // the hint's words (see flag), the selection goes and focus comes back
-  // too. (A pen on a tablet taps like a finger: moving focus would bounce
-  // its keyboard. A Ctrl-click on a Mac is a right click.)
+  // in it, so it isn't judged as left, unless the press may be selecting
+  // words there: a mouse's main button on the hint, or a long press (which
+  // takes focus with no mousedown to stop it). (A pen on a tablet taps like
+  // a finger: moving focus would bounce its keyboard. A Ctrl-click on a Mac
+  // is a right click.)
   form.addEventListener('mousedown', (e) => {
     if (!e.isTrusted) return;
     const input = besideField(e.target);
     if (!input || input !== document.activeElement) return;
     const mainClick = e.button === 0 && !(e.ctrlKey && MAC);
     const selecting = e.target.closest('.hint') && mainClick && latest?.type === 'mouse'; // (a finger's tap sends a mousedown too)
-    if (!selecting) return e.preventDefault();
+    if (!selecting) e.preventDefault();
+  });
+  /**
+   * A press beside the field `input` that took focus from it: once it's
+   * over, focus comes back if it selected nothing (an empty press isn't
+   * leaving), before the field is judged. If it selected something, the
+   * field is judged, as on any leaving, and if that swaps those words for
+   * true ones (see flag), nothing is selected, and focus comes back too.
+   */
+  function comeBack(press, input) {
     const caret = caretOf(input);
     const giveBack = () => {
       input.focus({ preventScroll: true });
@@ -708,14 +708,11 @@ function setup(root) {
     const leftForNothing = () => document.activeElement === document.body && getSelection().isCollapsed;
     // First of what waits for the press, while the words are as it left them
     // (a keystroke's render may be waiting too).
-    latest.then.unshift(() => {
-      if (leftForNothing()) return giveBack(); // before the field's judgement: an empty click isn't leaving
-      // It selected something, but what waits after this (the field's
-      // judgement, a keystroke's render) may swap those words for true ones:
-      // then nothing is selected, and focus comes back too.
+    press.then.unshift(() => {
+      if (leftForNothing()) return giveBack();
       setTimeout(() => leftForNothing() && giveBack());
     });
-  });
+  }
 
   // On narrow screens the results sit below the form: "See results" (and
   // Enter / Go on a phone keyboard) jumps to the verdict. On wide screens the
