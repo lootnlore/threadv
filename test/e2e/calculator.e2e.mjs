@@ -750,6 +750,16 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual([goOnForm, (await tp.evaluate(() => scrollY)) > 0], [0, true], 'Go: not under the finger, then to the verdict');
+    // A modifier on its own (CapsLock, say) isn't doing anything: Go still goes.
+    await tapFirstRow();
+    await tp.focus('#f-price');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
+    await tp.keyboard.press('Enter');
+    await tp.keyboard.press('CapsLock');
+    await tp.keyboard.press('CapsLock');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock: Go went');
     // ...unless another press begins first: the user has moved on.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -918,15 +928,15 @@ if (chromium) {
     await tp.keyboard.press('Enter');
     await pan(aim.finger);
     assert.deepEqual(
-      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement !== document.body)],
-      [savedBefore, false, true],
-      'Reset did nothing on a shared link; hidden once drawn, its focus kept',
+      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement.name)],
+      [savedBefore, false, 'platform'],
+      'Reset did nothing on a shared link; hidden once drawn, its focus went to the control before it',
     );
     // Likewise focus on the shared note's link when the note goes (back on your own view).
     await tp.focus('[data-shared-note] a');
     await tp.evaluate(() => (location.hash = ''));
     await settle(tp);
-    assert.deepEqual(await tp.evaluate(() => [document.querySelector('[data-shared-note]').hidden, document.activeElement !== document.body]), [true, true], "the note's link: focus kept");
+    assert.deepEqual(await tp.evaluate(() => [document.querySelector('[data-shared-note]').hidden, document.activeElement.matches('[data-verdict]')]), [true, true], "the note's link: focus to the verdict it sat over");
     // A link brought in with a bad value opens Fine-tune to show it, even
     // if a later keystroke is drawn first. Its "shared result" note waits
     // for the finger too: it would push the rows down under it.
@@ -1292,6 +1302,16 @@ if (chromium) {
     assert.deepEqual([await leaves(), ...(await focusAndFlag(mac.page, '#f-price'))], [0, 'f-price', null], 'a Ctrl-click on a Mac');
     assert.deepEqual(mac.errors, []);
     await mac.context.close();
+    // On a wide screen with Fine-tune closed, focus on the shared note's
+    // link goes to the verdict it sat over when the note goes, not into the
+    // closed panel (where focus is refused) or to the page.
+    await page.evaluate(() => document.querySelector('.tune').removeAttribute('open'));
+    await page.evaluate(() => (location.hash = 's=1&price=50'));
+    await settle(page);
+    await page.focus('[data-shared-note] a');
+    await page.evaluate(() => (location.hash = ''));
+    await settle(page);
+    assert.equal(await page.evaluate(() => document.activeElement.matches('[data-verdict]')), true, "1280px: the note's link's focus to the verdict");
     // Leaving the page writes the address bar at once, not 250ms on: Back
     // and reload find what was typed.
     // Its keystroke is worked out first, if it hadn't been yet. A page
@@ -1672,6 +1692,20 @@ if (chromium) {
     assert.equal(await press('Profit', 'ArrowDown'), 'maxbuy');
     assert.equal(await press('Max buy', 'ArrowUp'), 'profit');
     assert.equal(await press('Profit', 'ArrowRight'), 'profit', 'Right does not switch stacked tabs');
+    // The tab focus moves to is scrolled into view (only the first one showing, End).
+    await page.getByRole('tab', { name: 'Profit' }).click();
+    await page.evaluate(() => scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().bottom + scrollY - innerHeight + 4));
+    await page.keyboard.press('End');
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const r = document.activeElement.getBoundingClientRect();
+        return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight];
+      }),
+      ['price', true],
+      'End: the last tab, on screen',
+    );
+    // With a modifier the keys are the browser's (Alt+arrows go Back and Forward).
+    assert.equal(await press('Profit', 'Shift+ArrowDown'), 'profit', 'Shift+Down: not a tab move');
 
     await page.setViewportSize({ width: 900, height: 800 });
     await orientation('horizontal');

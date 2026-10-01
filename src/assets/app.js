@@ -213,10 +213,21 @@ function setup(root) {
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
 
   const show = (el, on) => el.hidden === on && (el.hidden = !on); // written only when it changes
-  function focusBefore(el) {
-    const before = [...root.querySelectorAll('a[href], button, input, select, summary')].filter((c) => c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
-    const to = before.reverse().find((c) => c.getClientRects().length && c.tabIndex >= 0 && !c.disabled) ?? tabFor(mode);
-    to.focus({ preventScroll: true });
+  /**
+   * Focus for a control a draw hid while it had it (typed into while a
+   * press held the draw, or the shared note going), rather than dropped to
+   * the page: the verdict for one in the results column (the note sits over
+   * it), else the nearest control before it in the form that takes focus.
+   * (A draw never runs while a press holds it, so this may scroll.)
+   */
+  function keepFocus(el) {
+    if (el.closest('.calc-output')) return focusVerdict();
+    const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    for (const c of before.reverse()) {
+      if (c.tabIndex < 0 || c.disabled || !(c.checkVisibility?.() ?? c.getClientRects().length)) continue;
+      c.focus();
+      if (document.activeElement === c) return; // (one inside a closed panel can refuse it)
+    }
   }
   /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
   const onShow = (key, m, input) =>
@@ -272,8 +283,8 @@ function setup(root) {
     verdictEl.className = 'verdict verdict-wait';
     verdictEl.innerHTML = `<span>${html}</span>`;
     const lost = resultsEl.contains(document.activeElement) || document.activeElement === shareBtn;
-    resultsEl.hidden = true;
-    shareBtn.hidden = true;
+    show(resultsEl, false);
+    show(shareBtn, false);
     if (lost) focusVerdict(); // not dropped to the top of the page
   }
 
@@ -287,8 +298,8 @@ function setup(root) {
     verdictEl.className = `verdict verdict-${verdict.tone}`;
     verdictEl.innerHTML = verdict.html;
     resultsEl.innerHTML = renderResults(m, rows, { focus });
-    resultsEl.hidden = false;
-    shareBtn.hidden = !shareSupported;
+    show(resultsEl, true);
+    show(shareBtn, shareSupported);
     for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
     fitResults();
     // Focus that was in the list stays on its row (or goes to the verdict, if the row went).
@@ -338,30 +349,29 @@ function setup(root) {
   const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, released, then: what waits for its end, end(), movingFocus }
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
-  // Go's jump (to the verdict, or what needs fixing) while presses held it,
-  // and the field Go was pressed in: { jump, from }. It goes once none
-  // holds it, if focus is still in that field, and is dropped as soon as
-  // the user moves on: a new press, a cancelled one (the browser took the
-  // gesture, a pan or a pinch), a key in the field (typing on, moving the
-  // caret), or a tap anywhere but the field's own label, border or hint (one
-  // into its box is editing on; one elsewhere chose something else).
+  // Go's jump (to the verdict, or what needs fixing) while presses held it:
+  // { jump, from: the field Go was pressed in, acts: the count then }. It
+  // goes once none holds it, only if the user has done nothing since (see
+  // `acts`, counted below) and focus is still in that field.
   let goDue = null;
-  const seen = new Set(); // every pointer that has pressed (see clicks)
+  let acts = 0; // what the user has done
+  const seen = new Set(); // the pointers that pressed lately (see clicks)
   const holding = () => [...presses.values()].some((p) => p.holds);
   const holdsAt = (el) => !el.closest('.calc-input') || Boolean(el.closest('.hint'));
-  const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta']; // held for a click
+  const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'OS', 'Fn', 'FnLock', 'Hyper', 'Super', 'Symbol', 'SymbolLock', 'CapsLock', 'NumLock', 'ScrollLock']); // pressed, they do nothing
   function flush() {
     if (holding()) return;
     const [draw, go] = [drawDue, goDue];
     drawDue = goDue = null;
     draw?.();
-    if (go && document.activeElement === go.from) go.jump();
+    if (go && go.acts === acts && document.activeElement === go.from) go.jump();
   }
   addEventListener('pointerdown', (e) => {
     // The same pointer pressing again (one mouse, one pen): its release went unheard.
     for (const p of presses.values()) if (p.id === e.pointerId || (p.type === e.pointerType && p.type !== 'touch')) p.end();
-    goDue = null;
+    seen.delete(e.pointerId); // (to the end: the oldest go first)
     seen.add(e.pointerId);
+    if (seen.size > 32) seen.delete(seen.values().next().value);
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     const press = { id: e.pointerId, type: e.pointerType, button: e.button, holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
@@ -398,7 +408,6 @@ function setup(root) {
     });
     on('pointercancel', (c) => {
       if (c.pointerId !== press.id) return;
-      goDue = null;
       press.end();
     });
     // Its own context menu (a right click, a Ctrl-click on a Mac, a pen's
@@ -411,7 +420,7 @@ function setup(root) {
       if (silent) wait(3000);
       else clearTimeout(timer);
     });
-    on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.includes(k.key))) && press.end());
+    on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.has(k.key))) && press.end());
     on('wheel', () => menu && press.end());
   }, true);
   // A press is over at its own click (not a keyboard's, which counts no
@@ -420,12 +429,18 @@ function setup(root) {
   // ends them all.
   addEventListener('click', (c) => {
     if (!c.detail) return;
-    if (goDue && (c.target === goDue.from || !goDue.from.closest('.field')?.contains(c.target))) goDue = null;
+    // A tap on Go's field's own label, border or hint isn't acting on
+    // anything; one into its box is editing on, one elsewhere a choice.
+    if (!(goDue?.from.closest('.field')?.contains(c.target) && c.target !== goDue.from)) acts++;
     const own = presses.get(c.pointerId);
     if (own) own.end();
     else if (!seen.has(c.pointerId)) for (const p of presses.values()) p.end();
   }, true);
-  addEventListener('keydown', (k) => goDue && k.target === goDue.from && !MODIFIERS.includes(k.key) && (goDue = null), true);
+  // The rest the user does: a press, a cancelled one (the browser took the
+  // gesture, a pan or a pinch), a key that isn't a modifier (typing, moving
+  // the caret), a scroll, an input (a paste).
+  for (const type of ['pointerdown', 'pointercancel', 'wheel', 'input']) addEventListener(type, () => acts++, true);
+  addEventListener('keydown', (k) => MODIFIERS.has(k.key) || acts++, true);
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
   addEventListener('mousedown', () => {
@@ -497,7 +512,7 @@ function setup(root) {
       show(resetBtn, !shared);
       // Focus on something now hidden (typed into while a press held the
       // draw): to the nearest control before it, not dropped to the page.
-      if (had?.closest('[hidden]')) focusBefore(had);
+      if (had?.closest('[hidden]')) keepFocus(had);
       flag(checks);
       // Bad values a link brought in open the Fine-tune panel they're in, so
       // they're seen. After that, opening and closing it is up to the user.
@@ -580,7 +595,7 @@ function setup(root) {
   function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
     render({ save }); // which draws the tabs (when no press holds it), and the mode's fields and hints
-    if (moveFocus) tabFor(mode).focus({ preventScroll: true }); // at once: focus moves nothing under a press
+    if (moveFocus) tabFor(mode).focus({ preventScroll: holding() }); // at once (focus moves nothing under a press, but a scroll would)
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
@@ -601,6 +616,7 @@ function setup(root) {
   for (const tab of tabs) {
     tab.addEventListener('click', () => selectMode(tab.dataset.mode));
     tab.addEventListener('keydown', (e) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return; // the browser's (Alt+arrows go Back and Forward)
       const i = tabs.indexOf(tab);
       const step = stacked() ? { ArrowDown: i + 1, ArrowUp: i - 1 } : { ArrowRight: i + 1, ArrowLeft: i - 1 };
       const to = { ...step, Home: 0, End: tabs.length - 1 }[e.key];
@@ -616,7 +632,6 @@ function setup(root) {
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
     dirty = e.target.name;
-    goDue = null; // typing on (a paste too): a held Go's jump would take focus mid-edit
     renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
@@ -688,7 +703,7 @@ function setup(root) {
       const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
     };
-    if (holding()) goDue = { jump, from: document.activeElement };
+    if (holding()) goDue = { jump, from: document.activeElement, acts };
     else jump();
   });
 
