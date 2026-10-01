@@ -666,10 +666,20 @@ if (chromium) {
       });
       const row = await tp.getAttribute('.result:first-child', 'data-id');
       const at = await tp.locator('.result:first-child summary').boundingBox();
-      return { row, finger: { x: at.x + 30, y: at.y + at.height / 2 } };
+      const finger = { x: at.x + 30, y: at.y + at.height / 2 };
+      assert.equal(await tp.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('.result')?.dataset.id, [finger.x, finger.y]), row, 'the finger on the row');
+      return { row, finger };
     };
     const openRows = () => tp.$$eval('.result details[open]', (d) => d.map((el) => el.closest('.result').dataset.id));
     const firstRow = () => tp.getAttribute('.result:first-child', 'data-id');
+    const selectedTab = () => tp.locator('[role="tab"][aria-selected="true"]').textContent();
+    const focusedText = () => tp.evaluate(() => document.activeElement.id || document.activeElement.textContent.trim().slice(0, 40));
+    // A finger that pans the page: the browser takes it (a cancel), so no tap.
+    const pan = async (from) => {
+      for (let dy = 20; dy <= 160; dy += 20) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x, y: from.y - dy }] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+    };
     let aim = await tapFirstRow();
     await tp.fill('#f-price', '12..');
     await settle(tp);
@@ -754,10 +764,21 @@ if (chromium) {
     await tp.focus('#f-price');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
     await tp.keyboard.press('Enter');
-    for (let dy = 20; dy <= 200; dy += 20) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: aim.finger.x, y: aim.finger.y - dy }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await settle(tp);
+    await pan(aim.finger);
     assert.deepEqual(await tp.evaluate(() => [document.activeElement.id, document.activeElement.matches('[data-verdict]')]), ['f-price', false], 'a pan: Go dropped');
+    // ...or the finger's tap lands outside the field without moving focus
+    // (Safari doesn't focus a row's summary on a tap): it chose the row.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.evaluate(() => addEventListener('pointerdown', (e) => (window.finger = e.pointerId), { capture: true, once: true }));
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.press('Enter');
+    await tp.evaluate(() => document.querySelector('.result summary').dispatchEvent(new PointerEvent('click', { detail: 1, pointerId: window.finger, bubbles: true })));
+    await pan(aim.finger); // the finger off without a tap of Chrome's own
+    assert.equal(await focusedText(), 'f-price', 'a tap on a row, focus unmoved: Go dropped');
+    await tp.evaluate(() => {
+      for (const d of document.querySelectorAll('.result details[open]')) d.open = false;
+    });
     // A mouse's click (a laptop's trackpad) doesn't end a finger's press.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -770,6 +791,21 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual([afterMouse, (await firstRow()) !== aim.row], [aim.row, true], "held through the mouse's click, until the finger lifted");
+    // Nor does the click of a mouse whose press a key already ended.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.type('0');
+    await tp.mouse.move(formSpot.x + 10, formSpot.y + 5);
+    await tp.mouse.down();
+    await tp.keyboard.press('Escape'); // ends the mouse's press (a key does)
+    await tp.mouse.up(); // its click, from a pointer whose press is over
+    await tp.waitForTimeout(150);
+    const afterEndedClick = await firstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([afterEndedClick, (await firstRow()) !== aim.row], [aim.row, true], 'held through it too');
     // What's judged during a hold is what was last judged, not what's
     // drawn: a fixed price emptied again waits, as it would with no finger
     // (here on the field's own label, which keeps focus in it).
@@ -795,8 +831,8 @@ if (chromium) {
     // Keys acting on other controls wait too: Space on a marketplace's box,
     // an arrow on the mode tabs.
     for (const [control, key] of [['input[name="platform"][value="poshmark"]', 'Space'], ['[role="tab"][aria-selected="true"]', 'ArrowRight']]) {
-      await tp.locator(control).evaluate((el) => el.closest('details')?.setAttribute('open', '')); // where it can take focus
       aim = await tapFirstRow();
+      await tp.locator(control).evaluate((el) => el.closest('details')?.setAttribute('open', '')); // where it can take focus
       const before = await verdict(tp);
       await tp.focus(control); // which may scroll it into view: the row is measured after
       await tp.locator('.result:first-child summary').scrollIntoViewIfNeeded();
@@ -806,40 +842,39 @@ if (chromium) {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
       await tp.keyboard.press(key);
       await tp.waitForTimeout(150);
-      const selectedTab = () => tp.locator('[role="tab"][aria-selected="true"]').textContent();
       const costShown = () => tp.locator('#f-cost').isVisible();
       const midPress = [await firstRow(), await verdict(tp), await selectedTab(), await costShown()];
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       await settle(tp);
       assert.deepEqual(midPress, [aim.row, before, 'Profit', true], `${key}: nothing redrawn under the finger, the tabs and fields included`);
       assert.notEqual(await verdict(tp), before, `${key}: then it was`);
-      // Its focus move to the tab waited too, and was dropped: the finger's tap chose the row.
+      // The arrow moved focus to the new tab at once (moving focus moves
+      // nothing under a finger); the finger's tap then took it to the row.
       if (key === 'ArrowRight') {
         const focused = await tp.evaluate(() => document.activeElement.closest('.result')?.dataset.id ?? document.activeElement.outerHTML.slice(0, 60));
         assert.deepEqual([await selectedTab(), await costShown(), focused], ['Max buy', false, aim.row]);
       }
       if (key === 'Space') await tp.check(control);
       else await tp.getByRole('tab', { name: 'Profit' }).click();
+      await tp.locator(control).evaluate((el) => el.closest('details')?.removeAttribute('open'));
     }
-    // During a hold the arrows step from the mode chosen, drawn or not:
-    // twice right is List price, as with no finger down. (A pan ends the
-    // press: no tap, so nothing else takes focus.)
-    const pan = async (from) => {
-      for (let dy = 20; dy <= 120; dy += 20) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x, y: from.y - dy }] });
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      await settle(tp);
-    };
-    const selectedMode = () => tp.locator('[role="tab"][aria-selected="true"]').textContent();
-    aim = await tapFirstRow();
-    await tp.focus('[role="tab"][aria-selected="true"]');
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.press('ArrowRight');
-    await tp.keyboard.press('ArrowRight');
-    await pan(aim.finger);
-    assert.equal(await selectedMode(), 'List price', 'twice right');
-    await tp.getByRole('tab', { name: 'Profit' }).click();
+    // During a hold, focus follows the arrows at once, and Enter on the
+    // focused tab picks that tab: twice right is List price, right then
+    // Enter is Max buy, as with no finger down. (A pan ends the press: no
+    // tap, so nothing else takes focus.)
+    for (const [keys, mode] of [[['ArrowRight', 'ArrowRight'], 'List price'], [['ArrowRight', 'Enter'], 'Max buy']]) {
+      aim = await tapFirstRow();
+      await tp.focus('[role="tab"][aria-selected="true"]');
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+      for (const key of keys) await tp.keyboard.press(key);
+      const focusedMidPress = await focusedText();
+      await pan(aim.finger);
+      assert.deepEqual([focusedMidPress, await selectedTab(), await focusedText()], [`tab-${mode === 'List price' ? 'price' : 'maxbuy'}`, mode, `tab-${mode === 'List price' ? 'price' : 'maxbuy'}`], keys.join(' then '));
+      await tp.getByRole('tab', { name: 'Profit' }).click();
+    }
     // A field the new mode hides, still drawn and typed into during the
-    // hold: once it's hidden, focus goes to the mode's tab, not the page.
+    // hold: once it's hidden, focus goes to the nearest control before it,
+    // not dropped to the page.
     aim = await tapFirstRow();
     await tp.focus('[role="tab"][aria-selected="true"]');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
@@ -847,22 +882,48 @@ if (chromium) {
     for (let i = 0; i < 6 && (await tp.evaluate(() => document.activeElement.id)) !== 'f-cost'; i++) await tp.keyboard.press('Tab');
     await tp.keyboard.type('5');
     await pan(aim.finger);
-    assert.deepEqual([await selectedMode(), await tp.evaluate(() => document.activeElement.id)], ['Max buy', 'tab-maxbuy'], 'focus kept, on the tab');
+    assert.deepEqual([await selectedTab(), await focusedText()], ['Max buy', 'f-price'], 'focus kept, on the field before');
     await tp.getByRole('tab', { name: 'Profit' }).click();
     // Go is dropped by a tap into the field itself (placing the caret is
-    // editing on), and by typing on after it.
-    for (const after of ['a tap into the field', 'typing on']) {
+    // editing on), and by typing on or moving the caret after it.
+    for (const after of ['a tap into the field', 'typing on', 'moving the caret']) {
       await tapFirstRow();
       await tp.focus('#f-price');
-      const box = await tp.locator(after === 'typing on' ? 'label[for="f-price"]' : '#f-price').boundingBox();
+      const box = await tp.locator(after === 'a tap into the field' ? '#f-price' : 'label[for="f-price"]').boundingBox();
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 10, y: box.y + box.height / 2 }] });
       await tp.keyboard.press('Enter');
       if (after === 'typing on') await tp.keyboard.type('5');
+      if (after === 'moving the caret') await tp.keyboard.press('ArrowLeft');
       await tp.waitForTimeout(150);
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       await settle(tp);
       assert.deepEqual(await tp.evaluate(() => [document.activeElement.id, scrollY]), ['f-price', 0], `${after}: Go dropped`);
     }
+    // Reset is for your own view only. A shared link loaded during a hold
+    // leaves it drawn until the finger lifts, but it does nothing: saved
+    // settings stay. Once it's hidden, focus on it goes to the control
+    // before it, not to the page.
+    await tp.evaluate(() => document.querySelector('.tune').setAttribute('open', ''));
+    await tp.fill('#f-taxRate', '9'); // a saved setting
+    await tp.locator('#f-taxRate').press('Tab');
+    await settle(tp);
+    await tp.evaluate(() => document.querySelector('.tune').removeAttribute('open'));
+    const savedBefore = await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2'));
+    aim = await tapFirstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.evaluate(() => (location.hash = 's=1&price=50'));
+    await tp.waitForTimeout(100);
+    await tp.evaluate(() => document.querySelector('.tune').setAttribute('open', ''));
+    await tp.focus('[data-reset]');
+    await tp.keyboard.press('Enter');
+    await pan(aim.finger);
+    assert.deepEqual(
+      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement !== document.body)],
+      [savedBefore, false, true],
+      'Reset did nothing on a shared link; hidden once drawn, its focus kept',
+    );
+    await tp.evaluate(() => (location.hash = ''));
+    await settle(tp);
     // A link brought in with a bad value opens Fine-tune to show it, even
     // if a later keystroke is drawn first. Its "shared result" note waits
     // for the finger too: it would push the rows down under it.
