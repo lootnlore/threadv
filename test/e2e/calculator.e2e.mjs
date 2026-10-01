@@ -1713,31 +1713,32 @@ if (chromium) {
       if (!named) await page.evaluate(() => window.unquirk());
       assert.equal(await judged(), true, `${how}: over`);
     }
-    // A finger's long-press menu, as Chromium sends one (button 0, a touch
-    // pointer, the mouse's id: the Menu key's menu, a real one, dressed so
-    // by a getter): its press waits past the finger's release, which makes
-    // no click, and is over 3s after the last word from it.
+    // A finger's long-press menu (a real long press: Chromium's mouse sent
+    // as a finger, held past the long-press time): its press waits past
+    // the finger's release (which makes no click), and is over 3s after the
+    // last word from it. (Neither DevTools call answers while emulating
+    // touch, so neither is awaited; detaching the sessions ends the emulation.)
     await halfType();
-    await pressFrom('touch');
     await page.evaluate(() => {
-      const real = ['button', 'pointerType'].map((prop) => [prop, Object.getOwnPropertyDescriptor(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop)]);
-      for (const [prop, d] of real) {
-        Object.defineProperty(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop, {
-          configurable: true,
-          get() {
-            return this.type !== 'contextmenu' ? d.get.call(this) : prop === 'button' ? 0 : 'touch';
-          },
-        });
-      }
-      window.unquirk = () => real.forEach(([prop, d]) => Object.defineProperty(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop, d));
+      window.menus = [];
+      window.lifted = false;
+      window.pressedId = undefined;
+      addEventListener('pointerdown', (e) => (window.pressedId = e.pointerId), { capture: true, once: true });
+      addEventListener('pointerup', () => (window.lifted = true), { capture: true, once: true });
+      addEventListener('contextmenu', (e) => window.menus.push([e.isTrusted, e.pointerType, e.pointerId === window.pressedId]), true);
     });
-    await page.keyboard.press('ContextMenu');
-    await page.evaluate(() => window.unheard.add('click'));
-    await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await page.evaluate(() => {
-      window.unheard.clear();
-      window.unquirk();
-    });
+    const longAt = await h1At();
+    const longPress = await context.newCDPSession(page);
+    const longLift = await context.newCDPSession(page);
+    await longPress.send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
+    longPress.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: longAt.x, y: longAt.y, button: 'left', clickCount: 1 }).catch(() => {});
+    await page.waitForFunction(() => window.pressedId !== undefined);
+    await page.evaluate(() => document.activeElement.blur()); // (as a press that took focus would)
+    await page.waitForFunction(() => window.menus.length > 0, null, { timeout: 3000 });
+    longLift.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: longAt.x, y: longAt.y, button: 'left', clickCount: 1 }).catch(() => {});
+    await page.waitForFunction(() => window.lifted);
+    await Promise.all([longPress.detach(), longLift.detach()]);
+    assert.deepEqual(await page.evaluate(() => window.menus[0]), [true, 'touch', true], "the long press's own menu, the user's, named by its finger");
     await page.waitForTimeout(400);
     assert.equal(await judged(), false, "a finger's menu: waits, past its release");
     await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
@@ -1922,6 +1923,19 @@ if (chromium) {
     const leftTablist = await held.page.evaluate(() => document.activeElement.getAttribute('role') !== 'tab');
     await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     assert.equal(leftTablist, true, 'Shift+Tab during a hold: out of the tablist');
+    // It follows a click back to the tab drawn, too (the draw changes no
+    // mode then): one tab stop, on the tab selected.
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 60, y: 300 }] });
+    await held.page.getByRole('tab', { name: 'Profit' }).focus();
+    await held.page.keyboard.press('ArrowDown'); // Max buy, during the hold
+    await held.page.getByRole('tab', { name: 'Profit' }).click(); // back, still during it
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await held.page.waitForTimeout(400);
+    assert.deepEqual(
+      await held.page.evaluate(() => [...document.querySelectorAll('[role=tab]')].map((t) => [t.dataset.mode, t.tabIndex, t.getAttribute('aria-selected')])),
+      [['profit', 0, 'true'], ['maxbuy', -1, 'false'], ['price', -1, 'false']],
+      'the tab stop on the tab selected',
+    );
     await held.context.close();
     await page.bringToFront(); // (a page left behind another stops drawing)
     assert.deepEqual([heldOff, ...onScreen], [true, 'price', true], 'End during a hold: not scrolled under the finger, on screen once it was over');
