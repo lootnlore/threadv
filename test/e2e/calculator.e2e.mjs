@@ -922,8 +922,11 @@ if (chromium) {
       [savedBefore, false, true],
       'Reset did nothing on a shared link; hidden once drawn, its focus kept',
     );
+    // Likewise focus on the shared note's link when the note goes (back on your own view).
+    await tp.focus('[data-shared-note] a');
     await tp.evaluate(() => (location.hash = ''));
     await settle(tp);
+    assert.deepEqual(await tp.evaluate(() => [document.querySelector('[data-shared-note]').hidden, document.activeElement !== document.body]), [true, true], "the note's link: focus kept");
     // A link brought in with a bad value opens Fine-tune to show it, even
     // if a later keystroke is drawn first. Its "shared result" note waits
     // for the finger too: it would push the rows down under it.
