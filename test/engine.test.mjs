@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, stillTyping, onItsWay, withDecimalPoint, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
-import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
+import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, renderOutput, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, ETSY_OFFSITE, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
 // Tax defaults to 0 in tests so hand-computed numbers stay readable.
@@ -396,6 +396,17 @@ test('ordinal numbers', () => {
 // calculator page do, once for both.
 const renderResults = (mode, results, opts = {}) => renderRows(mode, rankedRows(mode, results, opts.target ?? 0), opts);
 const renderVerdict = (mode, results, i) => verdictOfRows(mode, rankedRows(mode, results, i.target), i);
+
+test('renderOutput: the verdict and the list over one ranking, for the platforms shown', () => {
+  for (const mode of ['profit', 'maxbuy', 'price']) {
+    const i = input({ price: 40, cost: 8, target: 10 });
+    const rows = rankedRows(mode, rank(mode, i, ['ebay', 'mercari']), i.target);
+    const verdict = verdictOfRows(mode, rows, i);
+    assert.deepEqual(renderOutput(mode, i, ['ebay', 'mercari'], { focus: 'mercari' }), { tone: verdict.tone, verdict: verdict.html, list: renderRows(mode, rows, { focus: 'mercari' }) }, mode);
+  }
+  const all = renderOutput('profit', input({ price: 40 }));
+  assert.equal(all.list.match(/<li /g).length, rank('profit', input({ price: 40 })).length, 'all platforms when none are named');
+});
 
 /** The rendered rows as plain data: id, rank badge (and whether it is read aloud), tags, name. */
 const rows = (html) =>

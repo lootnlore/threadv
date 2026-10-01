@@ -5,7 +5,7 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
-import { MODE_INPUTS } from './calc.mjs';
+import { MODE_INPUTS, rank, rankedRows } from './calc.mjs';
 
 /** The sale price or item cost a mode doesn't work from (hidden in the form). */
 const unused = (mode) => MODE_INPUTS.profit.filter((key) => !MODE_INPUTS[mode].includes(key)); // profit works from both
@@ -174,4 +174,17 @@ export function renderVerdict(mode, ranked, input) {
     return out('bad', `<strong>Pass.</strong> Best case is ${money(top.profit)} on ${orList(names)}, under your ${target} minimum.`);
   }
   return out('bad', `<strong>No profit.</strong> At best you break even on ${orList(names)}.`);
+}
+
+/**
+ * The calculator's output for a result that can be worked out, as the page
+ * draws it: { tone, verdict, list } (the verdict's tone, and the verdict's
+ * and list's HTML, over one ranking). The builder and the app both draw
+ * from this, so their output can't drift apart. `input` is normalized;
+ * `ids` names the platforms shown (all when left out).
+ */
+export function renderOutput(mode, input, ids, { focus } = {}) {
+  const rows = rankedRows(mode, rank(mode, input, ids), input.target);
+  const verdict = renderVerdict(mode, rows, input);
+  return { tone: verdict.tone, verdict: verdict.html, list: renderResults(mode, rows, { focus }) };
 }

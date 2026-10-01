@@ -1,5 +1,5 @@
-import { esc, renderResults, renderVerdict, MODES } from '../engine/render.mjs';
-import { DEFAULTS, normalizeInputs, rank, rankedRows, hintsFor } from '../engine/calc.mjs';
+import { esc, renderOutput, MODES } from '../engine/render.mjs';
+import { DEFAULTS, normalizeInputs, hintsFor } from '../engine/calc.mjs';
 import { PLATFORMS, EBAY_CATEGORIES, ETSY_OFFSITE, FEES_VERIFIED, RATES, pctText, usdText } from '../engine/fees.mjs';
 import { MILEAGE_YEAR } from '../data/mileage.mjs';
 
@@ -75,9 +75,7 @@ function select(name, label, options) {
  * platform on its fee page.
  */
 export function calculator({ focus } = {}) {
-  const input = normalizeInputs(DEFAULTS);
-  const rows = rankedRows('profit', rank('profit', input), input.target);
-  const verdict = renderVerdict('profit', rows, input);
+  const output = renderOutput('profit', normalizeInputs(DEFAULTS), undefined, { focus });
   const tabs = Object.entries(MODES).map(
     ([id, { label }], i) =>
       `<button type="button" role="tab" id="tab-${id}" data-mode="${id}" aria-controls="calc-panel" aria-selected="${i === 0}"${i === 0 ? '' : ' tabindex="-1"'}>${label}</button>`,
@@ -123,9 +121,9 @@ ${pctField('tiktokRate', 'TikTok Shop fee', `${pctText(RATES.tiktok.referral)} r
 <div class="calc-output">
 <noscript><p class="shared-note">Turn on JavaScript to use your own numbers. The results below are for the example shown.</p></noscript>
 <p class="shared-note" data-shared-note hidden>Viewing a shared result. Your saved settings are untouched. <a href="./">Use my settings</a></p>
-<div class="verdict verdict-${verdict.tone}" data-verdict tabindex="-1">${verdict.html}</div>
+<div class="verdict verdict-${output.tone}" data-verdict tabindex="-1">${output.verdict}</div>
 <p class="visually-hidden" role="status" data-verdict-live></p>
-<ul class="results" role="list" data-results aria-label="Results by marketplace">${renderResults('profit', rows, { focus })}</ul>
+<ul class="results" role="list" data-results aria-label="Results by marketplace">${output.list}</ul>
 <div class="calc-foot">
 <p>Fees verified ${verifiedLabel}. <a href="/fees/">How each fee is calculated</a></p>
 <button type="button" class="btn btn-ghost btn-small" data-share hidden>Copy link to this result</button>

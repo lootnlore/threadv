@@ -276,25 +276,52 @@ if (chromium) {
     await context.close();
   });
 
-  test('results are repainted only when what they show changes', async () => {
+  test('the verdict and the list are each repainted only when what they show changes', async () => {
     const { context, page } = await open('/');
-    const kept = () => page.evaluate(() => document.querySelector('.result').hasAttribute('data-kept'));
+    const mark = () =>
+      page.evaluate(() => {
+        document.querySelector('[data-verdict] > span').dataset.kept = '';
+        document.querySelector('.result').dataset.kept = '';
+      });
+    const kept = () => page.evaluate(() => ['[data-verdict] [data-kept]', '.result[data-kept]'].map((sel) => Boolean(document.querySelector(sel))));
+    const after = async (change) => {
+      await mark();
+      await change();
+      await settle(page);
+      return kept();
+    };
     await page.locator('.tune > summary').click();
     await page.uncheck('input[name="platform"][value="ebay"]');
     await settle(page);
-    await page.evaluate(() => (document.querySelector('.result').dataset.kept = ''));
-    // A hidden marketplace's option, and a price written another way:
-    // the same output, so the list (and a selection in it) stays.
-    await page.fill('#f-ebayAdRate', '5');
+    // A hidden marketplace's option, and a price written another way: nothing.
+    const hiddenOption = await after(() => page.fill('#f-ebayAdRate', '5'));
+    const sameNumber = await after(async () => {
+      await page.fill('#f-price', '40.00');
+      await page.locator('#f-price').press('Tab');
+    });
+    // eBay's ad rate, eBay shown but not the best: only the list.
+    await page.check('input[name="platform"][value="ebay"]');
     await settle(page);
-    const hiddenOption = await kept();
-    await page.fill('#f-price', '40.00');
-    await page.locator('#f-price').press('Tab');
+    const listOnly = await after(() => page.fill('#f-ebayAdRate', '10'));
+    // A new minimum at a price that clears none: only the verdict names it.
+    await page.fill('#f-price', '15');
     await settle(page);
-    const sameNumber = await kept();
-    await page.fill('#f-price', '41');
-    await settle(page);
-    assert.deepEqual([hiddenOption, sameNumber, await kept()], [true, true, false], 'kept through changes it does not show, repainted for one it does');
+    const verdictOnly = await after(() => page.fill('#f-target', '11'));
+    const both = await after(() => page.fill('#f-price', '41'));
+    // A prompt in the verdict's place hides the list; the same result back
+    // shows it as it was.
+    const throughPrompt = await after(async () => {
+      for (const price of ['', '41']) {
+        await page.fill('#f-price', price);
+        await page.locator('#f-price').press('Tab');
+        await settle(page);
+      }
+    });
+    assert.deepEqual(
+      [hiddenOption, sameNumber, listOnly, verdictOnly, both, throughPrompt],
+      [[true, true], [true, true], [true, false], [false, true], [false, false], [false, true]],
+      'each kept unless what it shows changed',
+    );
     await context.close();
   });
 
@@ -908,17 +935,22 @@ if (chromium) {
     await tp.fill('#f-price', '12..');
     const hintNow = await tp.locator('#h-price').boundingBox();
     const onHint = { x: hintNow.x + 10, y: hintNow.y + hintNow.height / 2 };
+    await tp.evaluate(() => addEventListener('pointerdown', () => document.activeElement.blur(), { capture: true, once: true })); // as it goes down
+    let savedMidTap;
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onHint] });
-    await tp.evaluate(() => document.activeElement.blur());
-    await tp.waitForTimeout(400); // past the address bar's wait
-    const savedMidTap = await inAddressBar(tp, 'price');
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    try {
+      await tp.waitForTimeout(400); // past the address bar's wait
+      savedMidTap = await inAddressBar(tp, 'price');
+    } finally {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    }
     await settle(tp);
     assert.deepEqual([savedMidTap, ...(await focusAndFlag(tp, '#f-price'))], ['12..', '', 'true'], 'blurred during a tap: judged at once, focus not brought back');
     // With two fingers held long, it's the latest's: one resting on the
     // list, then one on the hint as focus goes (as a long press takes it:
     // here a blur), which then lifts without selecting anything: focus
-    // comes back at once, unjudged, the first finger still down.
+    // comes back at once, unjudged, and the first finger still holds what
+    // it's on (400 typed then re-ranks only once it lifts).
     aim = await tapFirstRow();
     await tp.fill('#f-price', '12..');
     const onList = { ...aim.finger, id: 0 };
@@ -932,11 +964,15 @@ if (chromium) {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [beside] }); // the second lifts (the one named)
       await tp.waitForTimeout(400);
       bothDown = await focusAndFlag(tp, '#f-price');
+      await tp.keyboard.press('Control+A');
+      await tp.keyboard.type('400');
+      await tp.waitForTimeout(150);
+      bothDown.push(await firstRow());
     } finally {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     }
     await settle(tp);
-    assert.deepEqual(bothDown, ['f-price', null], 'the second finger lifted: focus back, the field unjudged');
+    assert.deepEqual([bothDown, (await firstRow()) !== aim.row], [['f-price', null, aim.row], true], 'the second finger lifted: focus back, the field unjudged, the first still holding');
     // A click naming no pointer (Safari before it sent pointer events) is
     // taken as the tap of the press under way, and the click a label passes
     // on to its field (Firefox counts it as a second click) as the same tap:
@@ -1865,6 +1901,38 @@ if (chromium) {
     await mouseAt('mouseWheel', { deltaX: 0, deltaY: 40 });
     await page.waitForTimeout(150);
     assert.deepEqual([scrolledHeld, await judged()], [false, true], 'held through a scroll with the button down; over at one with none');
+    // Focus lost to nothing (a keyboard's Done, here a blur) is a long
+    // press's doing only while it's held: not once the finger has lifted
+    // (its click still to come), nor a mouse's, still under way after a
+    // release the page never heard (a mouse moves focus only as it goes
+    // down). Both began beside the field: judged at once, focus not brought back.
+    const besideAt = async (sel) => {
+      await page.locator(sel).scrollIntoViewIfNeeded();
+      const b = await page.locator(sel).boundingBox();
+      return { x: b.x + 10, y: b.y + b.height / 2 };
+    };
+    for (const pointerType of ['touch', 'mouse']) {
+      await halfType();
+      const at = await besideAt(pointerType === 'touch' ? '#h-price' : 'label[for="f-price"]');
+      await page.evaluate((types) => types.forEach((type) => window.unheard.add(type)), pointerType === 'touch' ? ['click'] : ['pointerup', 'click']);
+      if (pointerType === 'touch') {
+        await devtools.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+        await page.waitForTimeout(300); // held long
+        await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.waitForTimeout(50); // its tap's mousedown done, its 250ms wait for a click not
+      } else {
+        await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...at });
+        await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...at });
+        await page.waitForTimeout(300); // its press long under way
+      }
+      await page.evaluate(() => {
+        window.unheard.clear();
+        document.activeElement.blur();
+      });
+      await page.waitForTimeout(400); // past a lifted finger's wait for its click
+      assert.deepEqual(await focusAndFlag(page, '#f-price'), ['', 'true'], `${pointerType}: judged at once, focus not brought back`);
+      if (pointerType === 'mouse') await hoverOff();
+    }
     // A finger's press ends if the browser takes it (a pan), and a finger's
     // or pen's after 3s without a word from it.
     await halfType();

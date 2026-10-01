@@ -10,8 +10,8 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, stillTyping, onItsWay, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
-import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
+import { DEFAULTS, normalizeInputs, inputsUsedBy, inputProblem, stillTyping, onItsWay, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
+import { renderOutput, esc, MODES } from '../engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
@@ -97,7 +97,8 @@ function setup(root) {
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load, done by the next draw)
   let drawnMode = null; // the mode the tabs and fields show
   let rendered = null; // the form as last judged: what the address bar holds
-  let painted = null; // the output on screen, as drawn (see paint)
+  let paintedFrom = null; // what the output on screen was worked out from: the prompt, or the result's numbers (see paint)
+  let painted = {}; // its parts as drawn: { tone, verdict, list }, or just the list (hidden) under a prompt
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
@@ -302,21 +303,14 @@ function setup(root) {
     show(shareBtn, false);
   }
 
-  /** Rows for a result that can be worked out, and the verdict over them. */
-  /** What the output shows for `next` (see render): its prompt, or the verdict and the list, as drawn. */
-  function view(next) {
-    if (next.prompt) return { prompt: next.prompt };
-    const rows = rankedRows(next.mode, rank(next.mode, next.input, next.ids), next.input.target);
-    const verdict = renderVerdict(next.mode, rows, next.input);
-    return { tone: verdict.tone, verdict: verdict.html, list: renderResults(next.mode, rows, { focus }) };
-  }
-  function showResults({ tone, verdict, list }) {
-    const open = openIds();
+  function showVerdict({ tone, verdict }) {
     verdictEl.className = `verdict verdict-${tone}`;
     verdictEl.innerHTML = verdict;
+  }
+  /** The list, its rows open as they were. */
+  function showList(list) {
+    const open = openIds();
     resultsEl.innerHTML = list;
-    show(resultsEl, true);
-    show(shareBtn, shareSupported);
     for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
     fitResults();
   }
@@ -397,7 +391,7 @@ function setup(root) {
     for (const p of presses.values()) if (p.id === e.pointerId || p.type === 'mouse' || (p.type === e.pointerType && p.type !== 'touch')) p.end();
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     // beside: the text field it began on the label, border or hint of (see clicks).
-    const press = { id: e.pointerId, type: e.pointerType, since: performance.now(), target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, since: e.timeStamp, target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
@@ -437,7 +431,9 @@ function setup(root) {
     });
     if (silent) return; // a mouse's is over at a key, or a scroll with no button down (see above)
     on('keydown', (k) => !k.repeat && !MODIFIERS.has(k.key) && press.end());
-    on('wheel', (w) => !w.buttons && press.end()); // (with a button held, it may be scrolling a selection on)
+    // With a button held, a scroll may be taking a selection on. (Where a
+    // browser reports no buttons on scrolls, Safari's perhaps, any ends it.)
+    on('wheel', (w) => !w.buttons && press.end());
   }, true);
   // A press is over at its own click (not a keyboard's, which counts no
   // clicks). Not every browser names the pointer that clicked as it named
@@ -468,7 +464,8 @@ function setup(root) {
   // it's on, or to nothing): a focusout then is that press's doing. One to
   // elsewhere is a key's (Next, typed with the other hand), as is one during
   // a tap; one to nothing while a finger has been held long (a keyboard's
-  // Done) is taken as the long press's, and judged once it's over.
+  // Done) is taken as the long press's: judged once it's over or, the finger
+  // beside the field and selecting nothing, focus brought back (see comeBack).
   addEventListener('mousedown', (e) => {
     if (!e.isTrusted) return;
     const press = latest;
@@ -476,12 +473,14 @@ function setup(root) {
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
-  const LONG_PRESS = 300; // ms: less than any browser waits before a long press
+  const LONG_PRESS = 200; // ms: well under any browser's wait before a long press (Android's shortest is 300)
   /** The press moving focus now to `to` (null: to nothing), if any. */
   function pressMoving(to) {
     if (latest?.movingFocus) return latest;
     const now = performance.now();
-    const longPress = (p) => now - p.since >= LONG_PRESS && (!to || to.contains(p.target)); // (a mouse moves focus only at its mousedown)
+    // Still down (a finger lifted isn't taking anything), and not a
+    // mouse's (which moves focus only as it goes down).
+    const longPress = (p) => p.type !== 'mouse' && !p.released && now - p.since >= LONG_PRESS && (!to || to.contains(p.target));
     return [...presses.values()].reverse().find(longPress) ?? null; // the latest
   }
   /** Runs `fn` once `press` is over, or a task from now if there's none. */
@@ -558,16 +557,27 @@ function setup(root) {
   }
 
   function paint(next) {
-    // Already on screen, a repaint would only reset a selection or a reading
-    // position. Compared as drawn, so what the output doesn't show (a value
-    // written another way, a hidden marketplace's option) changes nothing.
-    const out = view(next);
-    const drawn = JSON.stringify(out);
-    if (drawn === painted) return;
-    if (out.prompt) showPending(out.prompt);
-    else showResults(out);
+    // A part already on screen isn't drawn again: that would only reset a
+    // selection or a reading position in it. Worked out from the same
+    // numbers (however they were written), nothing is; otherwise the
+    // verdict and the list are each compared as drawn, so what one doesn't
+    // show (a hidden marketplace's option, a minimum only the verdict
+    // names) leaves it be.
+    const from = next.prompt ?? JSON.stringify([next.mode, next.input, next.ids]);
+    if (from === paintedFrom) return;
+    paintedFrom = from;
+    if (next.prompt) {
+      showPending(next.prompt);
+      painted = { list: painted.list }; // the list stays, hidden
+    } else {
+      const out = renderOutput(next.mode, next.input, next.ids, { focus });
+      if (out.verdict !== painted.verdict) showVerdict(out); // (its tone goes with its words)
+      if (out.list !== painted.list) showList(out.list);
+      show(resultsEl, true);
+      show(shareBtn, shareSupported);
+      painted = out;
+    }
     announce();
-    painted = drawn;
   }
   const renderSoon = debounce((key) => render({ save: true, typing: key }), 60);
   // Leaving (or hidden, where a phone may drop the page) before a keystroke
