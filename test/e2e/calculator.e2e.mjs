@@ -1817,11 +1817,16 @@ if (chromium) {
     await context.close();
     // A tab focused under the sticky header is brought clear of it.
     const phone = await open('/', { viewport: { width: 390, height: 844 } });
-    await phone.page.evaluate(() => {
+    const behind = await phone.page.evaluate(() => {
+      // All of the tabs behind the header (still on screen, so not scrolled to by a plain check).
       const header = document.querySelector('.site-header').getBoundingClientRect().bottom;
-      scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().top + scrollY - header + 20);
-      document.querySelector('#tab-profit').focus({ preventScroll: true });
+      const tab = document.querySelector('#tab-profit');
+      scrollTo(0, tab.getBoundingClientRect().bottom + scrollY - header + 4);
+      tab.focus({ preventScroll: true });
+      const r = tab.getBoundingClientRect();
+      return r.top >= 0 && r.bottom <= header;
     });
+    assert.equal(behind, true, 'the tabs behind the header');
     await phone.page.keyboard.press('ArrowRight');
     assert.equal(
       await phone.page.evaluate(() => {
