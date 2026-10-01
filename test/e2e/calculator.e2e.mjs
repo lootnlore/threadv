@@ -1925,6 +1925,8 @@ if (chromium) {
     assert.equal(leftTablist, true, 'Shift+Tab during a hold: out of the tablist');
     // It follows a click back to the tab drawn, too (the draw changes no
     // mode then): one tab stop, on the tab selected.
+    await held.page.getByRole('tab', { name: 'Profit' }).click(); // drawn: Profit
+    await held.page.waitForTimeout(100);
     await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 60, y: 300 }] });
     await held.page.getByRole('tab', { name: 'Profit' }).focus();
     await held.page.keyboard.press('ArrowDown'); // Max buy, during the hold
