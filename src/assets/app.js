@@ -98,7 +98,11 @@ function setup(root) {
   let drawnMode = null; // the mode the tabs and fields show
   let rendered = null; // the form as last judged: what the address bar holds
   let paintedFrom = null; // what the output on screen was worked out from: the prompt, or the result's numbers (see paint)
-  let painted = {}; // its parts as drawn: { tone, verdict, list }, or just the list (hidden) under a prompt
+  // Its parts as drawn, { verdict, list } (the list alone, hidden, under a
+  // prompt): at first, what the page was built with (the calculator's
+  // defaults, every marketplace), so a first paint of that draws nothing.
+  const built = renderOutput('profit', normalizeInputs(DEFAULTS), undefined, { focus });
+  let painted = { verdict: built.verdict, list: built.list };
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
@@ -391,7 +395,7 @@ function setup(root) {
     for (const p of presses.values()) if (p.id === e.pointerId || p.type === 'mouse' || (p.type === e.pointerType && p.type !== 'touch')) p.end();
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     // beside: the text field it began on the label, border or hint of (see clicks).
-    const press = { id: e.pointerId, type: e.pointerType, since: e.timeStamp, target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, since: performance.now(), target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
@@ -473,7 +477,10 @@ function setup(root) {
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
-  const LONG_PRESS = 200; // ms: well under any browser's wait before a long press (Android's shortest is 300)
+  // ms since the page heard it go down (not since the screen did: a press
+  // heard late, behind a long task, isn't long for it): under any browser's
+  // wait before a long press (Android's shortest is 300ms).
+  const LONG_PRESS = 200;
   /** The press moving focus now to `to` (null: to nothing), if any. */
   function pressMoving(to) {
     if (latest?.movingFocus) return latest;
@@ -572,10 +579,10 @@ function setup(root) {
     } else {
       const out = renderOutput(next.mode, next.input, next.ids, { focus });
       if (out.verdict !== painted.verdict) showVerdict(out); // (its tone goes with its words)
+      show(resultsEl, true); // before a list is fitted: hidden, it measures nothing
       if (out.list !== painted.list) showList(out.list);
-      show(resultsEl, true);
       show(shareBtn, shareSupported);
-      painted = out;
+      painted = { verdict: out.verdict, list: out.list };
     }
     announce();
   }

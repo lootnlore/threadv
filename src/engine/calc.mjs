@@ -395,6 +395,14 @@ export function rank(mode, input, ids) {
   return pick(ids).map(run).sort(byScore(mode));
 }
 
+/**
+ * rank()'s results as shown (see rankedRows), from the normalized input:
+ * the one ranking the list, the verdict and the social card all draw from.
+ */
+export function rankedFor(mode, input, ids) {
+  return rankedRows(mode, rank(mode, input, ids), input.target);
+}
+
 /** Sort comparator: best scoreFor first, unreachable last, ties keep their order. */
 export function byScore(mode) {
   const key = (r) => scoreFor(mode, r) ?? -Infinity;

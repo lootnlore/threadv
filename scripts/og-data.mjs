@@ -6,7 +6,7 @@
 // file with this function, so a fee change that alters the card fails `npm test`
 // until the images are regenerated.
 import config from '../site.config.mjs';
-import { normalizeInputs, rank, rankedRows, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, rankedFor, DEFAULTS } from '../src/engine/calc.mjs';
 import { PLATFORMS, usdText } from '../src/engine/fees.mjs';
 import { money } from '../src/engine/render.mjs';
 
@@ -33,7 +33,7 @@ const usd = (cents) => usdText(cents / 100);
 /** The card's content; `raw` is the calculator input (the defaults). */
 export function ogData(raw = DEFAULTS) {
   const input = normalizeInputs(raw);
-  const rows = rankedRows('profit', rank('profit', input), input.target);
+  const rows = rankedFor('profit', input);
   return {
     name: config.name,
     // From the checked input, formatted as on the site ("$40", "$7.50").

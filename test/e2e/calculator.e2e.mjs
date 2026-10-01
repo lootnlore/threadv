@@ -277,14 +277,25 @@ if (chromium) {
   });
 
   test('the verdict and the list are each repainted only when what they show changes', async () => {
-    const { context, page } = await open('/');
+    // Loaded with nothing of its own, the page's built output is already
+    // right: the first paint replaces nothing in it.
+    const { context, page } = await open(null);
+    await page.addInitScript(() => {
+      window.replaced = 0;
+      new MutationObserver((changes) => {
+        for (const c of changes) if (c.removedNodes.length && c.target.closest?.('[data-verdict], [data-results]')) window.replaced++;
+      }).observe(document, { childList: true, subtree: true });
+    });
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.replaced), 0, 'nothing replaced at load');
     const mark = () =>
       page.evaluate(() => {
         document.querySelector('[data-verdict] > span').dataset.kept = '';
         document.querySelector('.result').dataset.kept = '';
       });
     const kept = () => page.evaluate(() => ['[data-verdict] [data-kept]', '.result[data-kept]'].map((sel) => Boolean(document.querySelector(sel))));
-    const after = async (change) => {
+    const keptAfter = async (change) => {
       await mark();
       await change();
       await settle(page);
@@ -294,23 +305,24 @@ if (chromium) {
     await page.uncheck('input[name="platform"][value="ebay"]');
     await settle(page);
     // A hidden marketplace's option, and a price written another way: nothing.
-    const hiddenOption = await after(() => page.fill('#f-ebayAdRate', '5'));
-    const sameNumber = await after(async () => {
+    const hiddenOption = await keptAfter(() => page.fill('#f-ebayAdRate', '5'));
+    const sameNumber = await keptAfter(async () => {
       await page.fill('#f-price', '40.00');
       await page.locator('#f-price').press('Tab');
     });
     // eBay's ad rate, eBay shown but not the best: only the list.
     await page.check('input[name="platform"][value="ebay"]');
     await settle(page);
-    const listOnly = await after(() => page.fill('#f-ebayAdRate', '10'));
+    const listOnly = await keptAfter(() => page.fill('#f-ebayAdRate', '10'));
     // A new minimum at a price that clears none: only the verdict names it.
     await page.fill('#f-price', '15');
     await settle(page);
-    const verdictOnly = await after(() => page.fill('#f-target', '11'));
-    const both = await after(() => page.fill('#f-price', '41'));
+    const verdictOnly = await keptAfter(() => page.fill('#f-target', '11'));
+    const both = await keptAfter(() => page.fill('#f-price', '41'));
     // A prompt in the verdict's place hides the list; the same result back
-    // shows it as it was.
-    const throughPrompt = await after(async () => {
+    // shows it as it was, under its own verdict again.
+    const verdictAt41 = await verdict(page);
+    const throughPrompt = await keptAfter(async () => {
       for (const price of ['', '41']) {
         await page.fill('#f-price', price);
         await page.locator('#f-price').press('Tab');
@@ -322,6 +334,7 @@ if (chromium) {
       [[true, true], [true, true], [true, false], [false, true], [false, false], [false, true]],
       'each kept unless what it shows changed',
     );
+    assert.equal(await verdict(page), verdictAt41, 'the verdict back after the prompt');
     await context.close();
   });
 
@@ -2573,6 +2586,23 @@ if (chromium) {
     await page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
     let r = await placement(page);
     assert.ok(r.stacked && r.under.every(Boolean), 'a $4,000 sale on a 320px phone: every figure under its name');
+    // A new list drawn as a prompt makes way for it is fitted shown: stacked
+    // from its first frame, not jumping to it after.
+    await page.fill('#f-price', '');
+    await page.locator('#f-price').press('Tab');
+    await settle(page);
+    await page.evaluate(() => {
+      const list = document.querySelector('[data-results]');
+      new MutationObserver((_, watch) => {
+        if (list.hidden) return;
+        watch.disconnect();
+        requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
+      }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
+    });
+    await page.fill('#f-price', '5000');
+    await page.locator('#f-price').press('Tab');
+    await settle(page);
+    assert.deepEqual([await page.evaluate(() => window.firstFrame), (await placement(page)).stacked], [true, true], 'stacked from its first frame');
     // Resizing refits the list, without ResizeObserver loop errors.
     await page.evaluate(() => {
       window.errorsSeen = [];
