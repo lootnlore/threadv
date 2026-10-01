@@ -107,11 +107,14 @@ export function stillTyping(key, raw) {
  * Mid-typing, a value not readable or in range yet that one more digit
  * could make so ("0" and "0." before "0.75", "." before ".99", "$" before
  * "$5"): a field already showing what's wrong waits for it rather than say
- * something new is. An empty field isn't on its way to anything.
+ * something new is. An empty field isn't on its way to anything, nor is
+ * "1.500", a whole amount the form asks to have written another way.
  */
 export function onItsWay(key, raw, options) {
   const text = String(raw).trim();
-  return text !== '' && inputProblem(key, text, options) !== '' && inputProblem(key, `${text}1`, options) === '';
+  if (text === '' || !inputProblem(key, text, options)) return false;
+  if (!isRate(key) && DOT_THOUSANDS.test(bare(text))) return false; // "1.500" is written out, only ambiguously
+  return inputProblem(key, `${text}1`, options) === '';
 }
 
 /** The text with a comma read as the decimal point written as one ("12,50" is "12.50"), so the field shows how it was read. */

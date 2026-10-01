@@ -51,11 +51,21 @@ const storage = {
 
 function debounce(fn, ms) {
   let t;
+  let due = null; // the arguments of the call still to come
   const call = (...args) => {
     clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
+    due = args;
+    t = setTimeout(call.flush, ms);
   };
-  call.cancel = () => clearTimeout(t);
+  call.cancel = () => {
+    clearTimeout(t);
+    due = null;
+  };
+  call.flush = () => {
+    const args = due;
+    call.cancel();
+    if (args) fn(...args);
+  };
   return call;
 }
 
@@ -86,6 +96,7 @@ function setup(root) {
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load)
   let rendered = null; // the form as last judged: what the address bar holds
   let painted = null; // the output on screen: { prompt } or { mode, input, ids, link } (see paint)
+  let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
@@ -198,26 +209,31 @@ function setup(root) {
     }
   }
   const syncUrlSoon = debounce(syncUrl, 250);
+  addEventListener('pagehide', () => syncUrlSoon.flush()); // leaving before it's written: Back and reload still find the numbers
 
   // ---- rendering ----
 
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
 
   /**
-   * Each numeric field on the page, [{ key, problem, missing, blocks }]:
-   * `problem` says what is wrong with its value; `missing` marks a sell price
-   * the mode needs but that isn't typed yet (neutral: not an error yet).
+   * Each numeric field on the page, [{ key, problem, missing, blocks, needed }]:
+   * `problem` says what is wrong with its value; `needed` marks a sell price
+   * the mode needs, and `missing` one that isn't typed yet (neutral: not an
+   * error yet).
    * `blocks`: either one holds the results back, because the compared
    * marketplaces read the field in this mode (inputsUsedBy) and it is on show.
    */
+  /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
+  const onShow = (key, m, input) =>
+    !MODES[m].hidden.includes(key) && (key !== 'ebayCustomRate' || PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts));
   function check(values, ids, input) {
     const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id], mode, input)));
     return NUMERIC.filter((key) => field(key)).map((key) => {
       const needed = key === 'price' && used.has('price');
       const problem = inputProblem(key, values[key], { sellPrice: needed });
       const missing = !problem && needed && String(values.price).trim() === '';
-      const blocks = Boolean(problem || missing) && used.has(key) && !field(key).closest('[hidden]');
-      return { key, problem, missing, blocks, onItsWay: onItsWay(key, values[key], { sellPrice: needed }) };
+      const blocks = Boolean(problem || missing) && used.has(key) && onShow(key, mode, input);
+      return { key, problem, missing, blocks, needed };
     });
   }
 
@@ -296,35 +312,50 @@ function setup(root) {
   // ---- presses ----
   // A click lands where it was pressed only if nothing moves in between, and
   // words a press selected (to copy, say) stay selected only if they stay.
-  // Two things could change what's under a press, and wait for it: judging
-  // a field the press took focus from (the prompt may take the list's
-  // place), and a keystroke's render due when it began. Both could move
-  // anything but the form side (the results, and all laid out after them)
-  // or swap a hint's words; a press on the rest of the form side holds
-  // nothing back (a test checks nothing there moves). Anything else that
-  // renders (a tab, a checkbox) does so from the click itself, and leaves
-  // what waited nothing to do.
+  // So render works out the numbers, judges and saves at once, but what it
+  // draws (flags and hints, the mode's fields, the results) waits while a
+  // press that could see it is down, and so does Go's jump to the verdict.
+  // A finger's or pen's press holds them all: until it lifts, focus stays
+  // where it was, and keys typed with the other hand (a digit, Next, Go)
+  // reach the page. A mouse's holds them off the form side, on a hint, or
+  // once a drag reaches either: a render changes nothing else on the form
+  // side (a test checks), and a key ends a mouse's press (below). Renders a
+  // press's own click makes (a tab, a checkbox) come once it's over, and
+  // draw at once.
   //
-  // A press (any button, a finger, a pen) is over at the click it makes
-  // (once its handlers ran), 250ms after a release that makes none, when
-  // it's cancelled, or when a release the page never heard of shows: its
-  // pointer moving with no button down before any release (a hovering
-  // mouse) or, for a finger or pen (which send a stream of moves while
-  // down), 3s without a word from it. A mouse held still is a slow click,
-  // and keeps its press. A press that opens its context menu is over once
-  // the menu is: when the page hears from the user again (a move, a key, a
-  // scroll, another press).
-  let down = null; // the press under way: { id, type, button, holds (what renders wait for it), released, then: what waits for it, end(), movingFocus }
-  const renderDue = () => dirty && render({ save: true, typing: dirty }); // a keystroke's render, once the press holding it is over
-  function hold(press) {
-    renderSoon.cancel();
-    if (!press.then.includes(renderDue)) press.then.push(renderDue);
+  // A press (any button, a finger, a pen; each finger its own) is over at
+  // the click it makes, 250ms after a release that makes none, when it's
+  // cancelled, or when a release the page never heard of shows: its pointer
+  // moving with no button down before any release (a hovering mouse) or
+  // pressing again; for a finger or pen (which send a stream of moves while
+  // down), 3s without a word from it; for a mouse, a key (it's rarely held
+  // down while typing, and a key after an unheard release means the user
+  // has moved on). A mouse held still is a slow click, and keeps its press.
+  // A press that opens its context menu is over once the menu is: when the
+  // page hears from the user again (a move, a key, a scroll), or, for a
+  // finger or pen, after 3s.
+  const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, released, then: what waits for its end, end(), movingFocus }
+  let latest = null; // the last press begun (a mousedown is its doing)
+  let drawDue = null; // the last thing render drew while presses held it
+  let goDue = null; // Go's jump, while presses held it
+  const holding = () => [...presses.values()].some((p) => p.holds);
+  const holdsAt = (el) => !el.closest('.calc-input') || Boolean(el.closest('.hint'));
+  const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta']; // held for a click
+  function flush() {
+    if (holding()) return;
+    const [draw, go] = [drawDue, goDue];
+    drawDue = goDue = null;
+    draw?.();
+    go?.();
   }
   addEventListener('pointerdown', (e) => {
-    const other = down && down.id !== e.pointerId && !down.released ? down : null; // another finger, still down
-    const waiting = down?.end(false) ?? []; // a new press: what waited for the last waits for this one
-    const holds = !e.target.closest('.calc-input') || Boolean(e.target.closest('.hint') || other?.holds);
-    const press = (down = { id: e.pointerId, type: e.pointerType, button: e.button, holds, released: false, then: waiting });
+    // The same pointer pressing again (one mouse, one pen): its release went unheard.
+    for (const p of presses.values()) if (p.id === e.pointerId || (p.type === e.pointerType && p.type !== 'touch')) p.end();
+    goDue = null; // a Go still waiting: the user has moved on
+    const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
+    const press = { id: e.pointerId, type: e.pointerType, button: e.button, holds: silent || holdsAt(e.target), released: false, then: [] };
+    presses.set(press.id, press);
+    latest = press;
     const stop = new AbortController();
     const on = (type, fn) => addEventListener(type, fn, { capture: true, signal: stop.signal });
     let timer = 0;
@@ -332,22 +363,23 @@ function setup(root) {
       clearTimeout(timer);
       timer = setTimeout(() => press.end(), ms);
     };
-    press.end = (run = true) => {
+    press.end = () => {
       stop.abort();
       clearTimeout(timer);
-      if (down === press) down = null;
+      if (presses.get(press.id) === press) presses.delete(press.id);
       const fns = press.then.splice(0);
-      if (run) setTimeout(() => fns.forEach((f) => f())); // after the click's own handlers
-      return fns;
+      setTimeout(() => {
+        fns.forEach((f) => f());
+        flush();
+      }); // after the click's own handlers
     };
-    const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     if (silent) wait(3000);
     let menu = false;
-    const back = () => menu && press.end(); // from its menu
     on('pointermove', (m) => {
       if (m.pointerId !== press.id || (press.released && !menu)) return;
-      if (!m.buttons) press.end(); // its release went unheard, or its menu is gone
-      else if (silent && !menu) wait(3000);
+      if (!m.buttons) return press.end(); // its release went unheard, or its menu is gone
+      if (silent) wait(3000);
+      else if (!press.holds && holdsAt(m.target)) press.holds = true; // a drag reaching what renders change
     });
     on('pointerup', (u) => {
       if (u.pointerId !== press.id || menu) return;
@@ -362,30 +394,24 @@ function setup(root) {
     on('contextmenu', (c) => {
       if (c.button !== press.button || (c.pointerId ?? press.id) !== press.id) return;
       menu = true;
-      clearTimeout(timer);
+      if (silent) wait(3000);
+      else clearTimeout(timer);
     });
-    on('keydown', back);
-    on('wheel', back);
+    on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.includes(k.key))) && press.end());
+    on('wheel', () => menu && press.end());
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
-    if (holds && dirty) hold(press);
   }, true);
-  // A finger or pen leaves focus where it was until it lifts, so keys typed
-  // with the other hand meanwhile (a digit, Next, Go) reach the field: what
-  // they'd render waits for the press too. (A mouse takes focus as it goes
-  // down: keys reach a field during its press only once focus has come back
-  // by keyboard, its release unheard.)
-  const typedAround = () => down?.holds && down.type !== 'mouse';
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
   addEventListener('mousedown', () => {
-    const press = down;
-    if (!press) return;
+    const press = latest;
+    if (!presses.has(press?.id)) return;
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
-  /** Runs `fn` once the press moving focus now (or typed around) is over, or a task from now if none is. */
+  /** Runs `fn` once the press moving focus now is over, or a task from now if none is. */
   function afterPress(fn) {
-    if (down?.movingFocus || typedAround()) down.then.push(fn);
+    if (latest?.movingFocus) latest.then.push(fn);
     else setTimeout(fn);
   }
 
@@ -402,32 +428,42 @@ function setup(root) {
    * already flagged is judged at every keystroke, so what it and the prompt
    * say stays true (another error, "needed", or nothing wrong); only a value
    * on its way to a number ("1," before "1,5", "0." before "0.75") waits
-   * even then. The list is
-   * redrawn only when the result changed; a press under way holds back what
-   * would change under it (see presses).
+   * even then. The list is redrawn only when the result changed; what a
+   * render draws waits while a press holds it (see presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
     const state = readForm();
     const input = normalizeInputs(state.values);
-    fieldBox('ebayCustomRate').hidden = !PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts);
     // A marketplace's own fee page always shows it, even if the visitor hid it.
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (stillTyping(typing, field(typing).value) || ((typed.problem || typed.missing) && (!flagged.has(typing) || typed.onItsWay)))) return;
+    const waits = typed && (typed.problem || typed.missing) && (!flagged.has(typing) || onItsWay(typing, state.values[typing], { sellPrice: typed.needed }));
+    if (typed && (waits || stillTyping(typing, field(typing).value))) return;
     dirty = '';
     rendered = state;
-    flag(checks);
     const blocking = checks.filter((c) => c.blocks);
-    // Bad values a link brought in open the Fine-tune panel they're in, so
-    // they're seen. After that, opening and closing it is up to the user.
-    if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
-    reveal = false;
-
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
-    paint(pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }); // the link: everything the result depends on
+    shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
+    const [m, next, revealing] = [mode, shown, reveal];
+    reveal = false;
+    const draw = () => {
+      if (hint.textContent !== MODES[m].hint) hint.textContent = MODES[m].hint;
+      hintFor('target').dataset.default = MODES[m].targetHint;
+      for (const name of [...MAIN_KEYS, 'ebayCustomRate']) fieldBox(name).hidden = !onShow(name, m, input);
+      flag(checks);
+      // Bad values a link brought in open the Fine-tune panel they're in, so
+      // they're seen. After that, opening and closing it is up to the user.
+      if (revealing) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
+      paint(next);
+    };
+    if (holding()) drawDue = draw;
+    else {
+      drawDue = null;
+      draw();
+    }
     if (save) {
       if (!sharedView) persist(state);
       syncUrlSoon();
@@ -496,10 +532,7 @@ function setup(root) {
       if (on && moveFocus) tab.focus();
     }
     panel.setAttribute('aria-labelledby', `tab-${mode}`);
-    hint.textContent = MODES[mode].hint;
-    hintFor('target').dataset.default = MODES[mode].targetHint;
-    for (const name of MAIN_KEYS) fieldBox(name).hidden = MODES[mode].hidden.includes(name);
-    render({ save });
+    render({ save }); // which draws the mode's fields and hints
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
@@ -535,8 +568,7 @@ function setup(root) {
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
     dirty = e.target.name;
-    if (typedAround()) hold(down);
-    else renderSoon(e.target.name);
+    renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
     if (e.target.type !== 'text') render({ save: true });
@@ -569,7 +601,7 @@ function setup(root) {
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (!input || input !== document.activeElement || e.target === input) return;
     const mainClick = e.button === 0 && !(e.ctrlKey && MAC);
-    const selecting = e.target.closest('.hint') && mainClick && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
+    const selecting = e.target.closest('.hint') && mainClick && latest?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
     const caret = caretOf(input);
     const giveBack = () => {
@@ -579,7 +611,7 @@ function setup(root) {
     const leftForNothing = () => document.activeElement === document.body && getSelection().isCollapsed;
     // First of what waits for the press, while the words are as it left them
     // (a keystroke's render may be waiting too).
-    down.then.unshift(() => {
+    latest.then.unshift(() => {
       if (leftForNothing()) return giveBack(); // before the field's judgement: an empty click isn't leaving
       // It selected something, but what waits after this (the field's
       // judgement, a keystroke's render) may swap those words for true ones:
@@ -594,12 +626,11 @@ function setup(root) {
   seeResults.hidden = false;
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    const active = document.activeElement;
-    const go = () => {
-      if (active?.type === 'text' && form.contains(active)) showPoint(active);
-      render({ save: true });
-      // Nothing to show yet: go to what needs fixing (opening Fine-tune if
-      // it's in there), not away from it.
+    if (document.activeElement?.type === 'text' && form.contains(document.activeElement)) showPoint(document.activeElement);
+    render({ save: true });
+    // Then to what needs fixing (opening Fine-tune if it's in there), not
+    // away from it, or to the verdict: once no press would see the page move.
+    const jump = () => {
       if (pendingField) {
         pendingField.closest('details:not([open])')?.setAttribute('open', '');
         return pendingField.focus();
@@ -608,8 +639,8 @@ function setup(root) {
       const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
     };
-    if (typedAround()) down.then.push(go); // Go, with a finger down: once it lifts
-    else go();
+    if (holding()) goDue = jump;
+    else jump();
   });
 
   resetBtn.addEventListener('click', () => {
@@ -638,8 +669,8 @@ function setup(root) {
       // A field left half-typed is judged first, so the link is never for
       // numbers no longer in the form.
       if (dirty) render({ save: true });
-      if (painted.prompt) return; // nothing to share: the prompt has taken the results' place (and focus)
-      const url = `${location.origin}${location.pathname}${painted.link}`;
+      if (shown.prompt) return; // nothing to share: the prompt has taken the results' place (and focus)
+      const url = `${location.origin}${location.pathname}${shown.link}`;
       let message = 'Link copied';
       try {
         await navigator.clipboard.writeText(url);

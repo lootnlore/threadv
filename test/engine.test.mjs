@@ -650,6 +650,7 @@ test('mid-typing, a value one more digit could make readable and in range is on 
   for (const raw of ['0', '0.', '0.0', '.', '$', '$.', ' 0 ']) assert.ok(onItsWay('price', raw, price), raw);
   for (const raw of ['', '  ', '4', '0.5', '12..', '-', '-1', 'abc', '99999999', '100000.5', '0.00', '1,234,5']) assert.ok(!onItsWay('price', raw, price), raw);
   assert.ok(!onItsWay('cost', '0'), 'a cost of $0 is fine: nothing on its way');
+  for (const raw of ['1.500', '12.345', '1.000']) assert.ok(!onItsWay('price', raw, price), `${raw}: written out, only ambiguously`);
   assert.ok(onItsWay('taxRate', '.'), '.5%');
   assert.ok(!onItsWay('taxRate', '150'), 'no digit brings it back in range');
 });

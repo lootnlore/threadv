@@ -676,11 +676,17 @@ if (chromium) {
     const listed = await verdict(tp);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
     await tp.keyboard.press('Tab'); // Next
+    await tp.keyboard.type('1,'); // and on into the next field, half-typed
     await tp.waitForTimeout(150);
     const afterNext = await verdict(tp);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
-    assert.deepEqual([afterNext, await openRows(), await verdict(tp)], [listed, [aim.row], 'Check “Sell price”. Write it like 1,234.50.'], 'Next: judged once the finger lifted');
+    assert.deepEqual(
+      [afterNext, await openRows(), await verdict(tp), await tp.getAttribute('#f-price', 'aria-invalid')],
+      [listed, [aim.row], 'Check “Sell price”. Write it like 1,234.50.', 'true'],
+      'Next: judged at once, shown once the finger lifted',
+    );
+    await tp.fill('#f-cost', '0');
     aim = await tapFirstRow();
     await tp.focus('#f-price');
     await tp.keyboard.press('End');
@@ -706,6 +712,59 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual([twoDown, (await firstRow()) !== aim.row], [aim.row, true], 'held for the first finger, then re-ranked for 400');
+    // The second finger lifting first leaves the first one's hold.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    const secondFinger = { x: formSpot.x + 10, y: formSpot.y + 5, id: 1 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }, secondFinger] });
+    await tp.keyboard.type('0');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [secondFinger] }); // the second lifts (the one named)
+    await tp.waitForTimeout(400);
+    const oneLeft = await firstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([oneLeft, (await firstRow()) !== aim.row], [aim.row, true], 'held until the first finger lifted too');
+    // Go waits even for a finger on the form side (its jump moves the
+    // whole page), and goes once the finger lifts...
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    const onForm = { x: formSpot.x + 10, y: formSpot.y + 5 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
+    await tp.keyboard.press('Enter');
+    await tp.waitForTimeout(150);
+    const goOnForm = await tp.evaluate(() => scrollY);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([goOnForm, (await tp.evaluate(() => scrollY)) > 0], [0, true], 'Go: not under the finger, then to the verdict');
+    // ...unless another press begins first: the user has moved on.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }] });
+    await tp.keyboard.press('Enter');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }, secondFinger] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual(await tp.evaluate(() => [scrollY, document.activeElement.matches('[data-verdict]')]), [0, false], 'Go dropped');
+    // Keys acting on other controls wait too: Space on a marketplace's box,
+    // an arrow on the mode tabs.
+    for (const [control, key] of [['input[name="platform"][value="poshmark"]', 'Space'], ['[role="tab"][aria-selected="true"]', 'ArrowRight']]) {
+      await tp.locator(control).evaluate((el) => el.closest('details')?.setAttribute('open', '')); // where it can take focus
+      aim = await tapFirstRow();
+      const before = await verdict(tp);
+      await tp.focus(control);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+      await tp.keyboard.press(key);
+      await tp.waitForTimeout(150);
+      const midPress = [await firstRow(), await verdict(tp)];
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+      assert.deepEqual(midPress, [aim.row, before], `${key}: nothing redrawn under the finger`);
+      assert.notEqual(await verdict(tp), before, `${key}: then it was`);
+      if (key === 'Space') await tp.check(control);
+      else await tp.getByRole('tab', { name: 'Profit' }).click();
+    }
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -976,6 +1035,22 @@ if (chromium) {
     await settle(page);
     assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
     assert.notEqual(rankedMidPress, ranked, 'the list re-ranked for 400 mid-press');
+    // A drag that starts on the form side holds once it reaches the results.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.keyboard.press('End');
+    const modeHint = await page.locator('[data-hint]').boundingBox();
+    const fromForm = { x: modeHint.x + 5, y: modeHint.y + modeHint.height / 2 };
+    const rankedBeforeDrag = await page.getAttribute('.result:first-child', 'data-id');
+    await notePress(page);
+    await Promise.all([...keyEvents(raw, '0'), mouse('mousePressed', fromForm), mouse('mouseMoved', rowAt, { buttons: 1 })]);
+    await page.waitForTimeout(150);
+    const rankedMidDrag = await page.getAttribute('.result:first-child', 'data-id');
+    await mouse('mouseReleased', rowAt);
+    await settle(page);
+    await page.evaluate(() => getSelection().removeAllRanges());
+    assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
+    assert.deepEqual([rankedMidDrag, (await page.getAttribute('.result:first-child', 'data-id')) !== rankedBeforeDrag], [rankedBeforeDrag, true], 'held under the drag, then re-ranked');
     // A right press that takes focus from a half-typed field: judged once
     // the menu is gone, not under it.
     await page.fill('#f-price', '40');
@@ -1032,6 +1107,13 @@ if (chromium) {
     assert.deepEqual([await leaves(), ...(await focusAndFlag(mac.page, '#f-price'))], [0, 'f-price', null], 'a Ctrl-click on a Mac');
     assert.deepEqual(mac.errors, []);
     await mac.context.close();
+    // Leaving the page writes the address bar at once, not 250ms on: Back
+    // and reload find what was typed.
+    await page.fill('#f-price', '45');
+    await page.waitForTimeout(100); // its render, not yet its address-bar write
+    const beforeLeaving = await inAddressBar(page, 'price');
+    await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide')));
+    assert.deepEqual([beforeLeaving !== '45', await inAddressBar(page, 'price')], [true, '45'], 'not written yet, then as the page went');
     // A pen's tap on the hint keeps focus and judges nothing (a pen on a
     // tablet taps like a finger: moving focus would bounce its keyboard).
     await page.fill('#f-price', '12..');
@@ -1249,7 +1331,7 @@ if (chromium) {
     // click) is over once the menu is: at a move with no button down, or a
     // key the page hears, not at its release (the menu may still be open).
     // Firefox and Safari send its menu as a mouse event, naming no pointer.
-    for (const [pointerType, end, menuSent] of [['mouse', 'a move', 'a pointer event'], ['mouse', 'a key', 'a mouse event'], ['mouse', 'a scroll', 'a pointer event'], ['pen', 'a move', 'a mouse event']]) {
+    for (const [pointerType, end, menuSent] of [['mouse', 'a move', 'a pointer event'], ['mouse', 'a key', 'a mouse event'], ['mouse', 'a scroll', 'a pointer event'], ['pen', 'a move', 'a mouse event'], ['touch', '3s without a word', 'a pointer event']]) {
       const how = `${pointerType}, its menu sent as ${menuSent}, then ${end}`;
       await halfType();
       await pressFrom({ pointerId: 9, pointerType });
@@ -1264,7 +1346,8 @@ if (chromium) {
       assert.equal(await judged(), false, `${how}: waits, past its release`);
       if (end === 'a move') await pointer('pointermove', { pointerId: 9, pointerType, buttons: 0 });
       else if (end === 'a key') await page.keyboard.press('Shift');
-      else await page.evaluate(() => document.querySelector('h1').dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true })));
+      else if (end === 'a scroll') await page.evaluate(() => document.querySelector('h1').dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true })));
+      else await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
       await tick(page);
       await tick(page);
       assert.equal(await judged(), true, `${how}: over`);
@@ -1283,6 +1366,19 @@ if (chromium) {
       assert.equal(await judged(), false, `${pointerType}: waits`);
       await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
     }
+    // A key ends a mouse's press (it's rarely held down while typing, and a
+    // key after a release the page never heard means the user moved on),
+    // but not a modifier held for a click.
+    await halfType();
+    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+    await page.keyboard.press('Shift');
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), false, 'Shift: held for a click');
+    await page.keyboard.press('KeyA');
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), true, 'a key: over');
     // A refused address-bar write (Safari limits them) is made again soon after.
     await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === document.querySelector('#f-price').value); // earlier writes done
     await page.evaluate(() => {
