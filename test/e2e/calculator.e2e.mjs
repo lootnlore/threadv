@@ -757,9 +757,15 @@ if (chromium) {
     await tp.keyboard.press('Enter');
     await tp.keyboard.press('CapsLock');
     await tp.keyboard.press('CapsLock');
+    // Nor is a script's event (an extension's, say) something the user did.
+    await tp.evaluate(() => {
+      const box = document.querySelector('#f-price');
+      box.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
-    assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock: Go went');
+    assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock, a script: Go went');
     // ...unless another press begins first: the user has moved on.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -777,15 +783,16 @@ if (chromium) {
     await pan(aim.finger);
     assert.deepEqual(await tp.evaluate(() => [document.activeElement.id, document.activeElement.matches('[data-verdict]')]), ['f-price', false], 'a pan: Go dropped');
     // ...or the finger's tap lands outside the field without moving focus
-    // (Safari doesn't focus a row's summary on a tap): it chose the row.
+    // (Safari doesn't focus a row's summary on a tap: here its mousedown
+    // is kept from doing so): it chose the row.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
-    await tp.evaluate(() => addEventListener('pointerdown', (e) => (window.finger = e.pointerId), { capture: true, once: true }));
+    await tp.evaluate(() => document.querySelector('.result summary').addEventListener('mousedown', (e) => e.preventDefault(), { once: true }));
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
     await tp.keyboard.press('Enter');
-    await tp.evaluate(() => document.querySelector('.result summary').dispatchEvent(new PointerEvent('click', { detail: 1, pointerId: window.finger, bubbles: true })));
-    await pan(aim.finger); // the finger off without a tap of Chrome's own
-    assert.equal(await focusedText(), 'f-price', 'a tap on a row, focus unmoved: Go dropped');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([await focusedText(), await openRows()], ['f-price', [aim.row]], 'a tap on a row, focus unmoved: the row opened, Go dropped');
     await tp.evaluate(() => {
       for (const d of document.querySelectorAll('.result details[open]')) d.open = false;
     });
@@ -1309,9 +1316,14 @@ if (chromium) {
     await page.evaluate(() => (location.hash = 's=1&price=50'));
     await settle(page);
     await page.focus('[data-shared-note] a');
+    const liveBefore = await page.locator('[data-verdict-live]').textContent();
     await page.evaluate(() => (location.hash = ''));
-    await settle(page);
-    assert.equal(await page.evaluate(() => document.activeElement.matches('[data-verdict]')), true, "1280px: the note's link's focus to the verdict");
+    await page.waitForTimeout(1300); // past the live region's pause
+    assert.deepEqual(
+      [await page.evaluate(() => document.activeElement.matches('[data-verdict]')), await page.locator('[data-verdict-live]').textContent()],
+      [true, liveBefore],
+      "1280px: the note's link's focus to the new verdict, which focus reads out (the live region doesn't again)",
+    );
     // Leaving the page writes the address bar at once, not 250ms on: Back
     // and reload find what was typed.
     // Its keystroke is worked out first, if it hadn't been yet. A page
@@ -1675,7 +1687,7 @@ if (chromium) {
 
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
     // One session crossing the switch both ways: text size up, then a wider window.
-    const { context, page } = await open('/', { viewport: { width: 320, height: 800 } });
+    const { context, page } = await open('/', { viewport: { width: 320, height: 800 }, hasTouch: true });
     const tablist = '[role=tablist]';
     const orientation = (value) => page.waitForFunction(([sel, v]) => document.querySelector(sel).getAttribute('aria-orientation') === v, [tablist, value]);
     const press = async (from, key) => {
@@ -1704,6 +1716,23 @@ if (chromium) {
       ['price', true],
       'End: the last tab, on screen',
     );
+    // Likewise when a finger held it, once that's over: here a finger
+    // resting still, its press over after 3s without a word from it. (One
+    // that pans is the user scrolling: then the page isn't pulled back.)
+    await page.getByRole('tab', { name: 'Profit' }).click();
+    await page.evaluate(() => scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().bottom + scrollY - innerHeight + 4));
+    const touch = await context.newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 60, y: 300 }] });
+    await page.keyboard.press('End');
+    const heldOff = await page.evaluate(() => document.activeElement.getBoundingClientRect().top > innerHeight);
+    await page.waitForTimeout(3400);
+    const onScreen = await page.evaluate(() => {
+      const r = document.activeElement.getBoundingClientRect();
+      return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight];
+    });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await touch.detach();
+    assert.deepEqual([heldOff, ...onScreen], [true, 'price', true], 'End during a hold: not scrolled under the finger, on screen once it was over');
     // With a modifier the keys are the browser's (Alt+arrows go Back and Forward).
     assert.equal(await press('Profit', 'Shift+ArrowDown'), 'profit', 'Shift+Down: not a tab move');
 

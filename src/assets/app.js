@@ -213,18 +213,38 @@ function setup(root) {
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
 
   const show = (el, on) => el.hidden === on && (el.hidden = !on); // written only when it changes
+  const visible = (el) => el.checkVisibility?.() ?? el.getClientRects().length > 0;
+  /** Scrolls `el` to the middle if it isn't all on screen, as focus() would. */
+  function intoView(el) {
+    const r = el.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > innerHeight) el.scrollIntoView({ block: 'center' });
+  }
+  /** The text field `el` is the label, border, sign or hint of (not its box), if any. */
+  const besideField = (el) => {
+    const input = el.closest?.('.field')?.querySelector('input[type="text"]');
+    return input && el !== input ? input : null;
+  };
   /**
-   * Focus for a control a draw hid while it had it (typed into while a
-   * press held the draw, or the shared note going), rather than dropped to
-   * the page: the verdict for one in the results column (the note sits over
-   * it), else the nearest control before it in the form that takes focus.
-   * (A draw never runs while a press holds it, so this may scroll.)
+   * Focus where it was before a draw, if the draw hid or replaced what had
+   * it (the list redrawn, the prompt in its place, a field or the shared
+   * note hidden), rather than dropped to the page: the same row in the new
+   * list, else the verdict for anything in the results column, else the
+   * nearest control before it in the form that takes focus. Run once the
+   * draw is done, so the verdict focused is the new one (and isn't then
+   * read out again). A draw never runs while a press holds it: this may
+   * scroll.
    */
-  function keepFocus(el) {
-    if (el.closest('.calc-output')) return focusVerdict();
-    const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  function keepFocus(had, row) {
+    if (!had || had === document.body || (had.isConnected && !had.closest('[hidden]'))) return;
+    const summary = row && resultsEl.querySelector(`[data-id="${row}"] summary`);
+    if (summary && visible(summary)) {
+      summary.focus({ preventScroll: true });
+      return summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
+    }
+    if (!had.isConnected || had.closest('.calc-output')) return focusVerdict();
+    const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(had) & Node.DOCUMENT_POSITION_FOLLOWING);
     for (const c of before.reverse()) {
-      if (c.tabIndex < 0 || c.disabled || !(c.checkVisibility?.() ?? c.getClientRects().length)) continue;
+      if (c.tabIndex < 0 || c.disabled || !visible(c)) continue;
       c.focus();
       if (document.activeElement === c) return; // (one inside a closed panel can refuse it)
     }
@@ -282,17 +302,13 @@ function setup(root) {
   function showPending(html) {
     verdictEl.className = 'verdict verdict-wait';
     verdictEl.innerHTML = `<span>${html}</span>`;
-    const lost = resultsEl.contains(document.activeElement) || document.activeElement === shareBtn;
     show(resultsEl, false);
     show(shareBtn, false);
-    if (lost) focusVerdict(); // not dropped to the top of the page
   }
 
   /** Rows for a result that can be worked out, and the verdict over them. */
   function showResults({ mode: m, input, ids }) {
     const open = openIds();
-    const inList = resultsEl.contains(document.activeElement);
-    const row = inList && document.activeElement.closest('.result')?.dataset.id;
     const rows = rankedRows(m, rank(m, input, ids), input.target);
     const verdict = renderVerdict(m, rows, input);
     verdictEl.className = `verdict verdict-${verdict.tone}`;
@@ -302,12 +318,6 @@ function setup(root) {
     show(shareBtn, shareSupported);
     for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
     fitResults();
-    // Focus that was in the list stays on its row (or goes to the verdict, if the row went).
-    if (!inList) return;
-    const summary = row && resultsEl.querySelector(`[data-id="${row}"] summary`);
-    if (!summary) return focusVerdict();
-    summary.focus({ preventScroll: true });
-    summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
   }
 
   /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
@@ -349,22 +359,28 @@ function setup(root) {
   const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, released, then: what waits for its end, end(), movingFocus }
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
-  // Go's jump (to the verdict, or what needs fixing) while presses held it:
-  // { jump, from: the field Go was pressed in, acts: the count then }. It
-  // goes once none holds it, only if the user has done nothing since (see
-  // `acts`, counted below) and focus is still in that field.
-  let goDue = null;
+  // A move of the view a press held (Go's jump to the verdict, a tab an
+  // arrow focused scrolling into view): { move, from: where focus was,
+  // acts: the count then }. It goes once no press holds it, only if the
+  // user has done nothing since (see `acts`, counted below: a pan, say,
+  // is them scrolling) and focus is still where it was.
+  let moveDue = null;
   let acts = 0; // what the user has done
+  /** Moves the view now, or once no press holds it (only the last asked for). */
+  function later(move) {
+    if (holding()) moveDue = { move, from: document.activeElement, acts };
+    else move();
+  }
   const seen = new Set(); // the pointers that pressed lately (see clicks)
   const holding = () => [...presses.values()].some((p) => p.holds);
   const holdsAt = (el) => !el.closest('.calc-input') || Boolean(el.closest('.hint'));
   const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'OS', 'Fn', 'FnLock', 'Hyper', 'Super', 'Symbol', 'SymbolLock', 'CapsLock', 'NumLock', 'ScrollLock']); // pressed, they do nothing
   function flush() {
     if (holding()) return;
-    const [draw, go] = [drawDue, goDue];
-    drawDue = goDue = null;
+    const [draw, due] = [drawDue, moveDue];
+    drawDue = moveDue = null;
     draw?.();
-    if (go && go.acts === acts && document.activeElement === go.from) go.jump();
+    if (due && due.acts === acts && document.activeElement === due.from) due.move();
   }
   addEventListener('pointerdown', (e) => {
     // The same pointer pressing again (one mouse, one pen): its release went unheard.
@@ -373,11 +389,11 @@ function setup(root) {
     seen.add(e.pointerId);
     if (seen.size > 32) seen.delete(seen.values().next().value);
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
-    const press = { id: e.pointerId, type: e.pointerType, button: e.button, holds: silent || holdsAt(e.target), released: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, button: e.button, target: e.target, holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
-    const on = (type, fn) => addEventListener(type, fn, { capture: true, signal: stop.signal });
+    const on = (type, fn) => addEventListener(type, fn, { capture: true, passive: true, signal: stop.signal });
     let timer = 0;
     const wait = (ms) => {
       clearTimeout(timer);
@@ -429,18 +445,27 @@ function setup(root) {
   // ends them all.
   addEventListener('click', (c) => {
     if (!c.detail) return;
-    // A tap on Go's field's own label, border or hint isn't acting on
-    // anything; one into its box is editing on, one elsewhere a choice.
-    if (!(goDue?.from.closest('.field')?.contains(c.target) && c.target !== goDue.from)) acts++;
     const own = presses.get(c.pointerId);
-    if (own) own.end();
-    else if (!seen.has(c.pointerId)) for (const p of presses.values()) p.end();
+    if (own) {
+      // Its tap acts on something unless it began on the label, border or
+      // hint of the field a held Go was pressed in (one into the box is
+      // editing on, one elsewhere a choice). Where it began, not where its
+      // click lands: a label passes its click on to its field, a second
+      // one in Firefox.
+      if (!(moveDue && besideField(own.target) === moveDue.from)) acted(c);
+      own.end();
+    } else if (!seen.has(c.pointerId)) {
+      acted(c);
+      for (const p of presses.values()) p.end();
+    }
   }, true);
-  // The rest the user does: a press, a cancelled one (the browser took the
-  // gesture, a pan or a pinch), a key that isn't a modifier (typing, moving
-  // the caret), a scroll, an input (a paste).
-  for (const type of ['pointerdown', 'pointercancel', 'wheel', 'input']) addEventListener(type, () => acts++, true);
-  addEventListener('keydown', (k) => MODIFIERS.has(k.key) || acts++, true);
+  // The rest the user does (not a script, an extension's say): a press, a
+  // cancelled one (the browser took the gesture, a pan or a pinch), a key
+  // that isn't a modifier (typing, moving the caret), a scroll, an input
+  // (a paste).
+  const acted = (e) => e.isTrusted && acts++;
+  for (const type of ['pointerdown', 'pointercancel', 'wheel', 'input']) addEventListener(type, acted, { capture: true, passive: true });
+  addEventListener('keydown', (k) => MODIFIERS.has(k.key) || acted(k), true);
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
   addEventListener('mousedown', () => {
@@ -493,6 +518,8 @@ function setup(root) {
     shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
     const [m, next, shared] = [mode, shown, sharedView];
     const draw = () => {
+      const had = document.activeElement;
+      const row = had?.closest('.result')?.dataset.id;
       if (m !== drawnMode) {
         for (const tab of tabs) {
           const on = tab.dataset.mode === m;
@@ -504,21 +531,18 @@ function setup(root) {
         hintFor('target').dataset.default = MODES[m].targetHint;
         drawnMode = m;
       }
-      const had = document.activeElement;
       for (const name of [...MAIN_KEYS, 'ebayCustomRate']) show(fieldBox(name), onShow(name, m, input));
       show(sharedNote, shared);
       // Reset clears saved settings, so it is only offered on your own view;
       // a shared result has "Use my settings" instead.
       show(resetBtn, !shared);
-      // Focus on something now hidden (typed into while a press held the
-      // draw): to the nearest control before it, not dropped to the page.
-      if (had?.closest('[hidden]')) keepFocus(had);
       flag(checks);
       // Bad values a link brought in open the Fine-tune panel they're in, so
       // they're seen. After that, opening and closing it is up to the user.
       if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
       reveal = false;
       paint(next);
+      keepFocus(had, row);
     };
     if (holding()) drawDue = draw;
     else {
@@ -595,7 +619,11 @@ function setup(root) {
   function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
     render({ save }); // which draws the tabs (when no press holds it), and the mode's fields and hints
-    if (moveFocus) tabFor(mode).focus({ preventScroll: holding() }); // at once (focus moves nothing under a press, but a scroll would)
+    if (moveFocus) {
+      const tab = tabFor(mode);
+      tab.focus({ preventScroll: true }); // at once: focus moves nothing under a press...
+      later(() => intoView(tab)); // ...but a scroll would
+    }
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
@@ -662,8 +690,8 @@ function setup(root) {
   // too. (A pen on a tablet taps like a finger: moving focus would bounce
   // its keyboard. A Ctrl-click on a Mac is a right click.)
   form.addEventListener('mousedown', (e) => {
-    const input = e.target.closest('.field')?.querySelector('input[type="text"]');
-    if (!input || input !== document.activeElement || e.target === input) return;
+    const input = besideField(e.target);
+    if (!input || input !== document.activeElement) return;
     const mainClick = e.button === 0 && !(e.ctrlKey && MAC);
     const selecting = e.target.closest('.hint') && mainClick && latest?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
@@ -703,8 +731,7 @@ function setup(root) {
       const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
     };
-    if (holding()) goDue = { jump, from: document.activeElement, acts };
-    else jump();
+    later(jump);
   });
 
   resetBtn.addEventListener('click', () => {
