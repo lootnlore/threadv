@@ -279,7 +279,7 @@ if (chromium) {
   test('the verdict and the list are each repainted only when what they show changes', async () => {
     // Loaded with nothing of its own, the page's built output is already
     // right: the first paint replaces nothing in it.
-    const { context, page } = await open(null);
+    const { context, page, errors } = await open(null);
     await page.addInitScript(() => {
       window.replaced = 0;
       new MutationObserver((changes) => {
@@ -335,6 +335,7 @@ if (chromium) {
       'each kept unless what it shows changed',
     );
     assert.equal(await verdict(page), verdictAt41, 'the verdict back after the prompt');
+    assert.deepEqual(errors, []);
     await context.close();
   });
 
@@ -942,23 +943,34 @@ if (chromium) {
       );
     }
     // Only a press held long takes focus with no mousedown: focus lost to
-    // nothing during a tap beside the field (a keyboard's Done, here a
-    // blur) is the key's doing, judged and saved at once, and stays lost.
-    await tapFirstRow();
-    await tp.fill('#f-price', '12..');
-    const hintNow = await tp.locator('#h-price').boundingBox();
-    const onHint = { x: hintNow.x + 10, y: hintNow.y + hintNow.height / 2 };
-    await tp.evaluate(() => addEventListener('pointerdown', () => document.activeElement.blur(), { capture: true, once: true })); // as it goes down
-    let savedMidTap;
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onHint] });
-    try {
-      await tp.waitForTimeout(400); // past the address bar's wait
-      savedMidTap = await inAddressBar(tp, 'price');
-    } finally {
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    // nothing during a tap beside the field (a keyboard's Done, here a blur
+    // as it goes down) is the key's doing, judged and saved at once, and
+    // stays lost. So too for a tap the page hears late, behind a long task:
+    // how long a press is held counts from when the page heard it go down.
+    let onHint;
+    for (const late of [false, true]) {
+      await tapFirstRow();
+      await tp.fill('#f-price', '12..');
+      const hintNow = await tp.locator('#h-price').boundingBox();
+      onHint = { x: hintNow.x + 10, y: hintNow.y + hintNow.height / 2 };
+      await tp.evaluate((busy) => {
+        addEventListener('pointerdown', () => document.activeElement.blur(), { capture: true, once: true });
+        if (busy) setTimeout(() => {
+          const until = performance.now() + 400;
+          while (performance.now() < until); // the tap arrives meanwhile
+        });
+      }, late);
+      let savedMidTap;
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onHint] });
+      try {
+        await tp.waitForTimeout(400); // past the address bar's wait
+        savedMidTap = await inAddressBar(tp, 'price');
+      } finally {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      }
+      await settle(tp);
+      assert.deepEqual([savedMidTap, ...(await focusAndFlag(tp, '#f-price'))], ['12..', '', 'true'], `blurred during a tap${late ? ' heard late' : ''}: judged at once, focus not brought back`);
     }
-    await settle(tp);
-    assert.deepEqual([savedMidTap, ...(await focusAndFlag(tp, '#f-price'))], ['12..', '', 'true'], 'blurred during a tap: judged at once, focus not brought back');
     // With two fingers held long, it's the latest's: one resting on the
     // list, then one on the hint as focus goes (as a long press takes it:
     // here a blur), which then lifts without selecting anything: focus
@@ -2586,8 +2598,8 @@ if (chromium) {
     await page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
     let r = await placement(page);
     assert.ok(r.stacked && r.under.every(Boolean), 'a $4,000 sale on a 320px phone: every figure under its name');
-    // A new list drawn as a prompt makes way for it is fitted shown: stacked
-    // from its first frame, not jumping to it after.
+    // A new list that replaces a prompt is fitted once shown: stacked from
+    // its first frame, not jumping to it after.
     await page.fill('#f-price', '');
     await page.locator('#f-price').press('Tab');
     await settle(page);
@@ -2603,6 +2615,28 @@ if (chromium) {
     await page.locator('#f-price').press('Tab');
     await settle(page);
     assert.deepEqual([await page.evaluate(() => window.firstFrame), (await placement(page)).stacked], [true, true], 'stacked from its first frame');
+    // So is the same list back after a prompt, shown at a new width (a
+    // phone turned while the prompt was up).
+    await page.setViewportSize({ width: 900, height: 800 });
+    await settle(page);
+    assert.equal((await placement(page)).stacked, false, 'wide: beside');
+    await page.fill('#f-price', '');
+    await page.locator('#f-price').press('Tab');
+    await settle(page);
+    await page.setViewportSize({ width: 320, height: 800 });
+    await settle(page);
+    await page.evaluate(() => {
+      const list = document.querySelector('[data-results]');
+      new MutationObserver((_, watch) => {
+        if (list.hidden) return;
+        watch.disconnect();
+        requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
+      }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
+    });
+    await page.fill('#f-price', '5000');
+    await page.locator('#f-price').press('Tab');
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.firstFrame), true, 'the same list, narrower now: stacked from its first frame');
     // Resizing refits the list, without ResizeObserver loop errors.
     await page.evaluate(() => {
       window.errorsSeen = [];
@@ -2621,6 +2655,24 @@ if (chromium) {
     assert.ok(!r.stacked && r.under.every((u) => !u), 'default sale on a 390px phone: figures beside names');
     assert.deepEqual(errors, []);
     await context.close();
+    // Loaded as built (nothing of its own: no repaint) where names would be
+    // squeezed, the list is fitted as the script sets up, before any frame
+    // of it: and refitted when the text size changes at the same width.
+    for (const [width, scale] of [[320, 1.25], [300, 1]]) {
+      const loaded = await open(null, { viewport: { width, height: 800 } });
+      await setTextSize(loaded.page, scale);
+      await loaded.page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => (window.atSetup = document.querySelector('[data-results]').classList.contains('stacked'))));
+      await loaded.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+      assert.equal(await loaded.page.evaluate(() => window.atSetup), true, `${width}px at ${scale * 100}% text: stacked as the script set up`);
+      await loaded.context.close();
+    }
+    const resized = await open('/', { viewport: { width: 320, height: 800 } });
+    assert.equal((await placement(resized.page)).stacked, false, '320px, default text: beside');
+    await setTextSize(resized.page, 1.25);
+    await resized.page.waitForTimeout(300);
+    r = await placement(resized.page);
+    assert.ok(r.stacked && r.under.every(Boolean), 'larger text at the same width: refitted, every figure under its name');
+    await resized.context.close();
   });
 
   test('fee tables show their numbers on a phone without scrolling sideways', async () => {

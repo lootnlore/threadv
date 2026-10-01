@@ -11,7 +11,7 @@
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
 import { DEFAULTS, normalizeInputs, inputsUsedBy, inputProblem, stillTyping, onItsWay, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
-import { renderOutput, esc, MODES } from '../engine/render.mjs';
+import { renderOutput, builtOutput, esc, MODES } from '../engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID } from '../engine/fees.mjs';
 
 const STORE_KEY = 'threadvet:settings:v2';
@@ -99,10 +99,9 @@ function setup(root) {
   let rendered = null; // the form as last judged: what the address bar holds
   let paintedFrom = null; // what the output on screen was worked out from: the prompt, or the result's numbers (see paint)
   // Its parts as drawn, { verdict, list } (the list alone, hidden, under a
-  // prompt): at first, what the page was built with (the calculator's
-  // defaults, every marketplace), so a first paint of that draws nothing.
-  const built = renderOutput('profit', normalizeInputs(DEFAULTS), undefined, { focus });
-  let painted = { verdict: built.verdict, list: built.list };
+  // prompt), or null for what the page was built with (see builtOutput):
+  // a first paint of that draws nothing.
+  let painted = null;
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
@@ -573,14 +572,16 @@ function setup(root) {
     const from = next.prompt ?? JSON.stringify([next.mode, next.input, next.ids]);
     if (from === paintedFrom) return;
     paintedFrom = from;
+    const was = painted ?? builtOutput(focus);
     if (next.prompt) {
       showPending(next.prompt);
-      painted = { list: painted.list }; // the list stays, hidden
+      painted = { list: was.list }; // the list stays, hidden
     } else {
       const out = renderOutput(next.mode, next.input, next.ids, { focus });
-      if (out.verdict !== painted.verdict) showVerdict(out); // (its tone goes with its words)
-      show(resultsEl, true); // before a list is fitted: hidden, it measures nothing
-      if (out.list !== painted.list) showList(out.list);
+      if (out.verdict !== was.verdict) showVerdict(out); // (its tone goes with its words)
+      show(resultsEl, true); // before the list is fitted: hidden, it measures nothing
+      if (out.list !== was.list) showList(out.list);
+      else if (fitFor() !== fittedFor) fitResults(); // the same list, shown at a width or text size not fitted yet (at load, say)
       show(shareBtn, shareSupported);
       painted = { verdict: out.verdict, list: out.list };
     }
@@ -600,22 +601,23 @@ function setup(root) {
   // figure (a big amount, large text): then every figure moves under its name,
   // so the list stays even. (Without JavaScript a CSS container query does a
   // rougher version of this.)
-  let fittedWidth = 0;
+  let fittedFor = ''; // the width and text size the list was last fitted at
+  const fitFor = () => `${resultsEl.clientWidth} ${getComputedStyle(resultsEl).fontSize}`;
   function fitResults() {
-    fittedWidth = resultsEl.clientWidth;
+    fittedFor = fitFor();
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
   }
-  // Refit when the list's width changes (not when it is hidden, or shown
-  // again at the width render just fitted). Next frame, not inside the
-  // callback: toggling .stacked changes the list's height, and changing an
-  // observed element's size from its own callback raises "ResizeObserver
-  // loop" errors.
+  // Refit when the list's width or text size changes (its height changes
+  // with the text: not when it is hidden, or shown again at what paint just
+  // fitted). Next frame, not inside the callback: toggling .stacked changes
+  // the list's height, and changing an observed element's size from its own
+  // callback raises "ResizeObserver loop" errors.
   new ResizeObserver(() => {
-    const width = resultsEl.clientWidth;
-    if (width && width !== fittedWidth) {
-      fittedWidth = width;
+    const now = fitFor();
+    if (resultsEl.clientWidth && now !== fittedFor) {
+      fittedFor = now;
       requestAnimationFrame(fitResults);
     }
   }).observe(resultsEl);

@@ -1,5 +1,5 @@
-import { esc, renderOutput, MODES } from '../engine/render.mjs';
-import { DEFAULTS, normalizeInputs, hintsFor } from '../engine/calc.mjs';
+import { esc, builtOutput, MODES } from '../engine/render.mjs';
+import { DEFAULTS, hintsFor } from '../engine/calc.mjs';
 import { PLATFORMS, EBAY_CATEGORIES, ETSY_OFFSITE, FEES_VERIFIED, RATES, pctText, usdText } from '../engine/fees.mjs';
 import { MILEAGE_YEAR } from '../data/mileage.mjs';
 
@@ -75,7 +75,7 @@ function select(name, label, options) {
  * platform on its fee page.
  */
 export function calculator({ focus } = {}) {
-  const output = renderOutput('profit', normalizeInputs(DEFAULTS), undefined, { focus });
+  const output = builtOutput(focus);
   const tabs = Object.entries(MODES).map(
     ([id, { label }], i) =>
       `<button type="button" role="tab" id="tab-${id}" data-mode="${id}" aria-controls="calc-panel" aria-selected="${i === 0}"${i === 0 ? '' : ' tabindex="-1"'}>${label}</button>`,

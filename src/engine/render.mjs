@@ -5,7 +5,7 @@
  * and strings from fees.mjs, and everything passes through esc().
  */
 import { MAX_CENTS, usdText, andList, orList } from './fees.mjs';
-import { MODE_INPUTS, rankedFor } from './calc.mjs';
+import { MODE_INPUTS, DEFAULTS, normalizeInputs, rankedFor } from './calc.mjs';
 
 /** The sale price or item cost a mode doesn't work from (hidden in the form). */
 const unused = (mode) => MODE_INPUTS.profit.filter((key) => !MODE_INPUTS[mode].includes(key)); // profit works from both
@@ -108,7 +108,7 @@ function subFor(mode, r) {
 }
 
 /**
- * The ranked <li> rows, from rankedRows() (the same rows renderVerdict gets,
+ * The ranked <li> rows, from rankedFor() (the same rows renderVerdict gets,
  * so the list and the verdict share one ranking). Each row is a <details>
  * whose summary is the headline, so tapping anywhere on a result opens its
  * fee breakdown. `focus` pins and highlights one platform (fee pages).
@@ -144,7 +144,7 @@ export function renderResults(mode, ranked, { focus } = {}) {
 }
 
 /**
- * One-line decision at the top of the results, from rankedRows(). Returns
+ * One-line decision at the top of the results, from rankedFor(). Returns
  * { tone, html }. `input` is the normalized input (cents).
  */
 export function renderVerdict(mode, ranked, input) {
@@ -187,4 +187,13 @@ export function renderOutput(mode, input, ids, { focus } = {}) {
   const rows = rankedFor(mode, input, ids);
   const verdict = renderVerdict(mode, rows, input);
   return { tone: verdict.tone, verdict: verdict.html, list: renderResults(mode, rows, { focus }) };
+}
+
+/**
+ * What the calculator is built showing, before any script runs: profit at
+ * the defaults, on every marketplace (`focus`: a fee page's own). The page
+ * and the app both start from this.
+ */
+export function builtOutput(focus) {
+  return renderOutput('profit', normalizeInputs(DEFAULTS), undefined, { focus });
 }
