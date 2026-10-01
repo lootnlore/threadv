@@ -227,9 +227,10 @@ function setup(root) {
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
       const h = hintFor(key);
       if (!h) continue;
-      // A hint always says what's true of its field. Its words are only
-      // replaced when that changes, so words selected in it (to copy an
-      // error, say) stay selected while it does not.
+      // A hint says what's true of its field as last judged (a value still
+      // being typed isn't: see render). Its words are only replaced when that
+      // changes, so words selected in it (to copy an error, say) stay
+      // selected while it does not.
       const text = problem || (missing ? PRICE_NEEDED : h.dataset.default);
       if (h.textContent !== text) h.textContent = text;
       h.classList.toggle('hint-error', Boolean(problem));
@@ -290,9 +291,10 @@ function setup(root) {
   // A click lands where it was pressed only if nothing moves in between. Two
   // things could change what's under a press, and wait for it: judging a
   // field the press took focus from (the prompt may take the list's place),
-  // and a keystroke's render still due when the press began (on the output,
-  // or on a hint, whose words it may swap). Anything else that renders (a
-  // tab, a checkbox) does so from the click itself.
+  // and a keystroke's render still due when the press began (the results,
+  // or a hint's words, which may be being selected). Anything else that
+  // renders (a tab, a checkbox) does so from the click itself, and a
+  // keystroke's render held for it then has nothing left to do.
   //
   // A press (the main button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
@@ -302,10 +304,14 @@ function setup(root) {
   // for a finger or pen (which send a stream of moves while down), 3s
   // without a word from it. A mouse held still is a slow click, and keeps
   // its press.
-  const inputSide = root.querySelector('.calc-input'); // tabs and form: renders change nothing under them but hints
   let down = null; // the press under way: { id, type, then: what waits for it, end(), movingFocus }
   addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return; // a right or middle press makes no click
+    if (e.button !== 0) {
+      // A right or middle press makes no click: what's due renders now,
+      // before it selects a word or opens a menu.
+      if (dirty) render({ save: true, typing: dirty });
+      return;
+    }
     const waiting = down?.end(false) ?? []; // a new press: what waited for the last waits for this one
     const press = (down = { id: e.pointerId, type: e.pointerType, then: waiting });
     const stop = new AbortController();
@@ -342,7 +348,7 @@ function setup(root) {
     // cancelled, or falls silent.)
     on('contextmenu', (c) => press.type === 'mouse' && c.button === 0 && (c.pointerId ?? press.id) === press.id && press.end());
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
-    if (!dirty || (inputSide.contains(e.target) && !e.target.closest('.hint'))) return;
+    if (!dirty) return;
     renderSoon.cancel(); // the keystroke's render, due mid-press
     const key = dirty;
     press.then.push(() => dirty === key && render({ save: true, typing: key }));
@@ -367,11 +373,13 @@ function setup(root) {
    * without it, a render judges every field. Mid-typing a field can be
    * briefly empty or on its way to a number ("" before "45", "1,2" before
    * "1,234"), so until it is usable nothing changes: no flag, no prompt in
-   * place of the results, nothing saved. It stays `dirty` and is judged
-   * when the user leaves the field, presses Enter or uses another control
-   * (a tab, a checkbox), which pass `save` for it. A usable value shows its
-   * results at once. The list is redrawn only when the result changed; a
-   * press can hold back only what it caused (see presses).
+   * place of the results, nothing saved (a flag and prompt already shown
+   * stay, saying the same thing, until it's judged). It stays `dirty` and
+   * is judged when the user leaves the field, presses Enter or uses another
+   * control (a tab, a checkbox), which pass `save` for it. A usable value
+   * shows its results at once. The list is redrawn only when the result
+   * changed; a press under way holds back what would change under it (see
+   * presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
@@ -382,12 +390,7 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) {
-      // Not judged yet, but an error shown for the value before no longer
-      // describes it: gone at the first edit (a new one comes when it's left).
-      if (field(typing).getAttribute('aria-invalid')) flag([{ key: typing, problem: '', missing: false }]);
-      return;
-    }
+    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) return;
     dirty = '';
     rendered = state;
     flag(checks);
@@ -530,14 +533,16 @@ function setup(root) {
   // its border, the gaps, its hint), with any button or finger, keeps focus
   // in it, so it isn't judged as left. The one exception is a mouse's main
   // button on its hint, which may be starting to select the hint's words:
-  // that press leaves the field (and it's judged, as on any leaving: see
-  // flag for what that does to the words selected), and if it selects
-  // nothing, focus comes back. (A pen on a tablet taps like a finger:
-  // moving focus would bounce its keyboard.)
+  // that press leaves the field. If it selects nothing, focus comes back
+  // before any judgement (an empty click isn't leaving). If it selects
+  // something, the field is judged, as on any leaving, and if that changes
+  // the hint's words (see flag), the selection goes and focus comes back
+  // too. (A pen on a tablet taps like a finger: moving focus would bounce
+  // its keyboard. A Ctrl-click on a Mac is a right click.)
   form.addEventListener('mousedown', (e) => {
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (!input || input !== document.activeElement || e.target === input) return;
-    const selecting = e.target.closest('.hint') && e.button === 0 && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
+    const selecting = e.target.closest('.hint') && e.button === 0 && !e.ctrlKey && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
     const caret = caretOf(input);
     const giveBack = () => {
@@ -545,8 +550,8 @@ function setup(root) {
       input.setSelectionRange(...caret);
     };
     const leftForNothing = () => document.activeElement === document.body && getSelection().isCollapsed;
-    // First of what waits for the press, while its words are as it saw them
-    // (a keystroke's render may be waiting too, and change them).
+    // First of what waits for the press, while the words are as it left them
+    // (a keystroke's render may be waiting too).
     down.then.unshift(() => {
       if (leftForNothing()) return giveBack(); // before the field's judgement: an empty click isn't leaving
       // It selected something, but what waits after this (the field's
