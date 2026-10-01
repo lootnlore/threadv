@@ -699,7 +699,7 @@ if (chromium) {
     await settle(tp);
     assert.ok((await pressGap(tp)) < 60, 'the render was due when the finger went down');
     assert.deepEqual([afterGo, await openRows()], [[aim.row, 0], [aim.row]], 'Go: nothing re-ranked or scrolled under the finger');
-    assert.ok((await tp.evaluate(() => scrollY)) > 0, 'then it went to the verdict');
+    assert.equal(await tp.evaluate(() => document.activeElement.closest('.result')?.dataset.id), aim.row, 'its tap took focus to the row (which it follows): Go dropped, not jumping away');
     aim = await tapFirstRow();
     await tp.focus('#f-price');
     await tp.keyboard.press('End');
@@ -727,10 +727,12 @@ if (chromium) {
     await settle(tp);
     assert.deepEqual([oneLeft, (await firstRow()) !== aim.row], [aim.row, true], 'held until the first finger lifted too');
     // Go waits even for a finger on the form side (its jump moves the
-    // whole page), and goes once the finger lifts...
+    // whole page), and goes once it lifts if focus is still in the field
+    // (a tap on the field's own label keeps it there)...
     aim = await tapFirstRow();
     await tp.focus('#f-price');
-    const onForm = { x: formSpot.x + 10, y: formSpot.y + 5 };
+    const label = await tp.locator('label[for="f-price"]').boundingBox();
+    const onForm = { x: label.x + 10, y: label.y + label.height / 2 };
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
     await tp.keyboard.press('Enter');
     await tp.waitForTimeout(150);
@@ -747,6 +749,47 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual(await tp.evaluate(() => [scrollY, document.activeElement.matches('[data-verdict]')]), [0, false], 'Go dropped');
+    // ...or the browser takes the finger to scroll the page.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.press('Enter');
+    for (let dy = 20; dy <= 200; dy += 20) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: aim.finger.x, y: aim.finger.y - dy }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual(await tp.evaluate(() => [document.activeElement.id, document.activeElement.matches('[data-verdict]')]), ['f-price', false], 'a pan: Go dropped');
+    // A mouse's click (a laptop's trackpad) doesn't end a finger's press.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.type('0');
+    await tp.mouse.click(formSpot.x + 10, formSpot.y + 5); // the mode's hint: a click that does nothing
+    await tp.waitForTimeout(150);
+    const afterMouse = await firstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([afterMouse, (await firstRow()) !== aim.row], [aim.row, true], "held through the mouse's click, until the finger lifted");
+    // What's judged during a hold is what was last judged, not what's
+    // drawn: a fixed price emptied again waits, as it would with no finger
+    // (here on the field's own label, which keeps focus in it).
+    await tapFirstRow();
+    await tp.fill('#f-price', '12..');
+    await tp.locator('#f-price').press('Tab');
+    await tp.focus('#f-price');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
+    await tp.keyboard.press('Control+A');
+    await tp.keyboard.type('4');
+    await tp.waitForTimeout(150);
+    await tp.keyboard.press('Backspace');
+    await tp.waitForTimeout(150);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual(
+      [await tp.getAttribute('#f-price', 'aria-invalid'), (await verdict(tp)).startsWith('Enter a sell price'), await inAddressBar(tp, 'price')],
+      [null, false, '4'],
+      'emptied after a fix: not judged until left',
+    );
     // Keys acting on other controls wait too: Space on a marketplace's box,
     // an arrow on the mode tabs.
     for (const [control, key] of [['input[name="platform"][value="poshmark"]', 'Space'], ['[role="tab"][aria-selected="true"]', 'ArrowRight']]) {
@@ -757,14 +800,30 @@ if (chromium) {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
       await tp.keyboard.press(key);
       await tp.waitForTimeout(150);
-      const midPress = [await firstRow(), await verdict(tp)];
+      const selectedTab = () => tp.locator('[role="tab"][aria-selected="true"]').textContent();
+      const costShown = () => tp.locator('#f-cost').isVisible();
+      const midPress = [await firstRow(), await verdict(tp), await selectedTab(), await costShown()];
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       await settle(tp);
-      assert.deepEqual(midPress, [aim.row, before], `${key}: nothing redrawn under the finger`);
+      assert.deepEqual(midPress, [aim.row, before, 'Profit', true], `${key}: nothing redrawn under the finger, the tabs and fields included`);
       assert.notEqual(await verdict(tp), before, `${key}: then it was`);
+      if (key === 'ArrowRight') assert.deepEqual([await selectedTab(), await costShown(), await tp.evaluate(() => document.activeElement.textContent)], ['Max buy', false, 'Max buy']);
       if (key === 'Space') await tp.check(control);
       else await tp.getByRole('tab', { name: 'Profit' }).click();
     }
+    // A link brought in with a bad value opens Fine-tune to show it, even
+    // if a later keystroke is drawn first.
+    aim = await tapFirstRow();
+    await tp.evaluate(() => document.querySelector('.tune').removeAttribute('open'));
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.evaluate(() => (location.hash = 's=1&tiktokRate=abc&price=50'));
+    await tp.waitForTimeout(100);
+    await tp.focus('#f-price');
+    await tp.keyboard.type('5');
+    await tp.waitForTimeout(150);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([await tp.getAttribute('.tune', 'open'), await tp.getAttribute('#f-tiktokRate', 'aria-invalid')], ['', 'true'], 'opened, its bad value showing');
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -1109,11 +1168,19 @@ if (chromium) {
     await mac.context.close();
     // Leaving the page writes the address bar at once, not 250ms on: Back
     // and reload find what was typed.
-    await page.fill('#f-price', '45');
-    await page.waitForTimeout(100); // its render, not yet its address-bar write
-    const beforeLeaving = await inAddressBar(page, 'price');
-    await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide')));
-    assert.deepEqual([beforeLeaving !== '45', await inAddressBar(page, 'price')], [true, '45'], 'not written yet, then as the page went');
+    // Its keystroke is worked out first, if it hadn't been yet. A page
+    // hidden (a phone switching apps, which may drop it) does the same.
+    for (const [value, leave] of [['45', 'pagehide'], ['46', 'hidden']]) {
+      await page.fill('#f-price', value); // its render due in 60ms, its address-bar write 250ms after that
+      const beforeLeaving = await inAddressBar(page, 'price');
+      await page.evaluate((how) => {
+        if (how === 'pagehide') return dispatchEvent(new PageTransitionEvent('pagehide'));
+        Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+        delete document.visibilityState;
+      }, leave);
+      assert.deepEqual([beforeLeaving !== value, await inAddressBar(page, 'price')], [true, value], `${leave}: not written yet, then as the page went`);
+    }
     // A pen's tap on the hint keeps focus and judges nothing (a pen on a
     // tablet taps like a finger: moving focus would bounce its keyboard).
     await page.fill('#f-price', '12..');

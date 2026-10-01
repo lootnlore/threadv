@@ -93,7 +93,8 @@ function setup(root) {
   let mode = 'profit';
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
-  let reveal = false; // open Fine-tune for bad values a link brought in (set by load)
+  let reveal = false; // open Fine-tune for bad values a link brought in (set by load, done by the next draw)
+  let focusTab = false; // the next draw moves focus to the mode's tab (arrow keys on the tabs)
   let rendered = null; // the form as last judged: what the address bar holds
   let painted = null; // the output on screen: { prompt } or { mode, input, ids, link } (see paint)
   let shown = null; // what it shows, or will once no press holds its drawing
@@ -209,12 +210,14 @@ function setup(root) {
     }
   }
   const syncUrlSoon = debounce(syncUrl, 250);
-  addEventListener('pagehide', () => syncUrlSoon.flush()); // leaving before it's written: Back and reload still find the numbers
 
   // ---- rendering ----
 
   const labelOf = (key) => root.querySelector(`label[for="f-${key}"]`)?.firstChild?.textContent.trim() || key;
 
+  /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
+  const onShow = (key, m, input) =>
+    !MODES[m].hidden.includes(key) && (key !== 'ebayCustomRate' || PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts));
   /**
    * Each numeric field on the page, [{ key, problem, missing, blocks, needed }]:
    * `problem` says what is wrong with its value; `needed` marks a sell price
@@ -223,9 +226,6 @@ function setup(root) {
    * `blocks`: either one holds the results back, because the compared
    * marketplaces read the field in this mode (inputsUsedBy) and it is on show.
    */
-  /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
-  const onShow = (key, m, input) =>
-    !MODES[m].hidden.includes(key) && (key !== 'ebayCustomRate' || PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts));
   function check(values, ids, input) {
     const used = new Set(ids.flatMap((id) => inputsUsedBy(PLATFORM_BY_ID[id], mode, input)));
     return NUMERIC.filter((key) => field(key)).map((key) => {
@@ -237,13 +237,11 @@ function setup(root) {
     });
   }
 
-  const flagged = new Set(); // fields whose hint says what's wrong (an error, or "needed")
+  const flagged = new Set(); // fields last judged wrong (an error, or "needed"): their hints say so once drawn
   /** Marks each field with what is wrong; its hint says it. */
   function flag(checks) {
     for (const { key, problem, missing } of checks) {
       const el = field(key);
-      if (problem || missing) flagged.add(key);
-      else flagged.delete(key);
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -337,7 +335,7 @@ function setup(root) {
   const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, released, then: what waits for its end, end(), movingFocus }
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
-  let goDue = null; // Go's jump, while presses held it
+  let goDue = null; // Go's jump while presses held it, and where focus was: { jump, from }
   const holding = () => [...presses.values()].some((p) => p.holds);
   const holdsAt = (el) => !el.closest('.calc-input') || Boolean(el.closest('.hint'));
   const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta']; // held for a click
@@ -346,7 +344,7 @@ function setup(root) {
     const [draw, go] = [drawDue, goDue];
     drawDue = goDue = null;
     draw?.();
-    go?.();
+    if (go && document.activeElement === go.from) go.jump(); // the press didn't take focus elsewhere
   }
   addEventListener('pointerdown', (e) => {
     // The same pointer pressing again (one mouse, one pen): its release went unheard.
@@ -386,7 +384,11 @@ function setup(root) {
       press.released = true;
       wait(250); // for its click
     });
-    on('pointercancel', (c) => c.pointerId === press.id && press.end());
+    on('pointercancel', (c) => {
+      if (c.pointerId !== press.id) return;
+      goDue = null; // the browser took the gesture (a pan, a pinch): the user has moved on
+      press.end();
+    });
     // Its own context menu (a right click, a Ctrl-click on a Mac, a pen's
     // barrel button, a long press), not the Menu key's (button -1), opened
     // as it went down or at its release. (Not every browser says which
@@ -399,7 +401,9 @@ function setup(root) {
     });
     on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.includes(k.key))) && press.end());
     on('wheel', () => menu && press.end());
-    on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
+    // Its own click: not a keyboard's (no clicks counted) or another pointer's
+    // (not every browser says which pointer clicked).
+    on('click', (c) => c.detail && (c.pointerId ?? press.id) === press.id && press.end());
   }, true);
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
@@ -443,20 +447,32 @@ function setup(root) {
     if (typed && (waits || stillTyping(typing, field(typing).value))) return;
     dirty = '';
     rendered = state;
+    for (const c of checks) {
+      if (c.problem || c.missing) flagged.add(c.key);
+      else flagged.delete(c.key);
+    }
     const blocking = checks.filter((c) => c.blocks);
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
     shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
-    const [m, next, revealing] = [mode, shown, reveal];
-    reveal = false;
+    const [m, next] = [mode, shown];
     const draw = () => {
+      for (const tab of tabs) {
+        const on = tab.dataset.mode === m;
+        tab.setAttribute('aria-selected', String(on));
+        tab.tabIndex = on ? 0 : -1;
+        if (on && focusTab) tab.focus();
+      }
+      focusTab = false;
+      panel.setAttribute('aria-labelledby', `tab-${m}`);
       if (hint.textContent !== MODES[m].hint) hint.textContent = MODES[m].hint;
       hintFor('target').dataset.default = MODES[m].targetHint;
       for (const name of [...MAIN_KEYS, 'ebayCustomRate']) fieldBox(name).hidden = !onShow(name, m, input);
       flag(checks);
       // Bad values a link brought in open the Fine-tune panel they're in, so
       // they're seen. After that, opening and closing it is up to the user.
-      if (revealing) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
+      if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
+      reveal = false;
       paint(next);
     };
     if (holding()) drawDue = draw;
@@ -481,6 +497,14 @@ function setup(root) {
     painted = next; // once it's on screen
   }
   const renderSoon = debounce((key) => render({ save: true, typing: key }), 60);
+  // Leaving (or hidden, where a phone may drop the page) before a keystroke
+  // is worked out or the address bar written: Back and reload still find it.
+  const leaving = () => {
+    renderSoon.flush();
+    syncUrlSoon.flush();
+  };
+  addEventListener('pagehide', leaving);
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && leaving());
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
@@ -525,14 +549,8 @@ function setup(root) {
 
   function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
-    for (const tab of tabs) {
-      const on = tab.dataset.mode === mode;
-      tab.setAttribute('aria-selected', String(on));
-      tab.tabIndex = on ? 0 : -1;
-      if (on && moveFocus) tab.focus();
-    }
-    panel.setAttribute('aria-labelledby', `tab-${mode}`);
-    render({ save }); // which draws the mode's fields and hints
+    focusTab ||= moveFocus;
+    render({ save }); // which draws the tabs, and the mode's fields and hints
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
@@ -639,7 +657,7 @@ function setup(root) {
       const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
     };
-    if (holding()) goDue = jump;
+    if (holding()) goDue = { jump, from: document.activeElement };
     else jump();
   });
 
