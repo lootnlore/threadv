@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, stillTyping, withDecimalPoint, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
+import { normalizeInputs, evaluate, maxBuy, listPrice, rank, rankedRows, parseNumber, competitionRanks, ranksWithTies, scoreFor, byScore, recommends, inputsUsedBy, inputProblem, hintsFor, stillTyping, onItsWay, withDecimalPoint, LIMITS, MAX_CENTS, DEFAULTS } from '../src/engine/calc.mjs';
 import { percent, money, renderResults as renderRows, renderVerdict as verdictOfRows, ordinal } from '../src/engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID as P, RATES, EBAY_CATEGORIES, ETSY_OFFSITE, tiered, firstPriceWhere, roundCents, pctText, usdText } from '../src/engine/fees.mjs';
 
@@ -643,4 +643,13 @@ test('mid-typing, an amount whose comma may still separate thousands waits; judg
   assert.equal(withDecimalPoint('cost', '$ 12,5'), '$ 12.5');
   assert.equal(withDecimalPoint('tiktokRate', '7,500'), '7.500');
   for (const raw of ['1,234', '1,234.50', '0,500', '1.000,50', '12.50', 'abc']) assert.equal(withDecimalPoint('cost', raw), raw, raw);
+});
+
+test('mid-typing, a value one more digit could make readable and in range is on its way; one none could is not', () => {
+  const price = { sellPrice: true };
+  for (const raw of ['0', '0.', '0.0', '.', '$', '$.', ' 0 ']) assert.ok(onItsWay('price', raw, price), raw);
+  for (const raw of ['', '  ', '4', '0.5', '12..', '-', '-1', 'abc', '99999999', '100000.5', '0.00', '1,234,5']) assert.ok(!onItsWay('price', raw, price), raw);
+  assert.ok(!onItsWay('cost', '0'), 'a cost of $0 is fine: nothing on its way');
+  assert.ok(onItsWay('taxRate', '.'), '.5%');
+  assert.ok(!onItsWay('taxRate', '150'), 'no digit brings it back in range');
 });

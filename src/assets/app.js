@@ -10,7 +10,7 @@
 // - "Copy link" builds a complete shared link marked with `s=1`: everything
 //   that differs from the defaults. Opening one shows exactly that result and
 //   never reads or writes the visitor's saved settings.
-import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, stillTyping, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
+import { DEFAULTS, normalizeInputs, rank, rankedRows, inputsUsedBy, inputProblem, stillTyping, onItsWay, withDecimalPoint, PRICE_NEEDED, has } from '../engine/calc.mjs';
 import { renderResults, renderVerdict, esc, MODES } from '../engine/render.mjs';
 import { PLATFORMS, PLATFORM_BY_ID } from '../engine/fees.mjs';
 
@@ -21,7 +21,9 @@ const TUNE_KEYS = ['taxRate', 'other', ...PLATFORMS.flatMap((p) => p.options ?? 
 const NUMERIC = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => typeof DEFAULTS[key] === 'number');
 const LINK_KEYS = [SHARE_FLAG, 'mode', ...MAIN_KEYS];
 const ALL_IDS = PLATFORMS.map((p) => p.id);
-const MAC = /^Mac/.test(navigator.platform); // where a Ctrl-click is a right click
+// Where a Ctrl-click is a right click (iPadOS with a trackpad says it's one
+// too). A mousedown must know before any contextmenu event says so.
+const MAC = /^Mac/.test(navigator.platform);
 
 const storage = {
   read() {
@@ -215,7 +217,7 @@ function setup(root) {
       const problem = inputProblem(key, values[key], { sellPrice: needed });
       const missing = !problem && needed && String(values.price).trim() === '';
       const blocks = Boolean(problem || missing) && used.has(key) && !field(key).closest('[hidden]');
-      return { key, problem, missing, blocks };
+      return { key, problem, missing, blocks, onItsWay: onItsWay(key, values[key], { sellPrice: needed }) };
     });
   }
 
@@ -296,11 +298,12 @@ function setup(root) {
   // words a press selected (to copy, say) stay selected only if they stay.
   // Two things could change what's under a press, and wait for it: judging
   // a field the press took focus from (the prompt may take the list's
-  // place), and, when the press is on what a render rewrites (the results, a
-  // hint), a keystroke's render, whether due when it began or typed during
-  // it (with the other hand, or a thumb). Anything else that renders (a tab,
-  // a checkbox) does so from the click itself, and leaves what waited
-  // nothing to do.
+  // place), and a keystroke's render due when it began. Both could move
+  // anything but the form side (the results, and all laid out after them)
+  // or swap a hint's words; a press on the rest of the form side holds
+  // nothing back (a test checks nothing there moves). Anything else that
+  // renders (a tab, a checkbox) does so from the click itself, and leaves
+  // what waited nothing to do.
   //
   // A press (any button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
@@ -308,19 +311,20 @@ function setup(root) {
   // pointer moving with no button down before any release (a hovering
   // mouse) or, for a finger or pen (which send a stream of moves while
   // down), 3s without a word from it. A mouse held still is a slow click,
-  // and keeps its press. A mouse press that opens its context menu is over
-  // once the menu is: when the page hears from the user again (a move, a key).
-  const REWRITTEN = '.calc-output, .hint'; // what a render rewrites, words or layout (a test checks it's all)
-  let down = null; // the press under way: { id, type, button, holds (a keystroke's render), then: what waits for it, end(), movingFocus }
+  // and keeps its press. A press that opens its context menu is over once
+  // the menu is: when the page hears from the user again (a move, a key, a
+  // scroll, another press).
+  let down = null; // the press under way: { id, type, button, holds (what renders wait for it), released, then: what waits for it, end(), movingFocus }
   const renderDue = () => dirty && render({ save: true, typing: dirty }); // a keystroke's render, once the press holding it is over
   function hold(press) {
     renderSoon.cancel();
     if (!press.then.includes(renderDue)) press.then.push(renderDue);
   }
   addEventListener('pointerdown', (e) => {
+    const other = down && down.id !== e.pointerId && !down.released ? down : null; // another finger, still down
     const waiting = down?.end(false) ?? []; // a new press: what waited for the last waits for this one
-    const holds = Boolean(e.target.closest(REWRITTEN));
-    const press = (down = { id: e.pointerId, type: e.pointerType, button: e.button, holds, then: waiting });
+    const holds = !e.target.closest('.calc-input') || Boolean(e.target.closest('.hint') || other?.holds);
+    const press = (down = { id: e.pointerId, type: e.pointerType, button: e.button, holds, released: false, then: waiting });
     const stop = new AbortController();
     const on = (type, fn) => addEventListener(type, fn, { capture: true, signal: stop.signal });
     let timer = 0;
@@ -338,31 +342,39 @@ function setup(root) {
     };
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     if (silent) wait(3000);
-    let released = false;
     let menu = false;
+    const back = () => menu && press.end(); // from its menu
     on('pointermove', (m) => {
-      if (m.pointerId !== press.id || (released && !menu)) return;
+      if (m.pointerId !== press.id || (press.released && !menu)) return;
       if (!m.buttons) press.end(); // its release went unheard, or its menu is gone
-      else if (silent) wait(3000);
+      else if (silent && !menu) wait(3000);
     });
     on('pointerup', (u) => {
       if (u.pointerId !== press.id || menu) return;
-      released = true;
+      press.released = true;
       wait(250); // for its click
     });
     on('pointercancel', (c) => c.pointerId === press.id && press.end());
-    // Its own context menu (a right click, or a Ctrl-click on a Mac), not
-    // the Menu key's (button -1), opened as it went down or at its release.
-    // (A finger's long press is cancelled, or falls silent.)
+    // Its own context menu (a right click, a Ctrl-click on a Mac, a pen's
+    // barrel button, a long press), not the Menu key's (button -1), opened
+    // as it went down or at its release. (Not every browser says which
+    // pointer opened it.)
     on('contextmenu', (c) => {
-      if (press.type !== 'mouse' || c.button !== press.button || (c.pointerId ?? press.id) !== press.id) return;
+      if (c.button !== press.button || (c.pointerId ?? press.id) !== press.id) return;
       menu = true;
       clearTimeout(timer);
     });
-    on('keydown', () => menu && press.end()); // a key the page hears isn't the menu's
+    on('keydown', back);
+    on('wheel', back);
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
     if (holds && dirty) hold(press);
   }, true);
+  // A finger or pen leaves focus where it was until it lifts, so keys typed
+  // with the other hand meanwhile (a digit, Next, Go) reach the field: what
+  // they'd render waits for the press too. (A mouse takes focus as it goes
+  // down: keys reach a field during its press only once focus has come back
+  // by keyboard, its release unheard.)
+  const typedAround = () => down?.holds && down.type !== 'mouse';
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
   addEventListener('mousedown', () => {
@@ -371,9 +383,9 @@ function setup(root) {
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
-  /** Runs `fn` once the press moving focus now is over, or a task from now if none is. */
+  /** Runs `fn` once the press moving focus now (or typed around) is over, or a task from now if none is. */
   function afterPress(fn) {
-    if (down?.movingFocus) down.then.push(fn);
+    if (down?.movingFocus || typedAround()) down.then.push(fn);
     else setTimeout(fn);
   }
 
@@ -389,7 +401,8 @@ function setup(root) {
    * `save` for it. A usable value shows its results at once, and a field
    * already flagged is judged at every keystroke, so what it and the prompt
    * say stays true (another error, "needed", or nothing wrong); only a value
-   * on its way to a number ("1," before "1,5") waits even then. The list is
+   * on its way to a number ("1," before "1,5", "0." before "0.75") waits
+   * even then. The list is
    * redrawn only when the result changed; a press under way holds back what
    * would change under it (see presses).
    */
@@ -402,7 +415,7 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (stillTyping(typed.key, field(typed.key).value) || ((typed.problem || typed.missing) && !flagged.has(typing)))) return;
+    if (typed && (stillTyping(typing, field(typing).value) || ((typed.problem || typed.missing) && (!flagged.has(typing) || typed.onItsWay)))) return;
     dirty = '';
     rendered = state;
     flag(checks);
@@ -522,7 +535,7 @@ function setup(root) {
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
     dirty = e.target.name;
-    if (down?.holds) hold(down); // typed mid-press: shown once it's over
+    if (typedAround()) hold(down);
     else renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
@@ -581,17 +594,22 @@ function setup(root) {
   seeResults.hidden = false;
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    if (document.activeElement?.type === 'text' && form.contains(document.activeElement)) showPoint(document.activeElement);
-    render({ save: true });
-    // Nothing to show yet: go to what needs fixing (opening Fine-tune if it's
-    // in there), not away from it.
-    if (pendingField) {
-      pendingField.closest('details:not([open])')?.setAttribute('open', '');
-      return pendingField.focus();
-    }
-    if (seeResults.offsetParent === null) return;
-    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
-    focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
+    const active = document.activeElement;
+    const go = () => {
+      if (active?.type === 'text' && form.contains(active)) showPoint(active);
+      render({ save: true });
+      // Nothing to show yet: go to what needs fixing (opening Fine-tune if
+      // it's in there), not away from it.
+      if (pendingField) {
+        pendingField.closest('details:not([open])')?.setAttribute('open', '');
+        return pendingField.focus();
+      }
+      if (seeResults.offsetParent === null) return;
+      const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+      focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
+    };
+    if (typedAround()) down.then.push(go); // Go, with a finger down: once it lifts
+    else go();
   });
 
   resetBtn.addEventListener('click', () => {

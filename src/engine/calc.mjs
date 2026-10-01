@@ -103,6 +103,17 @@ export function stillTyping(key, raw) {
   return !isRate(key) && lead !== undefined && Number(lead) * 1000 + Number(tail.padEnd(3, '0')) <= LIMITS.money;
 }
 
+/**
+ * Mid-typing, a value not readable or in range yet that one more digit
+ * could make so ("0" and "0." before "0.75", "." before ".99", "$" before
+ * "$5"): a field already showing what's wrong waits for it rather than say
+ * something new is. An empty field isn't on its way to anything.
+ */
+export function onItsWay(key, raw, options) {
+  const text = String(raw).trim();
+  return text !== '' && inputProblem(key, text, options) !== '' && inputProblem(key, `${text}1`, options) === '';
+}
+
 /** The text with a comma read as the decimal point written as one ("12,50" is "12.50"), so the field shows how it was read. */
 export function withDecimalPoint(key, raw) {
   const text = String(raw);

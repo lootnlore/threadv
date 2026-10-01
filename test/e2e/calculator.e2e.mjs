@@ -11,7 +11,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
@@ -171,6 +171,7 @@ if (chromium) {
       }, { capture: true, once: true });
     });
   const pressGap = (page) => page.evaluate(() => window.noted.gap);
+  const inAddressBar = (page, key) => page.evaluate((k) => new URLSearchParams(location.hash.slice(1)).get(k), key);
   const focusAndFlag = (page, selector) =>
     page.evaluate((sel) => [document.activeElement.id, document.querySelector(sel).getAttribute('aria-invalid')], selector);
   // A mouse press held `ms` (a person's click is ~90ms) on a box measured
@@ -350,7 +351,6 @@ if (chromium) {
         return { tone: document.querySelector('[data-verdict]').className, rows: list.hidden ? 0 : list.children.length, share: !document.querySelector('[data-share]').hidden };
       });
     const ebayOpen = () => page.locator('.result[data-id="ebay"] details').getAttribute('open');
-    const inAddressBar = (key) => page.evaluate((k) => new URLSearchParams(location.hash.slice(1)).get(k), key);
     // A value is judged when the user leaves its field (Tab, here).
     const leave = async (id) => {
       await page.locator(id).press('Tab');
@@ -379,7 +379,7 @@ if (chromium) {
       await page.fill(id, halfway);
       await page.waitForTimeout(400); // past the render and address-bar delays
       assert.equal(await page.locator(id).getAttribute('aria-invalid'), null, `"${halfway}" isn't flagged while typing`);
-      assert.notEqual(await inAddressBar(id.slice(3)), halfway, `"${halfway}" isn't put in the address bar`);
+      assert.notEqual(await inAddressBar(page, id.slice(3)), halfway, `"${halfway}" isn't put in the address bar`);
       await page.fill(id, done);
       await settle(page);
     }
@@ -430,7 +430,7 @@ if (chromium) {
     await leave('#f-price');
     assert.equal(await verdict(page), 'Enter a sell price to see results.');
     await settle(page);
-    assert.notEqual(await inAddressBar('price'), '4');
+    assert.notEqual(await inAddressBar(page, 'price'), '4');
     await page.fill('#f-price', '40');
     await settle(page);
     // Left that way, the field is flagged and a neutral prompt replaces the
@@ -612,7 +612,7 @@ if (chromium) {
     assert.equal(await row.locator('details').getAttribute('open'), '', 'the press opened the row');
     await settle(page);
     assert.notEqual(await verdict(page), before, 'then the result for 400 shows');
-    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '400');
+    assert.equal(await inAddressBar(page, 'price'), '400');
     await idle();
     assert.deepEqual(await page.evaluate(() => window.shifts), [], 'layout shifts the user did not cause');
     assert.deepEqual(errors, []);
@@ -654,6 +654,58 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual([await leaves(), ...(await focusAndFlag(tp, '#f-price'))], [0, 'f-price', null]);
+    // Keys typed with the other thumb while a finger is down wait for it too:
+    // Next leaving a half-typed field, Go jumping to the verdict. So does a
+    // keystroke while a second finger is down on the form, beside the first.
+    const tapFirstRow = async () => {
+      await tp.fill('#f-price', '40');
+      await settle(tp);
+      await tp.evaluate(() => {
+        for (const d of document.querySelectorAll('.result details[open]')) d.open = false;
+        scrollTo(0, 0);
+      });
+      const row = await tp.getAttribute('.result:first-child', 'data-id');
+      const at = await tp.locator('.result:first-child summary').boundingBox();
+      return { row, finger: { x: at.x + 30, y: at.y + at.height / 2 } };
+    };
+    const openRows = () => tp.$$eval('.result details[open]', (d) => d.map((el) => el.closest('.result').dataset.id));
+    const firstRow = () => tp.getAttribute('.result:first-child', 'data-id');
+    let aim = await tapFirstRow();
+    await tp.fill('#f-price', '12..');
+    await settle(tp);
+    const listed = await verdict(tp);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.press('Tab'); // Next
+    await tp.waitForTimeout(150);
+    const afterNext = await verdict(tp);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([afterNext, await openRows(), await verdict(tp)], [listed, [aim.row], 'Check “Sell price”. Write it like 1,234.50.'], 'Next: judged once the finger lifted');
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await notePress(tp);
+    await Promise.all([...keyEvents(cdp, '0'), cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] })]);
+    await tp.keyboard.press('Enter'); // Go
+    await tp.waitForTimeout(150);
+    const afterGo = [await firstRow(), await tp.evaluate(() => scrollY)];
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.ok((await pressGap(tp)) < 60, 'the render was due when the finger went down');
+    assert.deepEqual([afterGo, await openRows()], [[aim.row, 0], [aim.row]], 'Go: nothing re-ranked or scrolled under the finger');
+    assert.ok((await tp.evaluate(() => scrollY)) > 0, 'then it went to the verdict');
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    const formSpot = await tp.locator('[data-hint]').boundingBox(); // the mode's hint: nothing there changes
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...aim.finger, id: 0 }, { x: formSpot.x + 10, y: formSpot.y + 5, id: 1 }] });
+    await tp.keyboard.type('0');
+    await tp.waitForTimeout(150);
+    const twoDown = await firstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([twoDown, (await firstRow()) !== aim.row], [aim.row, true], 'held for the first finger, then re-ranked for 400');
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -707,7 +759,7 @@ if (chromium) {
       'a selection keeps its direction',
     );
     await settle(page);
-    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '2.50');
+    assert.equal(await inAddressBar(page, 'price'), '2.50');
     await page.fill('#f-price', '12,');
     await page.keyboard.press('Enter');
     await page.keyboard.type('5');
@@ -770,7 +822,6 @@ if (chromium) {
     const raw = await page.context().newCDPSession(page);
     const mouse = (type, at, extra = {}) => raw.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1, ...extra });
     const hover = (at) => mouse('mouseMoved', at, { button: 'none', buttons: 0 });
-    const hashPrice = () => page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price'));
     const back = () => page.evaluate(() => [document.activeElement.id, getSelection().toString()]);
     const said = () => Promise.all([page.locator('#f-price').getAttribute('aria-invalid'), hintText(), shown()]);
     // Flagged, back in, nothing edited: the error's words can be selected.
@@ -787,7 +838,7 @@ if (chromium) {
     await page.keyboard.press('End');
     await page.keyboard.type('.');
     await settle(page);
-    assert.equal(await hashPrice(), '12...', 'judged (and saved) as typed');
+    assert.equal(await inAddressBar(page, 'price'), '12...', 'judged (and saved) as typed');
     const [line] = (await hintLines('h-price')).lines;
     await notePress(page);
     await Promise.all([...keyEvents(raw, '.'), mouse('mousePressed', { x: line.right + 6, y: line.y })]);
@@ -796,7 +847,7 @@ if (chromium) {
     await mouse('mouseReleased', { x: line.left + 1, y: line.y });
     await settle(page);
     assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
-    assert.deepEqual([await selected(), await hashPrice()], ['Write it like 1,234.50.', '12....'], 'judged after it, its words still selected');
+    assert.deepEqual([await selected(), await inAddressBar(page, 'price')], ['Write it like 1,234.50.', '12....'], 'judged after it, its words still selected');
     await deselect();
     // An unflagged field's first error waits until it's left: words selected
     // in its hint meanwhile give way to it, and focus comes back.
@@ -823,7 +874,7 @@ if (chromium) {
     assert.equal(await dragHint(), 'What it will sell for', "the hint's words selected");
     assert.equal(await page.inputValue('#f-price'), '1.5');
     assert.notEqual(await shown(), before, 'judged: the result for $1.50');
-    assert.equal(await hashPrice(), '1.5');
+    assert.equal(await inAddressBar(page, 'price'), '1.5');
     await deselect();
     await page.fill('#f-price', '40');
     await settle(page);
@@ -854,9 +905,12 @@ if (chromium) {
     await settle(page);
     const needed = [null, 'Needed to see results.', 'Enter a sell price to see results.'];
     assert.deepEqual(await said(), needed, 'emptied');
-    await page.keyboard.type('1,');
-    await settle(page);
-    assert.deepEqual(await said(), needed, '"1," waits');
+    for (const onItsWay of ['1,', '0', '0.', '.']) {
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(onItsWay);
+      await settle(page);
+      assert.deepEqual(await said(), needed, `"${onItsWay}" waits: a digit more could make it a price`);
+    }
     await page.keyboard.press('Control+A');
     await page.keyboard.type('4');
     await settle(page);
@@ -937,6 +991,24 @@ if (chromium) {
     await settle(page);
     assert.deepEqual(leftUnderMenu, ['', before], 'left, but not judged under its menu');
     assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.', 'judged once it was gone');
+    // A press below the calculator holds a keystroke's render too: the
+    // results coming back in the prompt's place would move it.
+    await page.fill('#f-price', '');
+    await page.locator('#f-price').press('Tab');
+    await page.locator('#f-price').focus();
+    await page.evaluate(() => scrollTo(0, 200));
+    const heading = page.locator('h2', { hasText: 'Three questions' });
+    const headAt = await heading.boundingBox();
+    const onHeading = { x: headAt.x + 20, y: headAt.y + headAt.height / 2 };
+    await notePress(page);
+    await Promise.all([...keyEvents(raw, '4'), mouse('mousePressed', onHeading)]);
+    await page.waitForTimeout(150);
+    const headMidPress = (await heading.boundingBox()).y;
+    await mouse('mouseReleased', onHeading);
+    await settle(page);
+    assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
+    assert.deepEqual([headMidPress, (await heading.boundingBox()).y > headAt.y], [headAt.y, true], 'still under the press, then moved down by the results');
+    await page.evaluate(() => scrollTo(0, 0));
     await raw.detach();
     // A Ctrl-drag over the hint selects its words as any drag does, except
     // on a Mac, where a Ctrl-click is a right click: focus stays in the field.
@@ -1015,7 +1087,8 @@ if (chromium) {
     await page.locator(`.result[data-id="${id4}"] summary`).click();
     await page.fill('#f-price', '40');
     await settle(page);
-    // A right press (no click) holds nothing back: a keystroke's result shows during it.
+    // A right press holds back a keystroke's render due when it began, like
+    // any press off the form, and its menu with it: once that's gone, it shows.
     before = await shown();
     await page.focus('#f-price');
     await page.keyboard.type('1');
@@ -1024,7 +1097,12 @@ if (chromium) {
     await page.waitForTimeout(300);
     const during = await shown();
     await page.mouse.up({ button: 'right' });
-    assert.notEqual(during, before, 'shown while the right button is down');
+    await page.waitForTimeout(300);
+    const released = await shown();
+    await page.mouse.move(650, 20); // back from the menu
+    await settle(page);
+    assert.deepEqual([during, released], [before, before], 'held while the button was down, and its menu open');
+    assert.notEqual(await shown(), before, 'then shown');
     // Typing "1,234" key by key shows no result for $1.20 or $1.23 on the
     // way (its comma may still separate thousands): $1 stays until $1,234.
     await page.fill('#f-price', '');
@@ -1170,22 +1248,26 @@ if (chromium) {
     // One that opens its context menu (a Ctrl-click on a Mac, a right
     // click) is over once the menu is: at a move with no button down, or a
     // key the page hears, not at its release (the menu may still be open).
-    for (const end of ['a move', 'a key']) {
+    // Firefox and Safari send its menu as a mouse event, naming no pointer.
+    for (const [pointerType, end, menuSent] of [['mouse', 'a move', 'a pointer event'], ['mouse', 'a key', 'a mouse event'], ['mouse', 'a scroll', 'a pointer event'], ['pen', 'a move', 'a mouse event']]) {
+      const how = `${pointerType}, its menu sent as ${menuSent}, then ${end}`;
       await halfType();
-      await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+      await pressFrom({ pointerId: 9, pointerType });
       await pointer('contextmenu', { pointerId: 9, button: 2 });
       await tick(page);
       await tick(page);
-      assert.equal(await judged(), false, "another button's menu isn't this press's");
-      await pointer('contextmenu', { pointerId: 9, button: 0 });
-      await pointer('pointerup', { pointerId: 9, pointerType: 'mouse', button: 0 });
+      assert.equal(await judged(), false, `${how}: another button's menu isn't this press's`);
+      if (menuSent === 'a pointer event') await pointer('contextmenu', { pointerId: 9, button: 0 });
+      else await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 0, bubbles: true })));
+      await pointer('pointerup', { pointerId: 9, pointerType, button: 0 });
       await page.waitForTimeout(400);
-      assert.equal(await judged(), false, 'its menu open: waits, past its release');
-      if (end === 'a move') await pointer('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 0 });
-      else await page.keyboard.press('Shift');
+      assert.equal(await judged(), false, `${how}: waits, past its release`);
+      if (end === 'a move') await pointer('pointermove', { pointerId: 9, pointerType, buttons: 0 });
+      else if (end === 'a key') await page.keyboard.press('Shift');
+      else await page.evaluate(() => document.querySelector('h1').dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true })));
       await tick(page);
       await tick(page);
-      assert.equal(await judged(), true, `${end}: over`);
+      assert.equal(await judged(), true, `${how}: over`);
     }
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
@@ -1233,37 +1315,53 @@ if (chromium) {
     await context.close();
   });
 
-  test('typing and leaving a field change words or layout only where a press waits for them', async () => {
-    // A press on what a render rewrites (REWRITTEN in app.js) holds back a
-    // keystroke's render; anywhere else it doesn't need to. A field's flag
-    // outside it only repaints: its border, what a screen reader is told.
-    const [, rewritten] = readFileSync(new URL('../../src/assets/app.js', import.meta.url), 'utf8').match(/const REWRITTEN = '([^']+)'/);
-    const { context, page, errors } = await open('/', { viewport: { width: 1280, height: 900 } });
-    await page.locator('.tune > summary').click();
-    await page.evaluate((selector) => {
-      const outside = (window.outside = new Set());
-      const flagOnly = (r, el) =>
-        (r.attributeName === 'aria-invalid' && el.matches('input')) ||
-        (r.attributeName === 'class' && el.matches('.input-wrap') && r.oldValue.replace('is-invalid', '').trim() === el.className.replace('is-invalid', '').trim());
-      new MutationObserver((records) => {
-        for (const r of records) {
-          const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
-          if (el.closest(selector)) continue;
-          if (r.type === 'attributes' && (el.getAttribute(r.attributeName) === r.oldValue || flagOnly(r, el))) continue;
-          outside.add(`${r.type} ${r.attributeName ?? ''} ${el.outerHTML.slice(0, 80)}`);
-        }
-      }).observe(document.querySelector('[data-calc]'), { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true });
-    }, rewritten);
-    const steps = [['price', '12..'], ['price', '400'], ['price', ''], ['cost', '99999999'], ['cost', '5'], ['ship', '1,5'], ['taxRate', '120'], ['taxRate', '8'], ['price', '40']];
-    for (const [name, value] of steps) {
-      await page.fill(`#f-${name}`, value); // its keystroke's render
-      await settle(page);
-      await page.locator(`#f-${name}`).press('Tab'); // and its judgement
-      await settle(page);
+  test('typing and leaving a field move nothing on the form side, and change only its hints and flags', async () => {
+    // A press there (but on a hint) holds nothing back: a keystroke's
+    // render or a judgement changes nothing under it. A field's flag only
+    // repaints it (its border, what a screen reader is told); a hint's words
+    // change in room kept for its longest.
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      const { context, page, errors } = await open('/', { viewport });
+      await page.locator('.tune > summary').click();
+      const boxes = () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll('.calc-input *')].map((el) => {
+            if (!el.getClientRects().length) return 'not shown';
+            const r = el.getBoundingClientRect();
+            return [r.left + scrollX, r.top + scrollY, r.width, r.height].map(Math.round).join();
+          }),
+        );
+      const start = await boxes();
+      await page.evaluate(() => {
+        const changed = (window.changed = new Set());
+        const only = (r, el, name) => (r.oldValue ?? '').replace(name, '').trim() === el.className.replace(name, '').trim(); // that class and no other
+        const flagOnly = (r, el) =>
+          (r.attributeName === 'aria-invalid' && el.matches('input')) ||
+          (r.attributeName === 'class' && el.matches('.input-wrap') && only(r, el, 'is-invalid')) ||
+          (r.attributeName === 'class' && el.matches('.hint [data-live]') && only(r, el, 'hint-error'));
+        new MutationObserver((records) => {
+          for (const r of records) {
+            const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+            if (r.type !== 'attributes' && el.closest('.hint [data-live]')) continue;
+            if (r.type === 'attributes' && (el.getAttribute(r.attributeName) === r.oldValue || flagOnly(r, el))) continue;
+            changed.add(`${r.type} ${r.attributeName ?? ''} ${el.outerHTML.slice(0, 80)}`);
+          }
+        }).observe(document.querySelector('.calc-input'), { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true });
+      });
+      const steps = [['price', '12..'], ['price', '400'], ['price', ''], ['price', '0.'], ['cost', '99999999'], ['cost', '5'], ['ship', '1,5'], ['taxRate', '120'], ['taxRate', '8'], ['price', '40']];
+      const moved = [];
+      for (const [name, value] of steps) {
+        await page.fill(`#f-${name}`, value); // its keystroke's render
+        await settle(page);
+        if ((await boxes()).join(' ') !== start.join(' ')) moved.push(`${name}=${value} typed`);
+        await page.locator(`#f-${name}`).press('Tab'); // and its judgement
+        await settle(page);
+        if ((await boxes()).join(' ') !== start.join(' ')) moved.push(`${name}=${value} left`);
+      }
+      assert.deepEqual([moved, await page.evaluate(() => [...window.changed])], [[], []], `${viewport.width}px`);
+      assert.deepEqual(errors, []);
+      await context.close();
     }
-    assert.deepEqual(await page.evaluate(() => [...window.outside]), []);
-    assert.deepEqual(errors, []);
-    await context.close();
   });
 
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
