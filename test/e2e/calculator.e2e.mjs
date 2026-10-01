@@ -11,7 +11,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
@@ -150,6 +150,27 @@ if (chromium) {
     }, selector);
     return () => page.evaluate(() => window.stopCounting());
   };
+  // Keystrokes sent over the DevTools protocol, to send with a press in one
+  // go (Promise.all): they reach the page in order, well inside the 60ms
+  // before a keystroke's render.
+  const keyEvents = (cdp, text) =>
+    [...text].flatMap((ch) => {
+      const key = ch === '.' ? { key: '.', code: 'Period', windowsVirtualKeyCode: 190 } : { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: 48 + Number(ch) };
+      return [cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, ...key }), cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key })];
+    });
+  // Notes how long after the last keystroke the next press began: within
+  // 60ms, its render was still due.
+  const notePress = (page) =>
+    page.evaluate(() => {
+      const note = (window.noted = {});
+      const typed = () => (note.typed = performance.now());
+      addEventListener('input', typed, true);
+      addEventListener('pointerdown', () => {
+        note.gap = performance.now() - note.typed;
+        removeEventListener('input', typed, true);
+      }, { capture: true, once: true });
+    });
+  const pressGap = (page) => page.evaluate(() => window.noted.gap);
   const focusAndFlag = (page, selector) =>
     page.evaluate((sel) => [document.activeElement.id, document.querySelector(sel).getAttribute('aria-invalid')], selector);
   // A mouse press held `ms` (a person's click is ~90ms) on a box measured
@@ -608,15 +629,20 @@ if (chromium) {
     const box = await tp.locator(`.result[data-id="${first}"] summary`).boundingBox();
     await tp.focus('#f-price');
     await tp.keyboard.press('End');
-    await tp.keyboard.type('0'); // 40 becomes 400: the order changes
     const cdp = await touch.context.newCDPSession(tp);
     const point = { x: box.x + 30, y: box.y + box.height / 2 };
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+    await notePress(tp);
+    await Promise.all([...keyEvents(cdp, '0'), cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] })]); // 40 becomes 400: the order changes
     await tp.waitForTimeout(120); // longer than the result takes to catch up while typing
+    await tp.keyboard.type('0'); // and typed with the other thumb, mid-press: 4000
+    await tp.waitForTimeout(120);
+    const midTap = await tp.getAttribute('.result:first-child', 'data-id');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
+    assert.ok((await pressGap(tp)) < 60, 'the render was due when the finger went down');
+    assert.equal(midTap, first, 'nothing moved under the finger');
     assert.deepEqual(await tp.$$eval('.result details[open]', (d) => d.map((el) => el.closest('.result').dataset.id)), [first], 'the tapped row opened');
-    assert.notEqual(await tp.getAttribute('.result:first-child', 'data-id'), first, 'and the list then re-ranked for 400');
+    assert.notEqual(await tp.getAttribute('.result:first-child', 'data-id'), first, 'and the list then re-ranked for 4000');
     // A tap on the hint of the field being typed in keeps focus throughout
     // (a finger can't be starting to select it).
     await tp.fill('#f-price', '12..');
@@ -741,22 +767,47 @@ if (chromium) {
       await page.evaluate(() => getSelection().removeAllRanges());
       await tick(page);
     };
+    const raw = await page.context().newCDPSession(page);
+    const mouse = (type, at, extra = {}) => raw.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1, ...extra });
+    const hover = (at) => mouse('mouseMoved', at, { button: 'none', buttons: 0 });
+    const hashPrice = () => page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price'));
+    const back = () => page.evaluate(() => [document.activeElement.id, getSelection().toString()]);
+    const said = () => Promise.all([page.locator('#f-price').getAttribute('aria-invalid'), hintText(), shown()]);
+    // Flagged, back in, nothing edited: the error's words can be selected.
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
-    await page.locator('#f-price').click(); // back in, the error showing, nothing edited
+    await page.locator('#f-price').click();
     assert.equal(await dragHint(), 'Write it like 1,234.50.', "the error's words selected");
     assert.equal(await page.locator('#f-price').getAttribute('aria-invalid'), 'true');
     await deselect();
+    // A flagged field is judged at every keystroke. One whose render is due
+    // when a drag over the hint begins is judged after it, and with the same
+    // error the words stay selected.
     await page.locator('#f-price').click();
     await page.keyboard.press('End');
-    await page.keyboard.type('.'); // edited, so judged when left: the same error
-    assert.equal(await dragHint(), 'Write it like 1,234.50.', 'its words still selected');
-    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '12...', 'judged (and saved)');
-    await page.locator('#f-price').click();
-    await page.fill('#f-price', '99999999'); // a different error, not shown while typed
+    await page.keyboard.type('.');
+    await settle(page);
+    assert.equal(await hashPrice(), '12...', 'judged (and saved) as typed');
+    const [line] = (await hintLines('h-price')).lines;
+    await notePress(page);
+    await Promise.all([...keyEvents(raw, '.'), mouse('mousePressed', { x: line.right + 6, y: line.y })]);
+    for (let x = line.right + 6; x > line.left + 1; x -= 20) await mouse('mouseMoved', { x, y: line.y }, { buttons: 1 });
+    await mouse('mouseMoved', { x: line.left + 1, y: line.y }, { buttons: 1 });
+    await mouse('mouseReleased', { x: line.left + 1, y: line.y });
+    await settle(page);
+    assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
+    assert.deepEqual([await selected(), await hashPrice()], ['Write it like 1,234.50.', '12....'], 'judged after it, its words still selected');
+    await deselect();
+    // An unflagged field's first error waits until it's left: words selected
+    // in its hint meanwhile give way to it, and focus comes back.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    before = await shown();
+    await page.fill('#f-price', '99999999');
+    await settle(page);
+    assert.deepEqual(await said(), [null, 'What it will sell for', before], 'not judged while typed');
     await dragHint();
-    assert.equal(await hintText(), 'Enter $0 to $100,000.', 'the hint says the new error at once');
-    const back = () => page.evaluate(() => [document.activeElement.id, getSelection().toString()]);
+    assert.equal(await hintText(), 'Enter $0 to $100,000.', 'judged when left');
     assert.deepEqual(await back(), ['f-price', ''], 'the words selected went, so focus came back');
     await page.fill('#f-price', '40');
     await settle(page);
@@ -772,7 +823,7 @@ if (chromium) {
     assert.equal(await dragHint(), 'What it will sell for', "the hint's words selected");
     assert.equal(await page.inputValue('#f-price'), '1.5');
     assert.notEqual(await shown(), before, 'judged: the result for $1.50');
-    assert.equal(await page.evaluate(() => new URLSearchParams(location.hash.slice(1)).get('price')), '1.5');
+    assert.equal(await hashPrice(), '1.5');
     await deselect();
     await page.fill('#f-price', '40');
     await settle(page);
@@ -792,70 +843,123 @@ if (chromium) {
     await page.mouse.dblclick(wordAt.left + 8, wordAt.y);
     await settle(page);
     assert.deepEqual([await hintText(), ...(await back())], ['Write it like 1,234.50.', 'f-price', '']);
-    // A value being typed isn't judged: an error shown stays, and so does
-    // the prompt saying the same, until the field is left or its value is
-    // usable, when both go at once.
-    const flagged = () => Promise.all([page.locator('#f-price').getAttribute('aria-invalid'), hintText(), shown()]);
-    const stale = ['true', 'Write it like 1,234.50.', 'Check “Sell price”. Write it like 1,234.50.'];
+    // Flagged, what the field and the prompt say stays true as it's typed:
+    // another error, "needed", or nothing wrong and the results back. Only a
+    // value on its way to a number waits.
+    await page.fill('#f-price', '99999999');
+    await settle(page);
+    assert.deepEqual(await said(), ['true', 'Enter $0 to $100,000.', 'Check “Sell price”. Enter $0 to $100,000.'], 'another error');
     await page.keyboard.press('Control+A');
     await page.keyboard.press('Backspace');
     await settle(page);
-    assert.deepEqual(await flagged(), stale, 'emptied while typing: not judged yet');
+    const needed = [null, 'Needed to see results.', 'Enter a sell price to see results.'];
+    assert.deepEqual(await said(), needed, 'emptied');
+    await page.keyboard.type('1,');
+    await settle(page);
+    assert.deepEqual(await said(), needed, '"1," waits');
+    await page.keyboard.press('Control+A');
     await page.keyboard.type('4');
     await settle(page);
-    const fixed = await flagged();
-    assert.deepEqual(fixed.slice(0, 2), [null, 'What it will sell for'], 'usable: the error goes at once');
-    assert.notEqual(fixed[2], stale[2], 'and the prompt with it');
-    // A keystroke's render due when a press begins waits for it (a main
-    // button's), or comes before it (a right button's: no click to wait
-    // for), so the words under it aren't swapped mid-press. The keystroke
-    // and the press are sent together, well inside the 60ms before the
-    // render, and the page notes what was there when the press began.
-    const raw = await page.context().newCDPSession(page);
-    const typeThenPress = async (button) => {
-      await page.keyboard.press('Control+A');
-      await page.keyboard.type('12..');
+    assert.deepEqual((await said()).slice(0, 2), [null, 'What it will sell for'], 'usable');
+    assert.equal(await page.locator('[data-results]').isVisible(), true, 'the results back');
+    // A keystroke's render due when a press on the hint begins waits for it,
+    // whichever the button, so the words under it aren't swapped mid-press.
+    // (A right press is over once its menu is: a key the page hears says so.)
+    const fixUnderPress = async (button) => {
+      await page.fill('#f-price', '12..');
       await page.locator('#f-price').press('Tab');
       await page.locator('#f-price').click();
       await page.keyboard.press('Control+A');
-      await page.evaluate(() =>
-        document.addEventListener('pointerdown', () => (window.atPress = [document.querySelector('#f-price').value, document.querySelector('#h-price [data-live]').textContent]), { capture: true, once: true }),
-      );
-      const key = { key: '4', code: 'Digit4', windowsVirtualKeyCode: 52 };
-      const at = { x: wordAt.left + 4, y: wordAt.y, button, clickCount: 1 };
-      await page.mouse.move(at.x, at.y);
-      await Promise.all([
-        raw.send('Input.dispatchKeyEvent', { type: 'keyDown', text: '4', ...key }), // fixes it: the hint is due back to its own words
-        raw.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key }),
-        raw.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at }),
-      ]);
+      const at = { x: wordAt.left + 4, y: wordAt.y };
+      await hover(at);
+      await notePress(page);
+      await Promise.all([...keyEvents(raw, '4'), mouse('mousePressed', at, { button })]); // fixes it: the hint is due back to its own words
       await page.waitForTimeout(150);
       const midPress = await hintText();
-      await raw.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at });
-      if (button === 'right') await page.keyboard.press('Escape'); // its menu, if one opened
+      await mouse('mouseReleased', at, { button });
+      if (button === 'right') await page.keyboard.press('Shift'); // the menu closed
       await settle(page);
-      return [await page.evaluate(() => window.atPress), midPress, await hintText()];
+      return [(await pressGap(page)) < 60, midPress, await hintText()];
     };
-    assert.deepEqual(
-      await typeThenPress('left'),
-      [['4', 'Write it like 1,234.50.'], 'Write it like 1,234.50.', 'What it will sell for'],
-      'typed, the render due at the press, unchanged under it, then updated',
-    );
-    assert.deepEqual(
-      await typeThenPress('right'),
-      [['4', 'What it will sell for'], 'What it will sell for', 'What it will sell for'],
-      'rendered as the press began',
-    );
-    await raw.detach();
-    // A Ctrl-click (a right click on a Mac) on the hint keeps focus in the
-    // field: no judging, nothing to give back.
-    await page.fill('#f-price', '12..');
-    leaves = await countLeaves(page, '#f-price');
-    await page.keyboard.down('Control');
-    await page.mouse.click(wordAt.left + 4, wordAt.y);
-    await page.keyboard.up('Control');
+    for (const button of ['left', 'right']) {
+      assert.deepEqual(await fixUnderPress(button), [true, 'Write it like 1,234.50.', 'What it will sell for'], `${button}: due at the press, unchanged under it, then updated`);
+    }
+    // A right press on a row with a render due: its menu opens on the row
+    // aimed at, and the list re-ranks once the menu is gone.
+    await page.fill('#f-price', '40');
     await settle(page);
-    assert.deepEqual([await leaves(), ...(await focusAndFlag(page, '#f-price'))], [0, 'f-price', null], 'a Ctrl-click on the hint');
+    await page.keyboard.press('End');
+    await page.evaluate(() => scrollTo(0, 0));
+    const aimed = await page.getAttribute('.result:first-child', 'data-id');
+    const rowBox = await page.locator('.result:first-child summary').boundingBox();
+    const rowAt = { x: rowBox.x + 30, y: rowBox.y + rowBox.height / 2 };
+    const menuOn = () =>
+      page.evaluate(() => addEventListener('contextmenu', (c) => (window.menuOn = c.target.closest('.result')?.dataset.id), { capture: true, once: true }));
+    await menuOn();
+    await notePress(page);
+    await Promise.all([...keyEvents(raw, '0'), mouse('mousePressed', rowAt, { button: 'right' })]); // 400: the order changes
+    await mouse('mouseReleased', rowAt, { button: 'right' });
+    await page.waitForTimeout(150);
+    const underMenu = await page.evaluate(() => [window.menuOn, document.querySelector('.result').dataset.id]);
+    await hover({ x: rowAt.x + 5, y: rowAt.y }); // back from the menu
+    await settle(page);
+    assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
+    assert.deepEqual(underMenu, [aimed, aimed], 'the menu on the row aimed at, the list as it was');
+    assert.notEqual(await page.getAttribute('.result:first-child', 'data-id'), aimed, 'then re-ranked for 400');
+    // A press on what a render doesn't rewrite (here the field itself) holds
+    // nothing back: the results keep up with typing while it lasts.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.keyboard.press('End');
+    const ranked = await page.getAttribute('.result:first-child', 'data-id');
+    const fieldBox = await page.locator('#f-price').boundingBox();
+    const inField = { x: fieldBox.x + fieldBox.width - 8, y: fieldBox.y + fieldBox.height / 2 };
+    await notePress(page);
+    await Promise.all([...keyEvents(raw, '0'), mouse('mousePressed', inField)]);
+    await page.waitForTimeout(150);
+    const rankedMidPress = await page.getAttribute('.result:first-child', 'data-id');
+    await mouse('mouseReleased', inField);
+    await settle(page);
+    assert.ok((await pressGap(page)) < 60, 'the render was due when the press began');
+    assert.notEqual(rankedMidPress, ranked, 'the list re-ranked for 400 mid-press');
+    // A right press that takes focus from a half-typed field: judged once
+    // the menu is gone, not under it.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.fill('#f-price', '12..');
+    await settle(page);
+    before = await shown();
+    await mouse('mousePressed', rowAt, { button: 'right' });
+    await mouse('mouseReleased', rowAt, { button: 'right' });
+    await page.waitForTimeout(150);
+    const leftUnderMenu = [await page.evaluate(() => document.activeElement.id), await shown()];
+    await hover({ x: rowAt.x + 5, y: rowAt.y });
+    await settle(page);
+    assert.deepEqual(leftUnderMenu, ['', before], 'left, but not judged under its menu');
+    assert.equal(await shown(), 'Check “Sell price”. Write it like 1,234.50.', 'judged once it was gone');
+    await raw.detach();
+    // A Ctrl-drag over the hint selects its words as any drag does, except
+    // on a Mac, where a Ctrl-click is a right click: focus stays in the field.
+    await page.fill('#f-price', '40');
+    await settle(page);
+    await page.keyboard.down('Control');
+    const ctrlDragged = await dragHint();
+    await page.keyboard.up('Control');
+    assert.equal(ctrlDragged, 'What it will sell for', 'a Ctrl-drag');
+    await deselect();
+    const mac = await open(null, { viewport: { width: 1280, height: 900 } });
+    await mac.page.addInitScript(() => Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'MacIntel' }));
+    await mac.page.goto(base + '/', { waitUntil: 'networkidle' });
+    await mac.page.fill('#f-price', '12..');
+    leaves = await countLeaves(mac.page, '#f-price');
+    const macWord = await mac.page.locator('#h-price [data-live]').boundingBox();
+    await mac.page.keyboard.down('Control');
+    await mac.page.mouse.click(macWord.x + 4, macWord.y + macWord.height / 2);
+    await mac.page.keyboard.up('Control');
+    await settle(mac.page);
+    assert.deepEqual([await leaves(), ...(await focusAndFlag(mac.page, '#f-price'))], [0, 'f-price', null], 'a Ctrl-click on a Mac');
+    assert.deepEqual(mac.errors, []);
+    await mac.context.close();
     // A pen's tap on the hint keeps focus and judges nothing (a pen on a
     // tablet taps like a finger: moving focus would bounce its keyboard).
     await page.fill('#f-price', '12..');
@@ -1034,8 +1138,7 @@ if (chromium) {
     await pointer('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 0 });
     await tick(page);
     assert.equal(await judged(), true, 'the mouse moving with no button down ends it');
-    // A press ends 250ms after a release that makes no click, or at once if
-    // it opens a context menu (a Ctrl-click on a Mac: no click follows).
+    // A press ends 250ms after a release that makes no click.
     await halfType();
     await pressFrom({ pointerId: 9, pointerType: 'mouse' });
     const afterRelease = await page.evaluate(async () => {
@@ -1064,16 +1167,26 @@ if (chromium) {
       return [early, document.querySelector('#f-price').getAttribute('aria-invalid')];
     });
     assert.deepEqual(hovering, [null, 'true'], 'judged after the click, not at the hover');
-    await halfType();
-    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
-    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 2, bubbles: true })));
-    await tick(page);
-    await tick(page);
-    assert.equal(await judged(), false, "a right click's (or the Menu key's) context menu isn't this press's");
-    await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 0, bubbles: true })));
-    await tick(page);
-    await tick(page);
-    assert.equal(await judged(), true, 'its own (a Ctrl-click) ends it');
+    // One that opens its context menu (a Ctrl-click on a Mac, a right
+    // click) is over once the menu is: at a move with no button down, or a
+    // key the page hears, not at its release (the menu may still be open).
+    for (const end of ['a move', 'a key']) {
+      await halfType();
+      await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+      await pointer('contextmenu', { pointerId: 9, button: 2 });
+      await tick(page);
+      await tick(page);
+      assert.equal(await judged(), false, "another button's menu isn't this press's");
+      await pointer('contextmenu', { pointerId: 9, button: 0 });
+      await pointer('pointerup', { pointerId: 9, pointerType: 'mouse', button: 0 });
+      await page.waitForTimeout(400);
+      assert.equal(await judged(), false, 'its menu open: waits, past its release');
+      if (end === 'a move') await pointer('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 0 });
+      else await page.keyboard.press('Shift');
+      await tick(page);
+      await tick(page);
+      assert.equal(await judged(), true, `${end}: over`);
+    }
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
     await halfType();
@@ -1117,6 +1230,39 @@ if (chromium) {
       assert.equal(await page.inputValue('#f-other'), kept);
       assert.equal((await saved(page)).values.other, kept, `"${typed}" saved`);
     }
+    await context.close();
+  });
+
+  test('typing and leaving a field change words or layout only where a press waits for them', async () => {
+    // A press on what a render rewrites (REWRITTEN in app.js) holds back a
+    // keystroke's render; anywhere else it doesn't need to. A field's flag
+    // outside it only repaints: its border, what a screen reader is told.
+    const [, rewritten] = readFileSync(new URL('../../src/assets/app.js', import.meta.url), 'utf8').match(/const REWRITTEN = '([^']+)'/);
+    const { context, page, errors } = await open('/', { viewport: { width: 1280, height: 900 } });
+    await page.locator('.tune > summary').click();
+    await page.evaluate((selector) => {
+      const outside = (window.outside = new Set());
+      const flagOnly = (r, el) =>
+        (r.attributeName === 'aria-invalid' && el.matches('input')) ||
+        (r.attributeName === 'class' && el.matches('.input-wrap') && r.oldValue.replace('is-invalid', '').trim() === el.className.replace('is-invalid', '').trim());
+      new MutationObserver((records) => {
+        for (const r of records) {
+          const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+          if (el.closest(selector)) continue;
+          if (r.type === 'attributes' && (el.getAttribute(r.attributeName) === r.oldValue || flagOnly(r, el))) continue;
+          outside.add(`${r.type} ${r.attributeName ?? ''} ${el.outerHTML.slice(0, 80)}`);
+        }
+      }).observe(document.querySelector('[data-calc]'), { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true });
+    }, rewritten);
+    const steps = [['price', '12..'], ['price', '400'], ['price', ''], ['cost', '99999999'], ['cost', '5'], ['ship', '1,5'], ['taxRate', '120'], ['taxRate', '8'], ['price', '40']];
+    for (const [name, value] of steps) {
+      await page.fill(`#f-${name}`, value); // its keystroke's render
+      await settle(page);
+      await page.locator(`#f-${name}`).press('Tab'); // and its judgement
+      await settle(page);
+    }
+    assert.deepEqual(await page.evaluate(() => [...window.outside]), []);
+    assert.deepEqual(errors, []);
     await context.close();
   });
 

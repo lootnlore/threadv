@@ -21,6 +21,7 @@ const TUNE_KEYS = ['taxRate', 'other', ...PLATFORMS.flatMap((p) => p.options ?? 
 const NUMERIC = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => typeof DEFAULTS[key] === 'number');
 const LINK_KEYS = [SHARE_FLAG, 'mode', ...MAIN_KEYS];
 const ALL_IDS = PLATFORMS.map((p) => p.id);
+const MAC = /^Mac/.test(navigator.platform); // where a Ctrl-click is a right click
 
 const storage = {
   read() {
@@ -218,10 +219,13 @@ function setup(root) {
     });
   }
 
+  const flagged = new Set(); // fields whose hint says what's wrong (an error, or "needed")
   /** Marks each field with what is wrong; its hint says it. */
   function flag(checks) {
     for (const { key, problem, missing } of checks) {
       const el = field(key);
+      if (problem || missing) flagged.add(key);
+      else flagged.delete(key);
       if (problem) el.setAttribute('aria-invalid', 'true');
       else el.removeAttribute('aria-invalid');
       el.closest('.input-wrap')?.classList.toggle('is-invalid', Boolean(problem));
@@ -288,32 +292,35 @@ function setup(root) {
   }
 
   // ---- presses ----
-  // A click lands where it was pressed only if nothing moves in between. Two
-  // things could change what's under a press, and wait for it: judging a
-  // field the press took focus from (the prompt may take the list's place),
-  // and a keystroke's render still due when the press began (the results,
-  // or a hint's words, which may be being selected). Anything else that
-  // renders (a tab, a checkbox) does so from the click itself, and a
-  // keystroke's render held for it then has nothing left to do.
+  // A click lands where it was pressed only if nothing moves in between, and
+  // words a press selected (to copy, say) stay selected only if they stay.
+  // Two things could change what's under a press, and wait for it: judging
+  // a field the press took focus from (the prompt may take the list's
+  // place), and, when the press is on what a render rewrites (the results, a
+  // hint), a keystroke's render, whether due when it began or typed during
+  // it (with the other hand, or a thumb). Anything else that renders (a tab,
+  // a checkbox) does so from the click itself, and leaves what waited
+  // nothing to do.
   //
-  // A press (the main button, a finger, a pen) is over at the click it makes
+  // A press (any button, a finger, a pen) is over at the click it makes
   // (once its handlers ran), 250ms after a release that makes none, when
-  // it's cancelled or, for a mouse, opens its context menu (no click follows
-  // either), or when a release the page never heard of shows: its pointer
-  // moving with no button down before any release (a hovering mouse) or,
-  // for a finger or pen (which send a stream of moves while down), 3s
-  // without a word from it. A mouse held still is a slow click, and keeps
-  // its press.
-  let down = null; // the press under way: { id, type, then: what waits for it, end(), movingFocus }
+  // it's cancelled, or when a release the page never heard of shows: its
+  // pointer moving with no button down before any release (a hovering
+  // mouse) or, for a finger or pen (which send a stream of moves while
+  // down), 3s without a word from it. A mouse held still is a slow click,
+  // and keeps its press. A mouse press that opens its context menu is over
+  // once the menu is: when the page hears from the user again (a move, a key).
+  const REWRITTEN = '.calc-output, .hint'; // what a render rewrites, words or layout (a test checks it's all)
+  let down = null; // the press under way: { id, type, button, holds (a keystroke's render), then: what waits for it, end(), movingFocus }
+  const renderDue = () => dirty && render({ save: true, typing: dirty }); // a keystroke's render, once the press holding it is over
+  function hold(press) {
+    renderSoon.cancel();
+    if (!press.then.includes(renderDue)) press.then.push(renderDue);
+  }
   addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) {
-      // A right or middle press makes no click: what's due renders now,
-      // before it selects a word or opens a menu.
-      if (dirty) render({ save: true, typing: dirty });
-      return;
-    }
     const waiting = down?.end(false) ?? []; // a new press: what waited for the last waits for this one
-    const press = (down = { id: e.pointerId, type: e.pointerType, then: waiting });
+    const holds = Boolean(e.target.closest(REWRITTEN));
+    const press = (down = { id: e.pointerId, type: e.pointerType, button: e.button, holds, then: waiting });
     const stop = new AbortController();
     const on = (type, fn) => addEventListener(type, fn, { capture: true, signal: stop.signal });
     let timer = 0;
@@ -332,26 +339,29 @@ function setup(root) {
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     if (silent) wait(3000);
     let released = false;
+    let menu = false;
     on('pointermove', (m) => {
-      if (m.pointerId !== press.id || released) return;
-      if (!m.buttons) press.end(); // its release went unheard
+      if (m.pointerId !== press.id || (released && !menu)) return;
+      if (!m.buttons) press.end(); // its release went unheard, or its menu is gone
       else if (silent) wait(3000);
     });
     on('pointerup', (u) => {
-      if (u.pointerId !== press.id) return;
+      if (u.pointerId !== press.id || menu) return;
       released = true;
       wait(250); // for its click
     });
     on('pointercancel', (c) => c.pointerId === press.id && press.end());
-    // Its own context menu (a Ctrl-click on a Mac, main button), not a right
-    // click's (button 2) or the Menu key's (-1). (A finger's long press is
-    // cancelled, or falls silent.)
-    on('contextmenu', (c) => press.type === 'mouse' && c.button === 0 && (c.pointerId ?? press.id) === press.id && press.end());
+    // Its own context menu (a right click, or a Ctrl-click on a Mac), not
+    // the Menu key's (button -1), opened as it went down or at its release.
+    // (A finger's long press is cancelled, or falls silent.)
+    on('contextmenu', (c) => {
+      if (press.type !== 'mouse' || c.button !== press.button || (c.pointerId ?? press.id) !== press.id) return;
+      menu = true;
+      clearTimeout(timer);
+    });
+    on('keydown', () => menu && press.end()); // a key the page hears isn't the menu's
     on('click', (c) => c.detail && press.end()); // a keyboard's click (no clicks counted) isn't this press's
-    if (!dirty) return;
-    renderSoon.cancel(); // the keystroke's render, due mid-press
-    const key = dirty;
-    press.then.push(() => dirty === key && render({ save: true, typing: key }));
+    if (holds && dirty) hold(press);
   }, true);
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
@@ -372,14 +382,16 @@ function setup(root) {
    * mirrored to the URL. `typing` names the text field a keystroke changed;
    * without it, a render judges every field. Mid-typing a field can be
    * briefly empty or on its way to a number ("" before "45", "1,2" before
-   * "1,234"), so until it is usable nothing changes: no flag, no prompt in
-   * place of the results, nothing saved (a flag and prompt already shown
-   * stay, saying the same thing, until it's judged). It stays `dirty` and
-   * is judged when the user leaves the field, presses Enter or uses another
-   * control (a tab, a checkbox), which pass `save` for it. A usable value
-   * shows its results at once. The list is redrawn only when the result
-   * changed; a press under way holds back what would change under it (see
-   * presses).
+   * "1,234"), so a field's first error waits: until its value is usable
+   * nothing changes (no flag, no prompt in place of the results, nothing
+   * saved), and it stays `dirty`, judged when the user leaves the field,
+   * presses Enter or uses another control (a tab, a checkbox), which pass
+   * `save` for it. A usable value shows its results at once, and a field
+   * already flagged is judged at every keystroke, so what it and the prompt
+   * say stays true (another error, "needed", or nothing wrong); only a value
+   * on its way to a number ("1," before "1,5") waits even then. The list is
+   * redrawn only when the result changed; a press under way holds back what
+   * would change under it (see presses).
    */
   function render({ save = false, typing = '' } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
@@ -390,7 +402,7 @@ function setup(root) {
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
-    if (typed && (typed.problem || typed.missing || stillTyping(typed.key, field(typed.key).value))) return;
+    if (typed && (stillTyping(typed.key, field(typed.key).value) || ((typed.problem || typed.missing) && !flagged.has(typing)))) return;
     dirty = '';
     rendered = state;
     flag(checks);
@@ -510,7 +522,8 @@ function setup(root) {
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
     dirty = e.target.name;
-    renderSoon(e.target.name);
+    if (down?.holds) hold(down); // typed mid-press: shown once it's over
+    else renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
     if (e.target.type !== 'text') render({ save: true });
@@ -542,7 +555,8 @@ function setup(root) {
   form.addEventListener('mousedown', (e) => {
     const input = e.target.closest('.field')?.querySelector('input[type="text"]');
     if (!input || input !== document.activeElement || e.target === input) return;
-    const selecting = e.target.closest('.hint') && e.button === 0 && !e.ctrlKey && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
+    const mainClick = e.button === 0 && !(e.ctrlKey && MAC);
+    const selecting = e.target.closest('.hint') && mainClick && down?.type === 'mouse'; // (a finger's tap sends a mousedown too)
     if (!selecting) return e.preventDefault();
     const caret = caretOf(input);
     const giveBack = () => {
