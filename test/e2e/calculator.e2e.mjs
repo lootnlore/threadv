@@ -776,6 +776,8 @@ if (chromium) {
     await tapFirstRow();
     await tp.fill('#f-price', '12..');
     await tp.locator('#f-price').press('Tab');
+    await settle(tp);
+    assert.equal(await tp.getAttribute('#f-price', 'aria-invalid'), 'true', 'flagged before the hold');
     await tp.focus('#f-price');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
     await tp.keyboard.press('Control+A');
