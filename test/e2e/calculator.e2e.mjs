@@ -276,6 +276,28 @@ if (chromium) {
     await context.close();
   });
 
+  test('results are repainted only when what they show changes', async () => {
+    const { context, page } = await open('/');
+    const kept = () => page.evaluate(() => document.querySelector('.result').hasAttribute('data-kept'));
+    await page.locator('.tune > summary').click();
+    await page.uncheck('input[name="platform"][value="ebay"]');
+    await settle(page);
+    await page.evaluate(() => (document.querySelector('.result').dataset.kept = ''));
+    // A hidden marketplace's option, and a price written another way:
+    // the same output, so the list (and a selection in it) stays.
+    await page.fill('#f-ebayAdRate', '5');
+    await settle(page);
+    const hiddenOption = await kept();
+    await page.fill('#f-price', '40.00');
+    await page.locator('#f-price').press('Tab');
+    await settle(page);
+    const sameNumber = await kept();
+    await page.fill('#f-price', '41');
+    await settle(page);
+    assert.deepEqual([hiddenOption, sameNumber, await kept()], [true, true, false], 'kept through changes it does not show, repainted for one it does');
+    await context.close();
+  });
+
   test('saved settings survive reloads and are never touched by shared links', async () => {
     const { context, page } = await open('/', { permissions: ['clipboard-read', 'clipboard-write'] });
     await page.locator('.tune > summary').click();
@@ -733,6 +755,7 @@ if (chromium) {
     await settle(tp);
     const listed = await verdict(tp);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.waitForTimeout(400); // resting long enough to be a long press: focus going elsewhere still isn't its doing
     await tp.keyboard.press('Tab'); // Next
     await tick(tp); // (it's judged a task after focus leaves it: before a person's next key)
     await tp.keyboard.type('1,'); // and on into the next field, half-typed
@@ -878,6 +901,42 @@ if (chromium) {
         `a long press on ${spot}`,
       );
     }
+    // Only a press held long takes focus with no mousedown: focus lost to
+    // nothing during a tap beside the field (a keyboard's Done, here a
+    // blur) is the key's doing, judged and saved at once, and stays lost.
+    await tapFirstRow();
+    await tp.fill('#f-price', '12..');
+    const hintNow = await tp.locator('#h-price').boundingBox();
+    const onHint = { x: hintNow.x + 10, y: hintNow.y + hintNow.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onHint] });
+    await tp.evaluate(() => document.activeElement.blur());
+    await tp.waitForTimeout(400); // past the address bar's wait
+    const savedMidTap = await inAddressBar(tp, 'price');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([savedMidTap, ...(await focusAndFlag(tp, '#f-price'))], ['12..', '', 'true'], 'blurred during a tap: judged at once, focus not brought back');
+    // With two fingers held long, it's the latest's: one resting on the
+    // list, then one on the hint as focus goes (as a long press takes it:
+    // here a blur), which then lifts without selecting anything: focus
+    // comes back at once, unjudged, the first finger still down.
+    aim = await tapFirstRow();
+    await tp.fill('#f-price', '12..');
+    const onList = { ...aim.finger, id: 0 };
+    const beside = { ...onHint, id: 1 };
+    let bothDown;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onList] });
+    try {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onList, beside] });
+      await tp.waitForTimeout(400); // both held long
+      await tp.evaluate(() => document.activeElement.blur());
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [beside] }); // the second lifts (the one named)
+      await tp.waitForTimeout(400);
+      bothDown = await focusAndFlag(tp, '#f-price');
+    } finally {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    }
+    await settle(tp);
+    assert.deepEqual(bothDown, ['f-price', null], 'the second finger lifted: focus back, the field unjudged');
     // A click naming no pointer (Safari before it sent pointer events) is
     // taken as the tap of the press under way, and the click a label passes
     // on to its field (Firefox counts it as a second click) as the same tap:
@@ -961,12 +1020,16 @@ if (chromium) {
       const rest = await tapFirstRow();
       await tp.focus('#f-price');
       await tp.keyboard.press('End');
+      let resting;
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [rest.finger] });
-      await tp.keyboard.type('0');
-      await during();
-      await tp.waitForTimeout(150);
-      const resting = await firstRow();
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      try {
+        await tp.keyboard.type('0');
+        await during();
+        await tp.waitForTimeout(150);
+        resting = await firstRow();
+      } finally {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      }
       await settle(tp);
       return [resting === rest.row, (await firstRow()) !== rest.row];
     };
@@ -1791,6 +1854,17 @@ if (chromium) {
     await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await page.waitForTimeout(300); // (the tap's own press is over at its click, or 250ms on)
     assert.equal(await judged(), true, "a finger's tap: the mouse's press is over");
+    // ...or at a scroll with no button down (the menu closed). One with the
+    // button held (scrolling a selection on) doesn't end it.
+    await halfType();
+    await pressFrom('mouse');
+    await mouseAt('mouseWheel', { deltaX: 0, deltaY: 40, buttons: 1 });
+    await page.waitForTimeout(150); // (wheel events reach the page on their own schedule)
+    const scrolledHeld = await judged();
+    await liftUnheard('mouse');
+    await mouseAt('mouseWheel', { deltaX: 0, deltaY: 40 });
+    await page.waitForTimeout(150);
+    assert.deepEqual([scrolledHeld, await judged()], [false, true], 'held through a scroll with the button down; over at one with none');
     // A finger's press ends if the browser takes it (a pan), and a finger's
     // or pen's after 3s without a word from it.
     await halfType();
@@ -1803,8 +1877,10 @@ if (chromium) {
     for (const pointerType of ['touch', 'pen']) {
       await halfType();
       await pressFrom(pointerType);
+      await page.keyboard.press('KeyA'); // typed with the other hand: no end
       await tick(page);
-      assert.equal(await judged(), false, `${pointerType}: waits`);
+      await tick(page);
+      assert.equal(await judged(), false, `${pointerType}: waits, through a key`);
       await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
       await liftUnheard(pointerType);
     }

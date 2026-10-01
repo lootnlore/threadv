@@ -97,7 +97,7 @@ function setup(root) {
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load, done by the next draw)
   let drawnMode = null; // the mode the tabs and fields show
   let rendered = null; // the form as last judged: what the address bar holds
-  let painted = null; // the output on screen: { prompt } or { mode, input, ids, link } (see paint)
+  let painted = null; // the output on screen, as drawn (see paint)
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
   const canShare = typeof navigator.share === 'function';
@@ -303,13 +303,18 @@ function setup(root) {
   }
 
   /** Rows for a result that can be worked out, and the verdict over them. */
-  function showResults({ mode: m, input, ids }) {
+  /** What the output shows for `next` (see render): its prompt, or the verdict and the list, as drawn. */
+  function view(next) {
+    if (next.prompt) return { prompt: next.prompt };
+    const rows = rankedRows(next.mode, rank(next.mode, next.input, next.ids), next.input.target);
+    const verdict = renderVerdict(next.mode, rows, next.input);
+    return { tone: verdict.tone, verdict: verdict.html, list: renderResults(next.mode, rows, { focus }) };
+  }
+  function showResults({ tone, verdict, list }) {
     const open = openIds();
-    const rows = rankedRows(m, rank(m, input, ids), input.target);
-    const verdict = renderVerdict(m, rows, input);
-    verdictEl.className = `verdict verdict-${verdict.tone}`;
-    verdictEl.innerHTML = verdict.html;
-    resultsEl.innerHTML = renderResults(m, rows, { focus });
+    verdictEl.className = `verdict verdict-${tone}`;
+    verdictEl.innerHTML = verdict;
+    resultsEl.innerHTML = list;
     show(resultsEl, true);
     show(shareBtn, shareSupported);
     for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
@@ -350,15 +355,16 @@ function setup(root) {
   // page never heard of shows: its pointer moving with no button down before
   // any release (a hovering mouse) or pressing again; for a finger or pen
   // (which send a stream of moves while down), 3s without a word from it;
-  // for a mouse, a key or another pointer's press (it's rarely held down
-  // while typing or touching the screen: its release went unheard, a menu
-  // took it, and the user has moved on). A mouse held still is a slow
+  // for a mouse, a key, a scroll with no button down or another pointer's
+  // press (it's rarely held down while typing, scrolling or touching the
+  // screen: its release went unheard, a menu took it, and the user has
+  // moved on). A mouse held still is a slow
   // click, and keeps its press. A context menu changes nothing: browsers
   // send one for any long press, menu or none, and one that's open sits
   // above the page, so nothing drawn under it can be pressed by mistake.
   // Only the user's own presses and clicks count (not a script's, an
   // extension's say).
-  const presses = new Map(); // pointerId: the press under way, { id, type, target, beside, holds, released, then: what waits for its end, end(), movingFocus }
+  const presses = new Map(); // pointerId: the press under way, { id, type, since, target, beside, holds, released, then: what waits for its end, end(), movingFocus }
   let lastReleased = null; // the press under way when its pointer was last released (see clicks)
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
@@ -391,7 +397,7 @@ function setup(root) {
     for (const p of presses.values()) if (p.id === e.pointerId || p.type === 'mouse' || (p.type === e.pointerType && p.type !== 'touch')) p.end();
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     // beside: the text field it began on the label, border or hint of (see clicks).
-    const press = { id: e.pointerId, type: e.pointerType, target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, since: performance.now(), target: e.target, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
@@ -429,7 +435,9 @@ function setup(root) {
       if (c.pointerId !== press.id) return;
       press.end();
     });
-    if (!silent) on('keydown', (k) => !k.repeat && !MODIFIERS.has(k.key) && press.end());
+    if (silent) return; // a mouse's is over at a key, or a scroll with no button down (see above)
+    on('keydown', (k) => !k.repeat && !MODIFIERS.has(k.key) && press.end());
+    on('wheel', (w) => !w.buttons && press.end()); // (with a button held, it may be scrolling a selection on)
   }, true);
   // A press is over at its own click (not a keyboard's, which counts no
   // clicks). Not every browser names the pointer that clicked as it named
@@ -458,8 +466,9 @@ function setup(root) {
   // Focus moves in a press's mousedown (a finger's tap sends one at its
   // release), or, held long, a finger or pen takes it with none (to what
   // it's on, or to nothing): a focusout then is that press's doing. One to
-  // elsewhere while a finger rests is a key's (Next, typed with the other
-  // hand).
+  // elsewhere is a key's (Next, typed with the other hand), as is one during
+  // a tap; one to nothing while a finger has been held long (a keyboard's
+  // Done) is taken as the long press's, and judged once it's over.
   addEventListener('mousedown', (e) => {
     if (!e.isTrusted) return;
     const press = latest;
@@ -467,8 +476,14 @@ function setup(root) {
     press.movingFocus = true;
     setTimeout(() => (press.movingFocus = false));
   }, true);
+  const LONG_PRESS = 300; // ms: less than any browser waits before a long press
   /** The press moving focus now to `to` (null: to nothing), if any. */
-  const pressMoving = (to) => (latest?.movingFocus ? latest : [...presses.values()].find((p) => p.type !== 'mouse' && (!to || to.contains(p.target)))) ?? null;
+  function pressMoving(to) {
+    if (latest?.movingFocus) return latest;
+    const now = performance.now();
+    const longPress = (p) => now - p.since >= LONG_PRESS && (!to || to.contains(p.target)); // (a mouse moves focus only at its mousedown)
+    return [...presses.values()].reverse().find(longPress) ?? null; // the latest
+  }
   /** Runs `fn` once `press` is over, or a task from now if there's none. */
   const afterPress = (press, fn) => (press ? press.then.push(fn) : setTimeout(fn));
 
@@ -543,16 +558,16 @@ function setup(root) {
   }
 
   function paint(next) {
-    // Already on screen (the same prompt, or results from the same numbers,
-    // however they were written), a repaint would only reset a selection or
-    // a reading position.
-    const drawnFrom = (out) => out.prompt ?? JSON.stringify([out.mode, out.input, out.ids]);
-    if (!painted || drawnFrom(next) !== drawnFrom(painted)) {
-      if (next.prompt) showPending(next.prompt);
-      else showResults(next);
-      announce();
-    }
-    painted = next; // once it's on screen
+    // Already on screen, a repaint would only reset a selection or a reading
+    // position. Compared as drawn, so what the output doesn't show (a value
+    // written another way, a hidden marketplace's option) changes nothing.
+    const out = view(next);
+    const drawn = JSON.stringify(out);
+    if (drawn === painted) return;
+    if (out.prompt) showPending(out.prompt);
+    else showResults(out);
+    announce();
+    painted = drawn;
   }
   const renderSoon = debounce((key) => render({ save: true, typing: key }), 60);
   // Leaving (or hidden, where a phone may drop the page) before a keystroke
