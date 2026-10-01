@@ -2594,49 +2594,51 @@ if (chromium) {
         stacked: document.querySelector('[data-results]').classList.contains('stacked'),
         under: [...document.querySelectorAll('.result')].map((r) => r.querySelector('.figure').getBoundingClientRect().top >= r.querySelector('.pname').getBoundingClientRect().bottom - 1),
       }));
+    // Whether the list is stacked in the first frame it's shown in from now
+    // on: resolves once a change made by `act` has shown it.
+    const firstFrameShown = async (page, act) => {
+      await page.evaluate(() => {
+        window.firstFrame = undefined;
+        const list = document.querySelector('[data-results]');
+        new MutationObserver((_, watch) => {
+          if (list.hidden) return;
+          watch.disconnect();
+          requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
+        }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
+      });
+      await act();
+      await page.waitForFunction(() => window.firstFrame !== undefined);
+      return page.evaluate(() => window.firstFrame);
+    };
+    const promptThen = (page, price) => async () => {
+      for (const value of ['', price]) {
+        await page.fill('#f-price', value);
+        await page.locator('#f-price').press('Tab');
+        await settle(page);
+      }
+    };
     const { context, page, errors } = await open(null, { viewport: { width: 320, height: 800 } });
     await page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
     let r = await placement(page);
     assert.ok(r.stacked && r.under.every(Boolean), 'a $4,000 sale on a 320px phone: every figure under its name');
     // A new list that replaces a prompt is fitted once shown: stacked from
     // its first frame, not jumping to it after.
-    await page.fill('#f-price', '');
-    await page.locator('#f-price').press('Tab');
-    await settle(page);
-    await page.evaluate(() => {
-      const list = document.querySelector('[data-results]');
-      new MutationObserver((_, watch) => {
-        if (list.hidden) return;
-        watch.disconnect();
-        requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
-      }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
-    });
-    await page.fill('#f-price', '5000');
-    await page.locator('#f-price').press('Tab');
-    await settle(page);
-    assert.deepEqual([await page.evaluate(() => window.firstFrame), (await placement(page)).stacked], [true, true], 'stacked from its first frame');
+    assert.equal(await firstFrameShown(page, promptThen(page, '5000')), true, 'a new list after a prompt: stacked from its first frame');
     // So is the same list back after a prompt, shown at a new width (a
     // phone turned while the prompt was up).
     await page.setViewportSize({ width: 900, height: 800 });
     await settle(page);
     assert.equal((await placement(page)).stacked, false, 'wide: beside');
-    await page.fill('#f-price', '');
-    await page.locator('#f-price').press('Tab');
-    await settle(page);
-    await page.setViewportSize({ width: 320, height: 800 });
-    await settle(page);
-    await page.evaluate(() => {
-      const list = document.querySelector('[data-results]');
-      new MutationObserver((_, watch) => {
-        if (list.hidden) return;
-        watch.disconnect();
-        requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
-      }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
+    const turned = await firstFrameShown(page, async () => {
+      await page.fill('#f-price', '');
+      await page.locator('#f-price').press('Tab');
+      await settle(page);
+      await page.setViewportSize({ width: 320, height: 800 });
+      await settle(page);
+      await page.fill('#f-price', '5000');
+      await page.locator('#f-price').press('Tab');
     });
-    await page.fill('#f-price', '5000');
-    await page.locator('#f-price').press('Tab');
-    await settle(page);
-    assert.equal(await page.evaluate(() => window.firstFrame), true, 'the same list, narrower now: stacked from its first frame');
+    assert.equal(turned, true, 'the same list, narrower now: stacked from its first frame');
     // Resizing refits the list, without ResizeObserver loop errors.
     await page.evaluate(() => {
       window.errorsSeen = [];
@@ -2655,24 +2657,39 @@ if (chromium) {
     assert.ok(!r.stacked && r.under.every((u) => !u), 'default sale on a 390px phone: figures beside names');
     assert.deepEqual(errors, []);
     await context.close();
-    // Loaded as built (nothing of its own: no repaint) where names would be
-    // squeezed, the list is fitted as the script sets up, before any frame
-    // of it: and refitted when the text size changes at the same width.
+    // Loaded as built where names would be squeezed, the list is fitted in
+    // the page's first frame that has it: the script holds that frame.
     for (const [width, scale] of [[320, 1.25], [300, 1]]) {
       const loaded = await open(null, { viewport: { width, height: 800 } });
       await setTextSize(loaded.page, scale);
-      await loaded.page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => (window.atSetup = document.querySelector('[data-results]').classList.contains('stacked'))));
+      await loaded.page.addInitScript(() => {
+        const frame = () => {
+          const list = document.querySelector('[data-results]');
+          if (list) window.firstFrame = list.classList.contains('stacked');
+          else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      });
       await loaded.page.goto(`${base}/`, { waitUntil: 'networkidle' });
-      assert.equal(await loaded.page.evaluate(() => window.atSetup), true, `${width}px at ${scale * 100}% text: stacked as the script set up`);
+      assert.equal(await loaded.page.evaluate(() => window.firstFrame), true, `${width}px at ${scale * 100}% text: stacked in the first frame`);
+      assert.deepEqual(loaded.errors, []);
       await loaded.context.close();
     }
-    const resized = await open('/', { viewport: { width: 320, height: 800 } });
-    assert.equal((await placement(resized.page)).stacked, false, '320px, default text: beside');
-    await setTextSize(resized.page, 1.25);
-    await resized.page.waitForTimeout(300);
-    r = await placement(resized.page);
-    assert.ok(r.stacked && r.under.every(Boolean), 'larger text at the same width: refitted, every figure under its name');
-    await resized.context.close();
+    // Refitted, before the frame paints, when the text grows at the same
+    // width: a larger text size, or text spacing overrides (WCAG 1.4.12).
+    for (const how of ['text size', 'text spacing']) {
+      const resized = await open('/', { viewport: { width: how === 'text size' ? 320 : 336, height: 800 } });
+      assert.equal((await placement(resized.page)).stacked, false, `${how}: beside to begin with`);
+      if (how === 'text size') await setTextSize(resized.page, 1.25);
+      else {
+        await resized.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; line-height: 1.5 !important; }', document.styleSheets[0].cssRules.length)); // as a bookmarklet would
+      }
+      await resized.page.waitForTimeout(300);
+      r = await placement(resized.page);
+      assert.ok(r.stacked && r.under.every(Boolean), `${how} grown at the same width: refitted, every figure under its name`);
+      assert.deepEqual(resized.errors, []);
+      await resized.context.close();
+    }
   });
 
   test('fee tables show their numbers on a phone without scrolling sideways', async () => {

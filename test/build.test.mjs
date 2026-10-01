@@ -12,6 +12,7 @@ import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
 import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
 import { ogData, rowsToShow, CARD_ROWS } from '../scripts/og-data.mjs';
 import { DEFAULTS } from '../src/engine/calc.mjs';
+import { builtOutput } from '../src/engine/render.mjs';
 
 const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
 const tempDirs = [OUT];
@@ -45,6 +46,17 @@ test('builds every expected page', () => {
   assert.equal(html.length, 16);
   for (const f of ['index.html', 'fees/index.html', 'fees/ebay/index.html', 'tracker/index.html', 'privacy/index.html', 'terms/index.html', '404.html', 'offline.html']) {
     assert.ok(html.some((h) => h.file === f), f);
+  }
+});
+
+test('each calculator is built showing builtOutput(), which the app takes as already drawn', () => {
+  const calculators = html.filter((h) => h.src.includes('data-calc'));
+  assert.ok(calculators.length >= 1 + PLATFORMS.length, 'the home page and every fee page');
+  for (const { file, src } of calculators) {
+    const focus = src.match(/data-calc data-focus="([a-z]+)"/)?.[1];
+    const { tone, verdict, list } = builtOutput(focus);
+    assert.ok(src.includes(`<div class="verdict verdict-${tone}" data-verdict tabindex="-1">${verdict}</div>`), `${file}: its verdict`);
+    assert.ok(src.includes(`aria-label="Results by marketplace">${list}</ul>`), `${file}: its list`);
   }
 });
 

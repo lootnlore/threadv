@@ -581,7 +581,7 @@ function setup(root) {
       if (out.verdict !== was.verdict) showVerdict(out); // (its tone goes with its words)
       show(resultsEl, true); // before the list is fitted: hidden, it measures nothing
       if (out.list !== was.list) showList(out.list);
-      else if (fitFor() !== fittedFor) fitResults(); // the same list, shown at a width or text size not fitted yet (at load, say)
+      else fitResults(); // as it is, now shown (at load, say, or back from a prompt at a new width)
       show(shareBtn, shareSupported);
       painted = { verdict: out.verdict, list: out.list };
     }
@@ -599,28 +599,19 @@ function setup(root) {
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
-  // so the list stays even. (Without JavaScript a CSS container query does a
-  // rougher version of this.)
-  let fittedFor = ''; // the width and text size the list was last fitted at
-  const fitFor = () => `${resultsEl.clientWidth} ${getComputedStyle(resultsEl).fontSize}`;
+  // so the list stays even. (Without JavaScript, figures stay beside names,
+  // which wrap in their column; only messages move under them.)
   function fitResults() {
-    fittedFor = fitFor();
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
   }
-  // Refit when the list's width or text size changes (its height changes
-  // with the text: not when it is hidden, or shown again at what paint just
-  // fitted). Next frame, not inside the callback: toggling .stacked changes
-  // the list's height, and changing an observed element's size from its own
-  // callback raises "ResizeObserver loop" errors.
-  new ResizeObserver(() => {
-    const now = fitFor();
-    if (resultsEl.clientWidth && now !== fittedFor) {
-      fittedFor = now;
-      requestAnimationFrame(fitResults);
-    }
-  }).observe(resultsEl);
+  // Refit when the column's width or the text changes (a phone turned, a
+  // larger text size, text spacing overrides), before that frame paints.
+  // Watched on the verdict, which spans the column and reflows with its
+  // text but not with the list's fit, so fitting from here can't resize
+  // what's watched (a "ResizeObserver loop").
+  new ResizeObserver(() => resultsEl.clientWidth && fitResults()).observe(verdictEl);
 
   // Screen readers hear the verdict once the user pauses, not after every
   // keystroke, and only when it changed. Nothing is announced on page load.
