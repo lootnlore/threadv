@@ -883,6 +883,8 @@ if (chromium) {
     await tp.mouse.move(formSpot.x + 10, formSpot.y + 5);
     await tp.mouse.down();
     await tp.keyboard.press('Escape');
+    const h1Box = await tp.locator('h1').boundingBox();
+    await tp.mouse.move(h1Box.x + 10, h1Box.y + 10, { steps: 4 }); // dragged on: its click lands on what holds both
     await tp.mouse.up();
     await tp.waitForTimeout(150);
     const unnamed = await firstRow();
@@ -890,6 +892,22 @@ if (chromium) {
     await settle(tp);
     await tp.evaluate(() => window.unquirk());
     assert.deepEqual([unnamed, (await firstRow()) !== aim.row], [aim.row, true], 'held through it, no pointer named');
+    // Nor, naming no pointer, does a mouse's click on another row (inside
+    // what the finger is on): it's the mouse's.
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await noPointer();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.type('0');
+    const secondRow = await tp.locator('.result:nth-child(2) summary').boundingBox();
+    await tp.mouse.click(secondRow.x + 30, secondRow.y + secondRow.height / 2);
+    await tp.waitForTimeout(150);
+    const mouseOnRow = await firstRow();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    await tp.evaluate(() => window.unquirk());
+    assert.deepEqual([mouseOnRow, (await firstRow()) !== aim.row], [aim.row, true], "a mouse's click on another row, no pointer named: the finger's hold kept");
     // What's judged during a hold is what was last judged, not what's
     // drawn: a fixed price emptied again waits, as it would with no finger
     // (here on the field's own label, which keeps focus in it).
@@ -1695,6 +1713,34 @@ if (chromium) {
       if (!named) await page.evaluate(() => window.unquirk());
       assert.equal(await judged(), true, `${how}: over`);
     }
+    // A finger's long-press menu, as Chromium sends one (button 0, a touch
+    // pointer, the mouse's id: the Menu key's menu, a real one, dressed so
+    // by a getter): its press waits past the finger's release, which makes
+    // no click, and is over 3s after the last word from it.
+    await halfType();
+    await pressFrom('touch');
+    await page.evaluate(() => {
+      const real = ['button', 'pointerType'].map((prop) => [prop, Object.getOwnPropertyDescriptor(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop)]);
+      for (const [prop, d] of real) {
+        Object.defineProperty(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop, {
+          configurable: true,
+          get() {
+            return this.type !== 'contextmenu' ? d.get.call(this) : prop === 'button' ? 0 : 'touch';
+          },
+        });
+      }
+      window.unquirk = () => real.forEach(([prop, d]) => Object.defineProperty(prop === 'button' ? MouseEvent.prototype : PointerEvent.prototype, prop, d));
+    });
+    await page.keyboard.press('ContextMenu');
+    await page.evaluate(() => window.unheard.add('click'));
+    await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.evaluate(() => {
+      window.unheard.clear();
+      window.unquirk();
+    });
+    await page.waitForTimeout(400);
+    assert.equal(await judged(), false, "a finger's menu: waits, past its release");
+    await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
     // A finger's press ends if the browser takes it (a pan), and a finger's
     // or pen's after 3s without a word from it.
     await halfType();
@@ -1843,7 +1889,7 @@ if (chromium) {
     assert.deepEqual(
       await page.evaluate(() => {
         const r = document.activeElement.getBoundingClientRect();
-        return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight];
+        return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight + 1]; // (the least scroll can leave a fraction of a pixel)
       }),
       ['price', true],
       'End: the last tab, on screen',
@@ -1866,6 +1912,16 @@ if (chromium) {
       return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight + 1]; // (the least scroll can leave a fraction of a pixel)
     });
     await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    // The tablist keeps one tab stop, moved with the focus even during a
+    // hold: Shift+Tab leaves it rather than landing on the old tab.
+    await held.page.evaluate(() => scrollTo(0, 0));
+    await held.page.getByRole('tab', { name: 'Profit' }).click();
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 60, y: 300 }] });
+    await held.page.keyboard.press('ArrowDown');
+    await held.page.keyboard.press('Shift+Tab');
+    const leftTablist = await held.page.evaluate(() => document.activeElement.getAttribute('role') !== 'tab');
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    assert.equal(leftTablist, true, 'Shift+Tab during a hold: out of the tablist');
     await held.context.close();
     await page.bringToFront(); // (a page left behind another stops drawing)
     assert.deepEqual([heldOff, ...onScreen], [true, 'price', true], 'End during a hold: not scrolled under the finger, on screen once it was over');
@@ -1907,6 +1963,22 @@ if (chromium) {
     });
     await phone.page.keyboard.press('ArrowRight');
     assert.equal(await phone.page.evaluate(() => scrollY), still, 'a tab in view: no jump');
+    // Home on the first tab, focused already but behind the header: brought clear too.
+    await phone.page.evaluate(() => {
+      const header = document.querySelector('.site-header').getBoundingClientRect().bottom;
+      const tab = document.querySelector('#tab-profit');
+      tab.focus({ preventScroll: true });
+      scrollTo(0, tab.getBoundingClientRect().bottom + scrollY - header + 4);
+    });
+    await phone.page.keyboard.press('Home');
+    assert.equal(
+      await phone.page.evaluate(() => {
+        const r = document.activeElement.getBoundingClientRect();
+        return document.activeElement.id === 'tab-profit' && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === document.activeElement;
+      }),
+      true,
+      'Home on the focused first tab: clear of the header',
+    );
     await phone.context.close();
   });
 
