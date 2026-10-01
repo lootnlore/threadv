@@ -73,6 +73,7 @@ function setup(root) {
   const form = root.querySelector('form');
   const panel = root.querySelector('[role="tabpanel"]');
   const tabs = [...root.querySelectorAll('[role="tab"]')];
+  const tabFor = (m) => tabs.find((tab) => tab.dataset.mode === m);
   const hint = root.querySelector('[data-hint]');
   const verdictEl = root.querySelector('[data-verdict]');
   const verdictLive = root.querySelector('[data-verdict-live]');
@@ -94,7 +95,7 @@ function setup(root) {
   let sharedView = false;
   let pendingField = null; // what to fix before results can show
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load, done by the next draw)
-  let focusTab = false; // the next draw moves focus to the mode's tab (arrow keys on the tabs)
+  let drawnMode = null; // the mode the tabs and fields show
   let rendered = null; // the form as last judged: what the address bar holds
   let painted = null; // the output on screen: { prompt } or { mode, input, ids, link } (see paint)
   let shown = null; // what it shows, or will once no press holds its drawing
@@ -164,10 +165,6 @@ function setup(root) {
     }
     const m = params.get('mode');
     mode = m && has(MODES, m) ? m : 'profit';
-    sharedNote.hidden = !sharedView;
-    // Reset clears saved settings, so it is only offered on your own view;
-    // a shared result has "Use my settings" instead.
-    resetBtn.hidden = sharedView;
   }
 
   // Only what the user changed is stored, so when a default fee rate is
@@ -335,21 +332,31 @@ function setup(root) {
   const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, released, then: what waits for its end, end(), movingFocus }
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
-  let goDue = null; // Go's jump while presses held it, and where focus was: { jump, from }
+  // A focus move a press held (Go's jump, a tab taking focus), and where
+  // focus was when it was asked for: { act, from }. It goes once the press
+  // is over if focus is still there, and is dropped as soon as the user
+  // moves on: a new press, a cancelled one (the browser took the gesture,
+  // a pan or a pinch), typing on, a tap into the field it was asked from.
+  let movesDue = null;
+  /** Moves focus now, or once no press holds it (only the last asked for). */
+  function moveLater(act) {
+    if (holding()) movesDue = { act, from: document.activeElement };
+    else act();
+  }
   const holding = () => [...presses.values()].some((p) => p.holds);
   const holdsAt = (el) => !el.closest('.calc-input') || Boolean(el.closest('.hint'));
   const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta']; // held for a click
   function flush() {
     if (holding()) return;
-    const [draw, go] = [drawDue, goDue];
-    drawDue = goDue = null;
+    const [draw, move] = [drawDue, movesDue];
+    drawDue = movesDue = null;
     draw?.();
-    if (go && document.activeElement === go.from) go.jump(); // the press didn't take focus elsewhere
+    if (move && document.activeElement === move.from) move.act();
   }
   addEventListener('pointerdown', (e) => {
     // The same pointer pressing again (one mouse, one pen): its release went unheard.
     for (const p of presses.values()) if (p.id === e.pointerId || (p.type === e.pointerType && p.type !== 'touch')) p.end();
-    goDue = null; // a Go still waiting: the user has moved on
+    movesDue = null;
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     const press = { id: e.pointerId, type: e.pointerType, button: e.button, holds: silent || holdsAt(e.target), released: false, then: [] };
     presses.set(press.id, press);
@@ -386,7 +393,7 @@ function setup(root) {
     });
     on('pointercancel', (c) => {
       if (c.pointerId !== press.id) return;
-      goDue = null; // the browser took the gesture (a pan, a pinch): the user has moved on
+      movesDue = null;
       press.end();
     });
     // Its own context menu (a right click, a Ctrl-click on a Mac, a pen's
@@ -401,9 +408,15 @@ function setup(root) {
     });
     on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.includes(k.key))) && press.end());
     on('wheel', () => menu && press.end());
-    // Its own click: not a keyboard's (no clicks counted) or another pointer's
-    // (not every browser says which pointer clicked).
-    on('click', (c) => c.detail && (c.pointerId ?? press.id) === press.id && press.end());
+  }, true);
+  // A press is over at its own click (not a keyboard's, which counts no
+  // clicks). Not every browser says which pointer clicked: a click from no
+  // press known ends them all.
+  addEventListener('click', (c) => {
+    if (!c.detail) return;
+    if (c.target === movesDue?.from) movesDue = null; // a tap into the field Go was pressed in: editing on
+    const own = presses.get(c.pointerId);
+    for (const p of own ? [own] : [...presses.values()]) p.end();
   }, true);
   // Focus moves in a press's mousedown (a finger's comes at its release):
   // a focusout then is that press's doing.
@@ -455,19 +468,30 @@ function setup(root) {
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
     shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
-    const [m, next] = [mode, shown];
+    const [m, next, shared] = [mode, shown, sharedView];
     const draw = () => {
-      for (const tab of tabs) {
-        const on = tab.dataset.mode === m;
-        tab.setAttribute('aria-selected', String(on));
-        tab.tabIndex = on ? 0 : -1;
-        if (on && focusTab) tab.focus();
+      if (m !== drawnMode) {
+        for (const tab of tabs) {
+          const on = tab.dataset.mode === m;
+          tab.setAttribute('aria-selected', String(on));
+          tab.tabIndex = on ? 0 : -1;
+        }
+        panel.setAttribute('aria-labelledby', `tab-${m}`);
+        hint.textContent = MODES[m].hint;
+        hintFor('target').dataset.default = MODES[m].targetHint;
+        drawnMode = m;
       }
-      focusTab = false;
-      panel.setAttribute('aria-labelledby', `tab-${m}`);
-      if (hint.textContent !== MODES[m].hint) hint.textContent = MODES[m].hint;
-      hintFor('target').dataset.default = MODES[m].targetHint;
-      for (const name of [...MAIN_KEYS, 'ebayCustomRate']) fieldBox(name).hidden = !onShow(name, m, input);
+      for (const name of [...MAIN_KEYS, 'ebayCustomRate']) {
+        const box = fieldBox(name);
+        const hide = !onShow(name, m, input);
+        if (box.hidden !== hide) box.hidden = hide;
+      }
+      // Typed into a field the mode now hides (it was still drawn): back to the mode's tab.
+      if (document.activeElement?.closest('[hidden]')) tabFor(m).focus();
+      sharedNote.hidden = !shared;
+      // Reset clears saved settings, so it is only offered on your own view;
+      // a shared result has "Use my settings" instead.
+      resetBtn.hidden = shared;
       flag(checks);
       // Bad values a link brought in open the Fine-tune panel they're in, so
       // they're seen. After that, opening and closing it is up to the user.
@@ -549,8 +573,8 @@ function setup(root) {
 
   function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
-    focusTab ||= moveFocus;
     render({ save }); // which draws the tabs, and the mode's fields and hints
+    if (moveFocus) moveLater(() => tabFor(mode).focus());
   }
 
   // The user's own switch: it takes in (and saves) anything they left typed.
@@ -571,7 +595,7 @@ function setup(root) {
   for (const tab of tabs) {
     tab.addEventListener('click', () => selectMode(tab.dataset.mode));
     tab.addEventListener('keydown', (e) => {
-      const i = tabs.indexOf(tab);
+      const i = tabs.indexOf(tabFor(mode)); // the mode's, drawn or not yet
       const step = stacked() ? { ArrowDown: i + 1, ArrowUp: i - 1 } : { ArrowRight: i + 1, ArrowLeft: i - 1 };
       const to = { ...step, Home: 0, End: tabs.length - 1 }[e.key];
       if (to === undefined) return;
@@ -586,6 +610,7 @@ function setup(root) {
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text') return;
     dirty = e.target.name;
+    movesDue = null; // typing on: a held Go's jump would take focus mid-edit
     renderSoon(e.target.name);
   });
   form.addEventListener('change', (e) => {
@@ -657,8 +682,7 @@ function setup(root) {
       const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       focusVerdict({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
     };
-    if (holding()) goDue = { jump, from: document.activeElement };
-    else jump();
+    moveLater(jump);
   });
 
   resetBtn.addEventListener('click', () => {

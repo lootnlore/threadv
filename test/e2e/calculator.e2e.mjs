@@ -798,7 +798,11 @@ if (chromium) {
       await tp.locator(control).evaluate((el) => el.closest('details')?.setAttribute('open', '')); // where it can take focus
       aim = await tapFirstRow();
       const before = await verdict(tp);
-      await tp.focus(control);
+      await tp.focus(control); // which may scroll it into view: the row is measured after
+      await tp.locator('.result:first-child summary').scrollIntoViewIfNeeded();
+      const rowNow = await tp.locator('.result:first-child summary').boundingBox();
+      aim.finger = { x: rowNow.x + 30, y: rowNow.y + rowNow.height / 2 };
+      assert.equal(await tp.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('.result')?.dataset.id, [aim.finger.x, aim.finger.y]), aim.row, `${key}: the finger on the row`);
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
       await tp.keyboard.press(key);
       await tp.waitForTimeout(150);
@@ -809,23 +813,79 @@ if (chromium) {
       await settle(tp);
       assert.deepEqual(midPress, [aim.row, before, 'Profit', true], `${key}: nothing redrawn under the finger, the tabs and fields included`);
       assert.notEqual(await verdict(tp), before, `${key}: then it was`);
-      if (key === 'ArrowRight') assert.deepEqual([await selectedTab(), await costShown(), await tp.evaluate(() => document.activeElement.textContent)], ['Max buy', false, 'Max buy']);
+      // Its focus move to the tab waited too, and was dropped: the finger's tap chose the row.
+      if (key === 'ArrowRight') {
+        const focused = await tp.evaluate(() => document.activeElement.closest('.result')?.dataset.id ?? document.activeElement.outerHTML.slice(0, 60));
+        assert.deepEqual([await selectedTab(), await costShown(), focused], ['Max buy', false, aim.row]);
+      }
       if (key === 'Space') await tp.check(control);
       else await tp.getByRole('tab', { name: 'Profit' }).click();
     }
-    // A link brought in with a bad value opens Fine-tune to show it, even
-    // if a later keystroke is drawn first.
+    // During a hold the arrows step from the mode chosen, drawn or not:
+    // twice right is List price, as with no finger down. (A pan ends the
+    // press: no tap, so nothing else takes focus.)
+    const pan = async (from) => {
+      for (let dy = 20; dy <= 120; dy += 20) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x, y: from.y - dy }] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+    };
+    const selectedMode = () => tp.locator('[role="tab"][aria-selected="true"]').textContent();
     aim = await tapFirstRow();
-    await tp.evaluate(() => document.querySelector('.tune').removeAttribute('open'));
+    await tp.focus('[role="tab"][aria-selected="true"]');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.press('ArrowRight');
+    await tp.keyboard.press('ArrowRight');
+    await pan(aim.finger);
+    assert.equal(await selectedMode(), 'List price', 'twice right');
+    await tp.getByRole('tab', { name: 'Profit' }).click();
+    // A field the new mode hides, still drawn and typed into during the
+    // hold: once it's hidden, focus goes to the mode's tab, not the page.
+    aim = await tapFirstRow();
+    await tp.focus('[role="tab"][aria-selected="true"]');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.keyboard.press('ArrowRight'); // Max buy, which works out what you can pay
+    for (let i = 0; i < 6 && (await tp.evaluate(() => document.activeElement.id)) !== 'f-cost'; i++) await tp.keyboard.press('Tab');
+    await tp.keyboard.type('5');
+    await pan(aim.finger);
+    assert.deepEqual([await selectedMode(), await tp.evaluate(() => document.activeElement.id)], ['Max buy', 'tab-maxbuy'], 'focus kept, on the tab');
+    await tp.getByRole('tab', { name: 'Profit' }).click();
+    // Go is dropped by a tap into the field itself (placing the caret is
+    // editing on), and by typing on after it.
+    for (const after of ['a tap into the field', 'typing on']) {
+      await tapFirstRow();
+      await tp.focus('#f-price');
+      const box = await tp.locator(after === 'typing on' ? 'label[for="f-price"]' : '#f-price').boundingBox();
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 10, y: box.y + box.height / 2 }] });
+      await tp.keyboard.press('Enter');
+      if (after === 'typing on') await tp.keyboard.type('5');
+      await tp.waitForTimeout(150);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+      assert.deepEqual(await tp.evaluate(() => [document.activeElement.id, scrollY]), ['f-price', 0], `${after}: Go dropped`);
+    }
+    // A link brought in with a bad value opens Fine-tune to show it, even
+    // if a later keystroke is drawn first. Its "shared result" note waits
+    // for the finger too: it would push the rows down under it.
+    await tp.evaluate(() => {
+      for (const d of document.querySelectorAll('.calc-input details[open]')) d.open = false;
+    });
+    aim = await tapFirstRow();
+    const rowBefore = (await tp.locator('.result:first-child summary').boundingBox()).y;
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
     await tp.evaluate(() => (location.hash = 's=1&tiktokRate=abc&price=50'));
     await tp.waitForTimeout(100);
+    const rowMidPress = (await tp.locator('.result:first-child summary').boundingBox()).y;
     await tp.focus('#f-price');
     await tp.keyboard.type('5');
     await tp.waitForTimeout(150);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
-    assert.deepEqual([await tp.getAttribute('.tune', 'open'), await tp.getAttribute('#f-tiktokRate', 'aria-invalid')], ['', 'true'], 'opened, its bad value showing');
+    assert.equal(rowMidPress, rowBefore, 'the row stayed under the finger');
+    assert.deepEqual(
+      [await openRows(), await tp.isVisible('[data-shared-note]'), await tp.getAttribute('.tune', 'open'), await tp.getAttribute('#f-tiktokRate', 'aria-invalid')],
+      [[aim.row], true, '', 'true'],
+      'the tapped row opened; then the note, and Fine-tune with its bad value',
+    );
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
