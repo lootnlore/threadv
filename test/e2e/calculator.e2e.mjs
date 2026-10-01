@@ -188,6 +188,35 @@ if (chromium) {
     await locator.scrollIntoViewIfNeeded();
     await pressAt(page, await locator.boundingBox(), ms);
   };
+  // A real long press at `at`: Chromium's mouse sent as a finger, held past
+  // the long-press time, until the page hears its context menu event;
+  // `whileDown` runs then, and the finger lifts once it's done. Resolves,
+  // once the page has heard the lift, to the menu events it heard as
+  // [trusted, kind, from the finger pressing]. (Neither DevTools call
+  // answers while touch is emulated, so neither is awaited; detaching the
+  // sessions ends the emulation, whatever happens.)
+  const realLongPress = async (page, at, whileDown = async () => {}) => {
+    await page.evaluate(() => {
+      const heard = (window.longPress = { id: undefined, menus: [], lifted: false, done: new AbortController() });
+      const opts = { capture: true, signal: heard.done.signal };
+      addEventListener('pointerdown', (e) => (heard.id ??= e.pointerId), opts);
+      addEventListener('pointerup', (e) => e.pointerId === heard.id && (heard.lifted = true), opts);
+      addEventListener('contextmenu', (e) => heard.menus.push([e.isTrusted, e.pointerType, e.pointerId === heard.id]), opts);
+    });
+    const [press, lift] = await Promise.all([page.context().newCDPSession(page), page.context().newCDPSession(page)]);
+    try {
+      await press.send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
+      press.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 }).catch(() => {});
+      await page.waitForFunction(() => window.longPress.menus.length > 0, null, { timeout: 3000 });
+      await whileDown();
+      lift.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 }).catch(() => {});
+      await page.waitForFunction(() => window.longPress.lifted);
+      return await page.evaluate(() => window.longPress.menus);
+    } finally {
+      await Promise.all([press.detach(), lift.detach()]).catch(() => {});
+      await page.evaluate(() => window.longPress.done.abort()).catch(() => {});
+    }
+  };
 
   test('results are pre-rendered without JavaScript', async () => {
     const { context, page } = await open('/', { javaScriptEnabled: false });
@@ -766,6 +795,27 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock, a script: Go went');
+    // A long press holds as any finger does, its menu (sent for any long
+    // press, menu or none) changing nothing: a digit and Go typed while it
+    // rests re-rank and jump only once it lifts, and then soon (250ms on:
+    // it makes no click), not seconds later.
+    aim = await tapFirstRow();
+    let duringLong;
+    await realLongPress(tp, aim.finger, async () => {
+      await tp.focus('#f-price'); // back from the row (a long press takes focus, as a tap does at its lift)
+      await tp.keyboard.press('End');
+      await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
+      await tp.keyboard.press('Enter'); // Go
+      await tp.waitForTimeout(400);
+      duringLong = [await firstRow(), await tp.evaluate(() => scrollY)];
+    });
+    await tp.waitForFunction((row) => document.querySelector('.result:first-child').dataset.id !== row, aim.row, { timeout: 1000 });
+    await settle(tp);
+    assert.deepEqual(
+      [duringLong, await tp.evaluate(() => [scrollY > 0, document.activeElement.matches('[data-verdict]')])],
+      [[aim.row, 0], [true, true]],
+      'a long press: nothing re-ranked or scrolled while it rested; then both, Go jumping to the verdict',
+    );
     // A click naming no pointer (Safari before it sent pointer events) is
     // taken as the tap of the press under way, and the click a label passes
     // on to its field (Firefox counts it as a second click) as the same tap:
@@ -793,28 +843,33 @@ if (chromium) {
       await tp.evaluate(() => window.unquirk());
       assert.ok((await tp.evaluate(() => scrollY)) > 0, `${quirk}: Go went`);
     }
-    // Naming no pointer, a tap on a row is still a choice (Go dropped), and
-    // still over at its click: what it held is drawn at once, not 250ms on.
-    const noPointer = () =>
-      tp.evaluate(() => {
+    // Naming no pointer, or one that pressed nothing (a browser numbering
+    // its clicks its own way), a tap on a row is still a choice (Go
+    // dropped), and still over at its click: what it held is drawn at once,
+    // not 250ms on.
+    const clicksName = (id) =>
+      tp.evaluate((named) => {
         const real = Object.getOwnPropertyDescriptor(PointerEvent.prototype, 'pointerId');
-        Object.defineProperty(PointerEvent.prototype, 'pointerId', { configurable: true, get() { return this.type === 'click' ? undefined : real.get.call(this); } });
+        Object.defineProperty(PointerEvent.prototype, 'pointerId', { configurable: true, get() { return this.type === 'click' ? (named ?? undefined) : real.get.call(this); } });
         window.unquirk = () => Object.defineProperty(PointerEvent.prototype, 'pointerId', real);
-      });
-    aim = await tapFirstRow();
-    await tp.focus('#f-price');
-    await tp.keyboard.press('End');
-    await noPointer();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
-    await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
-    await tp.keyboard.press('Enter');
-    await tp.waitForTimeout(150);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await tp.waitForTimeout(100);
-    const drawnAtClick = (await firstRow()) !== aim.row;
-    await settle(tp);
-    await tp.evaluate(() => window.unquirk());
-    assert.deepEqual([drawnAtClick, await tp.evaluate(() => document.activeElement.matches('[data-verdict]'))], [true, false], 'no pointer named: over at its click, and a choice');
+      }, id ?? null);
+    const noPointer = () => clicksName(undefined);
+    for (const [how, id] of [['no pointer named', undefined], ['a pointer named that pressed nothing', 1]]) {
+      aim = await tapFirstRow();
+      await tp.focus('#f-price');
+      await tp.keyboard.press('End');
+      await clicksName(id);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+      await tp.keyboard.type('0'); // 400: the list re-ranks once drawn
+      await tp.keyboard.press('Enter');
+      await tp.waitForTimeout(150);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await tp.waitForTimeout(100);
+      const drawnAtClick = (await firstRow()) !== aim.row;
+      await settle(tp);
+      await tp.evaluate(() => window.unquirk());
+      assert.deepEqual([drawnAtClick, await tp.evaluate(() => document.activeElement.matches('[data-verdict]'))], [true, false], `${how}: over at its click, and a choice`);
+    }
     // ...unless another press begins first: the user has moved on.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -857,6 +912,25 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.deepEqual([afterMouse, (await firstRow()) !== aim.row], [aim.row, true], "held through the mouse's click, until the finger lifted");
+    // Nor does a mouse's menu sent with the main button, as the finger's
+    // press was (a Ctrl-click's on a Mac: here a right click made to look so).
+    aim = await tapFirstRow();
+    await tp.focus('#f-price');
+    await tp.keyboard.press('End');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
+    await tp.evaluate(() => {
+      const real = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'button');
+      Object.defineProperty(MouseEvent.prototype, 'button', { configurable: true, get() { return real.get.call(this) === 2 ? 0 : real.get.call(this); } });
+      window.unquirk = () => Object.defineProperty(MouseEvent.prototype, 'button', real);
+    });
+    await tp.mouse.click(onForm.x, onForm.y, { button: 'right' }); // on the field's label: focus stays in it
+    await tp.keyboard.type('0'); // the mouse's menu is gone: its press over, not the finger's
+    await tp.waitForTimeout(150);
+    const afterMenu = await firstRow();
+    await tp.evaluate(() => window.unquirk());
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle(tp);
+    assert.deepEqual([afterMenu, (await firstRow()) !== aim.row], [aim.row, true], "held through a mouse's menu, until the finger lifted");
     // Nor does the click of a mouse whose press a key already ended.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -1682,12 +1756,13 @@ if (chromium) {
     await mouseAt('mouseReleased', { button: 'right', buttons: 1 });
     await hoverOff();
     await liftUnheard('mouse');
-    // One that opens its context menu (a right click, a pen's barrel
-    // button, a Ctrl-click on a Mac) is over once the menu is: at a move
-    // with no button down, a key the page hears or a scroll, not at its
-    // release (the menu may still be open); a pen's (like a finger's) after
-    // 3s without a word. Firefox and Safari send the menu naming no pointer.
-    for (const [pointerType, end, named] of [['mouse', 'a move', true], ['mouse', 'a key', false], ['mouse', 'a scroll', true], ['pen', 'a move', true], ['pen', '3s without a word', true]]) {
+    // One whose button opens its context menu (a right click, a pen's
+    // barrel button, a Ctrl-click on a Mac) is over once the menu is: at a
+    // move with no button down, a key the page hears, a scroll or another
+    // press (a finger's, say), not at its release (the menu may still be
+    // open); a pen's after 3s without a word. Firefox and Safari send the
+    // menu naming no pointer.
+    for (const [pointerType, end, named] of [['mouse', 'a move', true], ['mouse', 'a key', false], ['mouse', 'a scroll', true], ['mouse', "a finger's tap", true], ['pen', 'a move', true], ['pen', '3s without a word', true]]) {
       const how = `${pointerType}'s menu${named ? '' : ' naming no pointer'}, then ${end}`;
       await halfType();
       if (!named) {
@@ -1706,42 +1781,58 @@ if (chromium) {
       else if (end === 'a scroll') {
         await mouseAt('mouseWheel', { deltaX: 0, deltaY: 40 });
         await page.waitForTimeout(150); // (wheel events reach the page on their own schedule)
-      }
-      else await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
+      } else if (end === "a finger's tap") {
+        await devtools.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [await h1At()] });
+        await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.waitForTimeout(300); // (its own press is over at its click, or 250ms on)
+      } else await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
       await tick(page);
       await tick(page);
       if (!named) await page.evaluate(() => window.unquirk());
       assert.equal(await judged(), true, `${how}: over`);
     }
-    // A finger's long-press menu (a real long press: Chromium's mouse sent
-    // as a finger, held past the long-press time): its press waits past
-    // the finger's release (which makes no click), and is over 3s after the
-    // last word from it. (Neither DevTools call answers while emulating
-    // touch, so neither is awaited; detaching the sessions ends the emulation.)
-    await halfType();
-    await page.evaluate(() => {
-      window.menus = [];
-      window.lifted = false;
-      window.pressedId = undefined;
-      addEventListener('pointerdown', (e) => (window.pressedId = e.pointerId), { capture: true, once: true });
-      addEventListener('pointerup', () => (window.lifted = true), { capture: true, once: true });
-      addEventListener('contextmenu', (e) => window.menus.push([e.isTrusted, e.pointerType, e.pointerId === window.pressedId]), true);
-    });
-    const longAt = await h1At();
-    const longPress = await context.newCDPSession(page);
-    const longLift = await context.newCDPSession(page);
-    await longPress.send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
-    longPress.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: longAt.x, y: longAt.y, button: 'left', clickCount: 1 }).catch(() => {});
-    await page.waitForFunction(() => window.pressedId !== undefined);
-    await page.evaluate(() => document.activeElement.blur()); // (as a press that took focus would)
-    await page.waitForFunction(() => window.menus.length > 0, null, { timeout: 3000 });
-    longLift.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: longAt.x, y: longAt.y, button: 'left', clickCount: 1 }).catch(() => {});
-    await page.waitForFunction(() => window.lifted);
-    await Promise.all([longPress.detach(), longLift.detach()]);
-    assert.deepEqual(await page.evaluate(() => window.menus[0]), [true, 'touch', true], "the long press's own menu, the user's, named by its finger");
-    await page.waitForTimeout(400);
-    assert.equal(await judged(), false, "a finger's menu: waits, past its release");
-    await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
+    // A long press's menu, which browsers send for any long press (menu or
+    // none), changes nothing: a key doesn't end the press while the finger
+    // (or pen) is down, and it's over 250ms after the lift, as any press
+    // whose release makes no click. As Chromium sends a finger's (named by
+    // it, with no button), as Firefox does (the right button, no kind), and
+    // a pen's held still (no button, or the right one as on Windows).
+    const longShapes = [
+      ['a finger, as Chromium sends it', {}],
+      ['a finger, as Firefox sends it', { menu: { button: 2, pointerType: null } }],
+      ['a pen held still', { kind: 'pen' }],
+      ['a pen held still, as Windows sends it', { kind: 'pen', menu: { button: 2 } }],
+    ];
+    for (const [how, shape] of longShapes) {
+      await halfType();
+      await page.evaluate((sh) => {
+        const real = [[PointerEvent.prototype, 'pointerType'], [MouseEvent.prototype, 'button']].map(([proto, prop]) => [proto, prop, Object.getOwnPropertyDescriptor(proto, prop)]);
+        for (const [proto, prop, d] of real) {
+          Object.defineProperty(proto, prop, {
+            configurable: true,
+            get() {
+              const v = d.get.call(this);
+              if (this.type === 'contextmenu' && sh.menu && prop in sh.menu) return sh.menu[prop] ?? undefined;
+              return prop === 'pointerType' && v === 'touch' && sh.kind ? sh.kind : v;
+            },
+          });
+        }
+        window.unquirk = () => real.forEach(([proto, prop, d]) => Object.defineProperty(proto, prop, d));
+      }, shape);
+      let whileDown;
+      // (The long press takes focus from the half-typed field, as a tap
+      // does at its lift: its flag waits for the press.)
+      const menus = await realLongPress(page, await h1At(), async () => {
+        await page.keyboard.press('KeyA');
+        await tick(page);
+        await tick(page);
+        whileDown = await judged();
+      });
+      await page.evaluate(() => window.unquirk());
+      if (!shape.menu && !shape.kind) assert.deepEqual(menus[0], [true, 'touch', true], "the long press's own menu, the user's, named by its finger");
+      assert.equal(whileDown, false, `${how}: a key while it's down doesn't end its press`);
+      await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 1000 });
+    }
     // A finger's press ends if the browser takes it (a pan), and a finger's
     // or pen's after 3s without a word from it.
     await halfType();

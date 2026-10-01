@@ -96,7 +96,6 @@ function setup(root) {
   let pendingField = null; // what to fix before results can show
   let reveal = false; // open Fine-tune for bad values a link brought in (set by load, done by the next draw)
   let drawnMode = null; // the mode the tabs and fields show
-  let tabStop = null; // the mode whose tab is the tablist's one tab stop
   let rendered = null; // the form as last judged: what the address bar holds
   let painted = null; // the output on screen: { prompt } or { mode, input, ids, link } (see paint)
   let shown = null; // what it shows, or will once no press holds its drawing
@@ -336,8 +335,8 @@ function setup(root) {
   // press that could see it is down, and so do moves of the view (Go's jump
   // to the verdict, a tab an arrow focused scrolling into view).
   // A finger's or pen's press holds them all: until it lifts, focus stays
-  // where it was, and keys typed with the other hand (a digit, Next, Go)
-  // reach the page. A mouse's holds them off the form side, on a hint, or
+  // where it was (unless it's a long press, which takes it), and keys typed
+  // with the other hand (a digit, Next, Go) reach the page. A mouse's holds them off the form side, on a hint, or
   // once a drag reaches either: a render changes nothing else on the form
   // side (a test checks), and a key ends a mouse's press (below). Renders a
   // press's own click makes (a tab, a checkbox) come once it's over, and
@@ -351,11 +350,15 @@ function setup(root) {
   // down), 3s without a word from it; for a mouse, a key (it's rarely held
   // down while typing, and a key after an unheard release means the user
   // has moved on). A mouse held still is a slow click, and keeps its press.
-  // A press that opens its context menu is over once the menu is: when the
-  // page hears from the user again (a move, a key, a scroll), or, for a
-  // finger or pen, after 3s. Only the user's own presses and clicks count
-  // (not a script's, an extension's say).
-  const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, beside, released, then: what waits for its end, end(), movingFocus }
+  // A press whose button opens a context menu (a right click, say) is over
+  // once the menu is: when the page hears from the user again (a move, a
+  // key, a scroll, a press), or, for a pen, after 3s without a word. A long
+  // press's menu changes nothing: browsers send one for any long press,
+  // menu or none, so it's over as any press whose release makes no click.
+  // Only the user's own presses and clicks count (not a script's, an
+  // extension's say).
+  const presses = new Map(); // pointerId: the press under way, { id, type, button, holds, beside, released, menu, then: what waits for its end, end(), movingFocus }
+  let lastReleased = null; // the press under way when its pointer was last released (see clicks)
   let latest = null; // the last press begun (a mousedown is its doing)
   let drawDue = null; // the last thing render drew while presses held it
   // A move of the view a press held (Go's jump to the verdict, a tab an
@@ -382,11 +385,12 @@ function setup(root) {
   }
   addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
-    // The same pointer pressing again (one mouse, one pen): its release went unheard.
-    for (const p of presses.values()) if (p.id === e.pointerId || (p.type === e.pointerType && p.type !== 'touch')) p.end();
+    // The same pointer pressing again (one mouse, one pen): its release went
+    // unheard. Any press reaching the page: no menu is open.
+    for (const p of presses.values()) if (p.id === e.pointerId || p.menu || (p.type === e.pointerType && p.type !== 'touch')) p.end();
     const silent = e.pointerType !== 'mouse'; // no hover to show a missed release
     // beside: the text field it began on the label, border or hint of (see clicks).
-    const press = { id: e.pointerId, type: e.pointerType, button: e.button, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, then: [] };
+    const press = { id: e.pointerId, type: e.pointerType, button: e.button, beside: besideField(e.target), holds: silent || holdsAt(e.target), released: false, menu: false, then: [] };
     presses.set(press.id, press);
     latest = press;
     const stop = new AbortController();
@@ -401,6 +405,7 @@ function setup(root) {
       stop.abort();
       clearTimeout(timer);
       if (presses.get(press.id) === press) presses.delete(press.id);
+      if (lastReleased === press) lastReleased = null;
       const fns = press.then.splice(0);
       setTimeout(() => {
         fns.forEach((f) => f());
@@ -408,15 +413,14 @@ function setup(root) {
       }); // after the click's own handlers
     };
     if (silent) wait(3000);
-    let menu = false;
     on('pointermove', (m) => {
-      if (m.pointerId !== press.id || (press.released && !menu)) return;
+      if (m.pointerId !== press.id || (press.released && !press.menu)) return;
       if (!m.buttons) return press.end(); // its release went unheard, or its menu is gone
       if (silent) wait(3000);
       else if (!press.holds && holdsAt(m.target)) press.holds = true; // a drag reaching what renders change
     });
     on('pointerup', (u) => {
-      if (u.pointerId !== press.id || menu) return;
+      if (u.pointerId !== press.id || press.menu) return;
       press.released = true;
       wait(250); // for its click
     });
@@ -424,37 +428,34 @@ function setup(root) {
       if (c.pointerId !== press.id) return;
       press.end();
     });
-    // Its own context menu, opened as it went down or at its release. A
-    // finger's long press: that finger's, whatever button it's sent with
-    // (Chromium's -1, Firefox's 2). A right click, a Ctrl-click on a Mac or
-    // a pen's barrel button: the same button from the same kind of pointer
-    // (Chromium names a pen's menu by the mouse's id; not every browser
-    // says which kind). Never the Menu key's (button -1, sent as a mouse's).
+    // Its button's context menu, opened as it went down or at its release
+    // (a right click, a Ctrl-click on a Mac, a pen's barrel button): the
+    // same button from the same kind of pointer (Chromium names a pen's
+    // menu by the mouse's id; not every browser says which kind). Not a
+    // long press's, sent with no button (-1) or the right one (2) for a
+    // press of the main one (0), nor the Menu key's (-1).
     on('contextmenu', (c) => {
-      const own = c.pointerType === 'touch' ? c.pointerId === press.id : c.button === press.button && (!c.pointerType || c.pointerType === press.type);
-      if (!own) return;
-      menu = true;
+      if (c.button !== press.button || (c.pointerType && c.pointerType !== press.type)) return;
+      press.menu = true;
       if (silent) wait(3000);
       else clearTimeout(timer);
     });
-    on('keydown', (k) => (menu || (!silent && !k.repeat && !MODIFIERS.has(k.key))) && press.end());
-    on('wheel', () => menu && press.end());
+    on('keydown', (k) => (press.menu || (!silent && !k.repeat && !MODIFIERS.has(k.key))) && press.end());
+    on('wheel', () => press.menu && press.end());
   }, true);
   // A press is over at its own click (not a keyboard's, which counts no
-  // clicks). Not every browser says which pointer clicked (and a label
-  // passes its click on to its field, named by none): a click naming none
-  // is that of the press last released, if that's still under way (a
-  // click comes right after its release). One naming a pointer whose press
-  // is over ends nothing (its pointerdown counted). A tap acts on
-  // something unless its press began on the label, border or hint of the
-  // field a held Go was pressed in (one into the box is editing on, one
-  // elsewhere a choice): judged by where it began.
-  let lastReleased = null; // the press under way when its pointer was last released
+  // clicks). Not every browser names the pointer that clicked as it named
+  // its press (and a label passes its click on to its field, named by
+  // none): a click whose pointer has no press under way is that of the
+  // press last released, if that's still under way (a click comes right
+  // after its release; a pointer whose press was over first has none). A
+  // tap acts on something unless its press began on the label, border or
+  // hint of the field a held Go was pressed in (one into the box is
+  // editing on, one elsewhere a choice): judged by where it began.
   addEventListener('pointerup', (e) => e.isTrusted && (lastReleased = presses.get(e.pointerId) ?? null), { capture: true, passive: true });
   addEventListener('click', (c) => {
     if (!c.isTrusted || !c.detail) return;
-    const unnamed = c.pointerId == null || c.pointerId < 0;
-    const press = presses.get(c.pointerId) ?? (unnamed && lastReleased && presses.get(lastReleased.id) === lastReleased ? lastReleased : null);
+    const press = presses.get(c.pointerId) ?? lastReleased;
     if (!press) return;
     if (!(moveDue && press.beside === moveDue.from)) acted(c);
     press.end();
@@ -517,11 +518,6 @@ function setup(root) {
     const pending = pendingFor(ids, blocking);
     pendingField = pending?.[1] ?? null;
     shown = pending ? { prompt: pending[0] } : { mode, input, ids, link: fragment(state, true) }; // the link: everything the result depends on
-    // The tablist's one tab stop is focus's, not drawing: it moves at once.
-    if (mode !== tabStop) {
-      for (const tab of tabs) tab.tabIndex = tab.dataset.mode === mode ? 0 : -1;
-      tabStop = mode;
-    }
     const [m, next, shared] = [mode, shown, sharedView];
     const draw = () => {
       const had = document.activeElement;
@@ -619,13 +615,15 @@ function setup(root) {
 
   function setMode(next, { moveFocus = false, save = false } = {}) {
     mode = next;
+    // The tablist's one tab stop is focus's, not drawing: it moves at once.
+    for (const tab of tabs) tab.tabIndex = tab.dataset.mode === mode ? 0 : -1;
     render({ save }); // which draws the tabs (when no press holds it), and the mode's fields and hints
     if (moveFocus) {
-      // Focus (and the one tab stop with it) at once: that moves nothing
-      // under a press. The scroll that brings the tab into view, the least
-      // one (clear of the sticky header, whose room the page keeps), waits
-      // for one; it's made even for a tab focused already (Home on the
-      // first), which focus() alone wouldn't scroll.
+      // Focus too moves at once: that moves nothing under a press. The
+      // scroll that brings the tab into view, the least one (clear of the
+      // sticky header, whose room the page keeps), waits for one; it's made
+      // even for a tab focused already (Home on the first), which focus()
+      // alone wouldn't scroll.
       const tab = tabFor(mode);
       tab.focus({ preventScroll: true });
       later(() => tab.scrollIntoView({ block: 'nearest' }));
