@@ -766,6 +766,33 @@ if (chromium) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle(tp);
     assert.ok((await tp.evaluate(() => scrollY)) > 0, 'CapsLock, a script: Go went');
+    // A click naming no pointer (Safari before it sent pointer events) is
+    // taken as the tap of the press under way, and the click a label passes
+    // on to its field (Firefox counts it as a second click) as the same tap:
+    // a tap on the label still keeps Go.
+    for (const quirk of ['no pointer named', 'the label\'s click passed on, counted']) {
+      await tapFirstRow();
+      await tp.focus('#f-price');
+      await tp.evaluate((q) => {
+        const [proto, prop] = q === 'no pointer named' ? [PointerEvent.prototype, 'pointerId'] : [UIEvent.prototype, 'detail'];
+        const real = Object.getOwnPropertyDescriptor(proto, prop);
+        Object.defineProperty(proto, prop, {
+          configurable: true,
+          get() {
+            const v = real.get.call(this);
+            if (this.type !== 'click') return v;
+            return q === 'no pointer named' ? undefined : v === 0 && this.target?.id === 'f-price' ? 1 : v;
+          },
+        });
+        window.unquirk = () => Object.defineProperty(proto, prop, real);
+      }, quirk);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [onForm] });
+      await tp.keyboard.press('Enter');
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await settle(tp);
+      await tp.evaluate(() => window.unquirk());
+      assert.ok((await tp.evaluate(() => scrollY)) > 0, `${quirk}: Go went`);
+    }
     // ...unless another press begins first: the user has moved on.
     aim = await tapFirstRow();
     await tp.focus('#f-price');
@@ -970,6 +997,38 @@ if (chromium) {
     await touch.context.close();
 
     const { context, page } = await open('/', { viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
+    // A release the page never hears (a menu or a popup took it): the
+    // pointerup and click named in window.unheard are dropped before the
+    // calculator sees them.
+    await page.addInitScript(() => {
+      window.unheard = new Set();
+      for (const type of ['pointerup', 'click']) addEventListener(type, (e) => window.unheard.delete(type) && e.stopImmediatePropagation(), true);
+    });
+    await page.reload({ waitUntil: 'networkidle' });
+    const devtools = await context.newCDPSession(page);
+    const h1At = async () => {
+      await page.locator('h1').scrollIntoViewIfNeeded();
+      const b = await page.locator('h1').boundingBox();
+      return { x: b.x + 20, y: b.y + b.height / 2 };
+    };
+    // A real press on the heading by a mouse, pen or finger, taking focus
+    // from the field (a finger's would at its release): its pointer's id.
+    const pressFrom = async (pointerType) => {
+      const at = await h1At();
+      await page.evaluate(() => addEventListener('pointerdown', (e) => (window.pressedId = e.pointerId), { capture: true, once: true }));
+      if (pointerType === 'touch') await devtools.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+      else await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1, pointerType });
+      await page.evaluate(() => document.activeElement.blur());
+      return page.evaluate(() => window.pressedId);
+    };
+    // Its release, which the page never hears (so the next press starts clean).
+    const liftUnheard = async (pointerType) => {
+      const at = await h1At();
+      await page.evaluate(() => ['pointerup', 'click'].forEach((type) => window.unheard.add(type)));
+      if (pointerType === 'touch') await devtools.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      else await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1, pointerType });
+      await page.evaluate(() => window.unheard.clear());
+    };
     const shown = () => verdict(page);
     // A press at a person's speed (focus leaves the field at mousedown, the
     // click comes ~90ms later).
@@ -1309,9 +1368,10 @@ if (chromium) {
     assert.deepEqual([await leaves(), ...(await focusAndFlag(mac.page, '#f-price'))], [0, 'f-price', null], 'a Ctrl-click on a Mac');
     assert.deepEqual(mac.errors, []);
     await mac.context.close();
-    // On a wide screen with Fine-tune closed, focus on the shared note's
-    // link goes to the verdict it sat over when the note goes, not into the
-    // closed panel (where focus is refused) or to the page.
+    await page.bringToFront(); // (a page left behind another stops drawing)
+    // On a wide screen with Fine-tune closed (as it starts), focus on the
+    // shared note's link goes to the verdict it sat over when the note goes,
+    // not to the page.
     await page.evaluate(() => document.querySelector('.tune').removeAttribute('open'));
     await page.evaluate(() => (location.hash = 's=1&price=50'));
     await settle(page);
@@ -1377,21 +1437,19 @@ if (chromium) {
     // which mustn't have the list re-ranked under it.
     await page.fill('#f-price', '40');
     await settle(page);
-    const row4 = page.locator('.result:nth-child(4)');
-    const id4 = await row4.getAttribute('data-id');
-    const at4 = await row4.locator('summary').boundingBox();
-    await page.fill('#f-price', '1,5'); // read (and re-ranked) only when left
-    await page.evaluate(() => {
-      // A press that takes focus from the field, whose release the page never hears.
-      const h1 = document.querySelector('h1');
-      h1.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 11, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
-      h1.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      document.activeElement.blur();
-    });
-    await pressAt(page, at4, 600);
-    assert.equal(await page.locator(`.result[data-id="${id4}"] details`).getAttribute('open'), '', 'the next press opened its row');
-    assert.equal(await page.inputValue('#f-price'), '1.5', 'and then the field was judged');
-    await page.locator(`.result[data-id="${id4}"] summary`).click();
+    // A press that took focus from the field, whose release the page never
+    // heard, is over when the same mouse presses again (here without moving
+    // in between: a move with no button down would end it too).
+    await page.fill('#f-price', '1,5'); // read only when left
+    await pressFrom('mouse');
+    await liftUnheard('mouse');
+    await settle(page);
+    const stillDown = await page.inputValue('#f-price');
+    const again = await h1At();
+    await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: again.x, y: again.y, button: 'left', clickCount: 1 });
+    await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: again.x, y: again.y, button: 'left', clickCount: 1 });
+    await settle(page);
+    assert.deepEqual([stillDown, await page.inputValue('#f-price')], ['1,5', '1.5'], 'judged once the same mouse pressed again');
     await page.fill('#f-price', '40');
     await settle(page);
     // A right press holds back a keystroke's render due when it began, like
@@ -1487,14 +1545,8 @@ if (chromium) {
     await tick(page);
     assert.equal(await page.locator(`.result[data-id="${id}"] details`).getAttribute('open'), '', 'the Shift-click opened its row');
     // Judging a field waits only for the press that took focus from it,
-    // and only while that press lasts.
-    const pressFrom = (init) =>
-      page.evaluate((i) => {
-        const h1 = document.querySelector('h1');
-        h1.dispatchEvent(new PointerEvent('pointerdown', { isPrimary: true, button: 0, bubbles: true, ...i }));
-        h1.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        document.activeElement.blur(); // its mousedown takes focus from the field
-      }, init);
+    // and only while that press lasts. (Real presses; what follows them,
+    // as browsers other than this one send it, from the page.)
     const pointer = (type, init) => page.evaluate(([t, i]) => document.querySelector('h1').dispatchEvent(new (t === 'click' ? MouseEvent : PointerEvent)(t, { bubbles: true, ...i })), [type, init]);
     const judged = () => page.locator('#f-price').getAttribute('aria-invalid').then((v) => v === 'true');
     const halfType = async () => {
@@ -1504,54 +1556,58 @@ if (chromium) {
     };
     // A mouse press whose release the page never heard (a menu took it)
     // doesn't hold a later Tab's judgement...
-    await pointer('pointerdown', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0 });
+    await pressFrom('mouse');
     await page.fill('#f-price', '12..');
     await page.locator('#f-price').press('Tab');
     await tick(page);
     assert.equal(await judged(), true, 'a later Tab is judged at once');
-    // ...and one that took focus waits for its click, not a keyboard's, or
-    // ends when the mouse is seen with no button down.
+    await liftUnheard('mouse');
+    // ...and one that took focus waits for its click, not a keyboard's (nor
+    // a script's), or ends when the mouse is seen with no button down.
     await halfType();
-    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+    let pid = await pressFrom('mouse');
     await tick(page);
     assert.equal(await judged(), false, 'waits for the press');
     await pointer('click', { detail: 0 });
+    await pointer('click', { detail: 1 });
     await tick(page);
-    assert.equal(await judged(), false, "a keyboard's click isn't the press's");
+    assert.equal(await judged(), false, "a keyboard's click, or a script's, isn't the press's");
     await page.waitForTimeout(3200);
     assert.equal(await judged(), false, 'a mouse held still keeps its press (a slow click)');
-    await pointer('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 0 });
+    await pointer('pointermove', { pointerId: pid, pointerType: 'mouse', buttons: 0 });
     await tick(page);
     assert.equal(await judged(), true, 'the mouse moving with no button down ends it');
+    await liftUnheard('mouse');
     // A press ends 250ms after a release that makes no click.
     await halfType();
-    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
-    const afterRelease = await page.evaluate(async () => {
+    pid = await pressFrom('mouse');
+    const afterRelease = await page.evaluate(async (pointerId) => {
       const at = (ms) => new Promise((r) => setTimeout(r, ms));
       const flagged = () => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true';
-      document.querySelector('h1').dispatchEvent(new PointerEvent('pointerup', { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
+      document.querySelector('h1').dispatchEvent(new PointerEvent('pointerup', { pointerId, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true }));
       await at(150);
       const early = flagged();
       await at(250);
       return [early, flagged()];
-    });
+    }, pid);
     assert.deepEqual(afterRelease, [false, true], 'waits 250ms for a click; none came: over');
+    await liftUnheard('mouse');
     // Released, a hovering pointer (a pen before its tap's click) doesn't end
     // the press: its click is still coming.
     await halfType();
-    await pressFrom({ pointerId: 9, pointerType: 'pen' });
-    const hovering = await page.evaluate(async () => {
+    pid = await pressFrom('pen');
+    const hoverEarly = await page.evaluate(async (pointerId) => {
       const h1 = document.querySelector('h1');
-      const init = { pointerId: 9, pointerType: 'pen', isPrimary: true, bubbles: true };
+      const init = { pointerId, pointerType: 'pen', isPrimary: true, bubbles: true };
       h1.dispatchEvent(new PointerEvent('pointerup', { ...init, button: 0 }));
       h1.dispatchEvent(new PointerEvent('pointermove', { ...init, buttons: 0 }));
       await new Promise((r) => setTimeout(r, 50));
-      const early = document.querySelector('#f-price').getAttribute('aria-invalid');
-      h1.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true }));
-      await new Promise((r) => setTimeout(r, 50));
-      return [early, document.querySelector('#f-price').getAttribute('aria-invalid')];
-    });
-    assert.deepEqual(hovering, [null, 'true'], 'judged after the click, not at the hover');
+      return document.querySelector('#f-price').getAttribute('aria-invalid');
+    }, pid);
+    const at = await h1At();
+    await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1, pointerType: 'pen' }); // its click
+    await page.waitForTimeout(50);
+    assert.deepEqual([hoverEarly, await page.getAttribute('#f-price', 'aria-invalid')], [null, 'true'], 'judged after the click, not at the hover');
     // One that opens its context menu (a Ctrl-click on a Mac, a right
     // click) is over once the menu is: at a move with no button down, or a
     // key the page hears, not at its release (the menu may still be open).
@@ -1559,43 +1615,46 @@ if (chromium) {
     for (const [pointerType, end, menuSent] of [['mouse', 'a move', 'a pointer event'], ['mouse', 'a key', 'a mouse event'], ['mouse', 'a scroll', 'a pointer event'], ['pen', 'a move', 'a mouse event'], ['touch', '3s without a word', 'a pointer event']]) {
       const how = `${pointerType}, its menu sent as ${menuSent}, then ${end}`;
       await halfType();
-      await pressFrom({ pointerId: 9, pointerType });
-      await pointer('contextmenu', { pointerId: 9, button: 2 });
+      pid = await pressFrom(pointerType);
+      await pointer('contextmenu', { pointerId: pid, button: 2 });
       await tick(page);
       await tick(page);
       assert.equal(await judged(), false, `${how}: another button's menu isn't this press's`);
-      if (menuSent === 'a pointer event') await pointer('contextmenu', { pointerId: 9, button: 0 });
+      if (menuSent === 'a pointer event') await pointer('contextmenu', { pointerId: pid, button: 0 });
       else await page.evaluate(() => document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', { button: 0, bubbles: true })));
-      await pointer('pointerup', { pointerId: 9, pointerType, button: 0 });
+      await pointer('pointerup', { pointerId: pid, pointerType, button: 0 });
       await page.waitForTimeout(400);
       assert.equal(await judged(), false, `${how}: waits, past its release`);
-      if (end === 'a move') await pointer('pointermove', { pointerId: 9, pointerType, buttons: 0 });
+      if (end === 'a move') await pointer('pointermove', { pointerId: pid, pointerType, buttons: 0 });
       else if (end === 'a key') await page.keyboard.press('Shift');
       else if (end === 'a scroll') await page.evaluate(() => document.querySelector('h1').dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true })));
       else await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
       await tick(page);
       await tick(page);
       assert.equal(await judged(), true, `${how}: over`);
+      await liftUnheard(pointerType);
     }
     // A finger's press ends if cancelled (a scroll), and a finger's or pen's
     // after 3s without a word from it.
     await halfType();
-    await pressFrom({ pointerId: 12, pointerType: 'touch' });
-    await pointer('pointercancel', { pointerId: 12, pointerType: 'touch' });
+    pid = await pressFrom('touch');
+    await pointer('pointercancel', { pointerId: pid, pointerType: 'touch' });
     await tick(page);
     assert.equal(await judged(), true, 'a cancelled press is over');
-    for (const [pointerId, pointerType] of [[13, 'touch'], [14, 'pen']]) {
+    await liftUnheard('touch');
+    for (const pointerType of ['touch', 'pen']) {
       await halfType();
-      await pressFrom({ pointerId, pointerType });
+      await pressFrom(pointerType);
       await tick(page);
       assert.equal(await judged(), false, `${pointerType}: waits`);
       await page.waitForFunction(() => document.querySelector('#f-price').getAttribute('aria-invalid') === 'true', null, { timeout: 3500 });
+      await liftUnheard(pointerType);
     }
     // A key ends a mouse's press (it's rarely held down while typing, and a
     // key after a release the page never heard means the user moved on),
     // but not a modifier held for a click.
     await halfType();
-    await pressFrom({ pointerId: 9, pointerType: 'mouse' });
+    await pressFrom('mouse');
     await page.keyboard.press('Shift');
     await tick(page);
     await tick(page);
@@ -1604,6 +1663,17 @@ if (chromium) {
     await tick(page);
     await tick(page);
     assert.equal(await judged(), true, 'a key: over');
+    await liftUnheard('mouse');
+    // A script's pointerdown (an extension's, say) starts no press: nothing
+    // is held for it.
+    await halfType();
+    await page.evaluate(() => {
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      document.activeElement.blur();
+    });
+    await tick(page);
+    await tick(page);
+    assert.equal(await judged(), true, "a script's pointerdown: no press");
     // A refused address-bar write (Safari limits them) is made again soon after.
     await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('price') === document.querySelector('#f-price').value); // earlier writes done
     await page.evaluate(() => {
@@ -1687,7 +1757,7 @@ if (chromium) {
 
   test('stacked tabs (large text) are a vertical tablist moved with Up/Down; side by side they are not', async () => {
     // One session crossing the switch both ways: text size up, then a wider window.
-    const { context, page } = await open('/', { viewport: { width: 320, height: 800 }, hasTouch: true });
+    const { context, page } = await open('/', { viewport: { width: 320, height: 800 } });
     const tablist = '[role=tablist]';
     const orientation = (value) => page.waitForFunction(([sel, v]) => document.querySelector(sel).getAttribute('aria-orientation') === v, [tablist, value]);
     const press = async (from, key) => {
@@ -1719,19 +1789,23 @@ if (chromium) {
     // Likewise when a finger held it, once that's over: here a finger
     // resting still, its press over after 3s without a word from it. (One
     // that pans is the user scrolling: then the page isn't pulled back.)
-    await page.getByRole('tab', { name: 'Profit' }).click();
-    await page.evaluate(() => scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().bottom + scrollY - innerHeight + 4));
-    const touch = await context.newCDPSession(page);
+    const held = await open('/', { viewport: { width: 320, height: 800 }, hasTouch: true });
+    await setTextSize(held.page, 2);
+    await held.page.waitForFunction(() => document.querySelector('[role=tablist]').getAttribute('aria-orientation') === 'vertical');
+    await held.page.getByRole('tab', { name: 'Profit' }).click();
+    await held.page.evaluate(() => scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().bottom + scrollY - innerHeight + 4));
+    const touch = await held.context.newCDPSession(held.page);
     await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 60, y: 300 }] });
-    await page.keyboard.press('End');
-    const heldOff = await page.evaluate(() => document.activeElement.getBoundingClientRect().top > innerHeight);
-    await page.waitForTimeout(3400);
-    const onScreen = await page.evaluate(() => {
+    await held.page.keyboard.press('End');
+    const heldOff = await held.page.evaluate(() => document.activeElement.getBoundingClientRect().top > innerHeight);
+    await held.page.waitForTimeout(3400);
+    const onScreen = await held.page.evaluate(() => {
       const r = document.activeElement.getBoundingClientRect();
       return [document.activeElement.dataset.mode, r.top >= 0 && r.bottom <= innerHeight];
     });
     await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await touch.detach();
+    await held.context.close();
+    await page.bringToFront(); // (a page left behind another stops drawing)
     assert.deepEqual([heldOff, ...onScreen], [true, 'price', true], 'End during a hold: not scrolled under the finger, on screen once it was over');
     // With a modifier the keys are the browser's (Alt+arrows go Back and Forward).
     assert.equal(await press('Profit', 'Shift+ArrowDown'), 'profit', 'Shift+Down: not a tab move');
@@ -1741,6 +1815,23 @@ if (chromium) {
     assert.equal(await press('Profit', 'ArrowDown'), 'profit');
     assert.equal(await press('Profit', 'ArrowRight'), 'maxbuy');
     await context.close();
+    // A tab focused under the sticky header is brought clear of it.
+    const phone = await open('/', { viewport: { width: 390, height: 844 } });
+    await phone.page.evaluate(() => {
+      const header = document.querySelector('.site-header').getBoundingClientRect().bottom;
+      scrollTo(0, document.querySelector('#tab-profit').getBoundingClientRect().top + scrollY - header + 20);
+      document.querySelector('#tab-profit').focus({ preventScroll: true });
+    });
+    await phone.page.keyboard.press('ArrowRight');
+    assert.equal(
+      await phone.page.evaluate(() => {
+        const r = document.activeElement.getBoundingClientRect();
+        return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === document.activeElement;
+      }),
+      true,
+      'clear of the header',
+    );
+    await phone.context.close();
   });
 
   test('keyboard: tabs use arrow keys, the skip link keeps the mode, Enter jumps to results on phones', async () => {
