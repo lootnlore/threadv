@@ -150,16 +150,22 @@ function setup(root) {
 
   const linkParams = () => new URLSearchParams(location.hash.slice(1));
 
-  function load() {
+  /**
+   * Fills the form from the link, else saved settings, else the defaults.
+   * `typed`: text fields typed into before the script ran (a browser that
+   * paints first lets the visitor start), which keep what was typed.
+   */
+  function load(typed = []) {
     reveal = true;
     dirty = ''; // whatever was being typed is replaced
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
     const tune = sharedView ? Object.fromEntries(params) : (saved.values ?? {});
-    for (const key of MAIN_KEYS) setValue(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
-    for (const key of TUNE_KEYS) setValue(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
-    for (const key of NUMERIC) if (field(key)) showPoint(field(key));
+    const fill = (key, value) => typed.includes(key) || setValue(key, value);
+    for (const key of MAIN_KEYS) fill(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
+    for (const key of TUNE_KEYS) fill(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
+    for (const key of NUMERIC) if (field(key) && !typed.includes(key)) showPoint(field(key));
     if (sharedView) {
       setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS);
     } else {
@@ -598,9 +604,10 @@ function setup(root) {
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
-  // so the list stays even. (A list narrow enough is stacked by its width
-  // alone, before this runs and without it: see styles.css.)
+  // so the list stays even. (Until this runs, and without it, a list narrow
+  // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
+    resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
@@ -612,16 +619,16 @@ function setup(root) {
   // resize what's watched (a "ResizeObserver loop"); the verdict's height
   // (its own words rewrapping) changes nothing.
   const probe = document.createElement('span');
-  probe.className = 'pname fit-probe';
+  probe.className = 'fit-probe';
   probe.setAttribute('aria-hidden', 'true');
   probe.textContent = 'Marketplace';
   resultsEl.after(probe);
-  let columnWidth = 0;
+  const widths = new Map(); // each watched one's, as last seen (the first look sets it: paint fits the list itself)
   const refit = new ResizeObserver((entries) => {
     let changed = false;
     for (const { target, contentRect } of entries) {
-      if (target === probe) changed = true;
-      else if (contentRect.width !== columnWidth) [changed, columnWidth] = [true, contentRect.width];
+      if (widths.has(target) && widths.get(target) !== contentRect.width) changed = true;
+      widths.set(target, contentRect.width);
     }
     if (changed && resultsEl.clientWidth) fitResults();
   });
@@ -757,7 +764,6 @@ function setup(root) {
   // On narrow screens the results sit below the form: "See results" (and
   // Enter / Go on a phone keyboard) jumps to the verdict. On wide screens the
   // results are already beside the form, so Enter just refreshes them.
-  seeResults.hidden = false;
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     if (document.activeElement?.type === 'text' && form.contains(document.activeElement)) showPoint(document.activeElement);
@@ -822,8 +828,15 @@ function setup(root) {
     });
   }
 
-  load();
+  // Typed before the script ran: taken in as the visitor's own edits (the
+  // one still being typed in waiting as any keystroke does).
+  const typedEarly = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => field(key)?.type === 'text' && field(key).value !== field(key).defaultValue);
+  load(typedEarly);
   setMode(mode);
+  if (typedEarly.length) {
+    dirty = typedEarly.find((key) => field(key) === document.activeElement) ?? '';
+    render({ save: true, typing: dirty });
+  }
   spoken = verdictText(); // the starting verdict is already on screen: not news
   // A pasted link, or Back/Forward between results, only changes the
   // fragment (no reload), so load that state. Plain anchors like the skip

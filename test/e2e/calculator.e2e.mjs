@@ -17,9 +17,10 @@ import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStaticHandler } from '../../scripts/serve.mjs';
-import { FEES_VERIFIED } from '../../src/engine/fees.mjs';
+import { FEES_VERIFIED, PLATFORMS } from '../../src/engine/fees.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const FEE_PAGES = PLATFORMS.map((p) => `/fees/${p.id}/`);
 let DIST;
 const build = (env = {}) =>
   execFileSync(process.execPath, ['scripts/build.mjs', '--out', DIST, '--quiet'], { cwd: ROOT, env: { ...process.env, ...env } });
@@ -336,6 +337,74 @@ if (chromium) {
     );
     assert.equal(await verdict(page), verdictAt41, 'the verdict back after the prompt');
     assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the first frame is the visitor's own result, and what's typed before the script runs is kept", async () => {
+    // Layout shifts while it loads (none the visitor caused), summed: a
+    // link's own result, settings and fields are there from the first frame.
+    const shiftsLoading = async (path, viewport, { paintsFirst = false } = {}) => {
+      const { context, page, errors } = await open(null, { viewport });
+      // A browser that paints before the script runs (one without blocking="render").
+      if (paintsFirst) {
+        await page.route(`${base}${path.split('#')[0]}`, async (route) => {
+          const response = await route.fetch();
+          await route.fulfill({ response, body: (await response.text()).replace(' blocking="render"', '') });
+        });
+      }
+      await page.addInitScript(() => {
+        window.shifted = 0;
+        new PerformanceObserver((list) => {
+          for (const shift of list.getEntries()) if (!shift.hadRecentInput) window.shifted += shift.value;
+        }).observe({ type: 'layout-shift', buffered: true });
+      });
+      await page.goto(`${base}${path}`, { waitUntil: 'networkidle' });
+      await settle(page);
+      const shifted = await page.evaluate(() => window.shifted);
+      assert.deepEqual(errors, []);
+      await context.close();
+      return shifted;
+    };
+    for (const [path, width, height] of [
+      ['/#s=1&mode=profit&price=4000&cost=100&platforms=ebay,depop', 1280, 800],
+      ['/#mode=maxbuy&price=60&target=10', 390, 844],
+      ['/', 768, 1024],
+      ['/fees/facebook/', 820, 1180],
+    ]) {
+      assert.equal(await shiftsLoading(path, { width, height }), 0, `${path} at ${width}x${height}: nothing shifts as it loads`);
+    }
+    // Where a browser paints first, the built page still moves nothing in
+    // as the script runs (See results is there from the start).
+    for (const [path, width, height] of [['/', 768, 1024], ['/fees/facebook/', 820, 1180]]) {
+      assert.equal(await shiftsLoading(path, { width, height }, { paintsFirst: true }), 0, `${path} at ${width}x${height}, painted before the script: nothing shifts`);
+    }
+    // Typed before the script runs (where a browser paints first): kept,
+    // and taken in as the visitor's own. Here the app is held back while
+    // the price and then the cost are typed.
+    const { context, page, errors } = await open(null);
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.goto(`${base}/`, { waitUntil: 'commit' });
+    await page.waitForSelector('#f-cost', { state: 'attached' });
+    for (const [key, value] of [['price', '125'], ['cost', '30']]) {
+      await page.focus(`#f-${key}`);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(value);
+    }
+    release();
+    await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('cost') === '30', null, { timeout: 5000 });
+    const linked = await open('/#price=125&cost=30');
+    assert.deepEqual(
+      [await page.inputValue('#f-price'), await page.inputValue('#f-cost'), await inAddressBar(page, 'price'), await verdict(page)],
+      ['125', '30', '125', await verdict(linked.page)],
+      'both kept, saved and worked out',
+    );
+    assert.deepEqual(errors, []);
+    await linked.context.close();
     await context.close();
   });
 
@@ -2661,21 +2730,64 @@ if (chromium) {
     // from the list's width stacks the built results where names would be
     // squeezed: no name runs into its figure, and the first frame already
     // has every figure under its name where the script then stacks them.
-    const noOverlap = (page) =>
-      page.evaluate(() =>
-        [...document.querySelectorAll('.result')].every((row) => {
+    // Names that run into their figures, and names broken mid-word.
+    const nameTrouble = (page) =>
+      page.evaluate(() => {
+        const trouble = { into: 0, broken: 0 };
+        for (const row of document.querySelectorAll('.result')) {
           const name = row.querySelector('.pname');
           const under = row.querySelector('.figure').getBoundingClientRect().top >= name.getBoundingClientRect().bottom - 1;
-          return under || name.scrollWidth <= name.clientWidth + 1;
-        }),
-      );
-    for (const [width, scale] of [[280, 1], [300, 1], [320, 1.25], [336, 1], [360, 1.5], [390, 1]]) {
-      const plain = await open(null, { viewport: { width, height: 800 }, javaScriptEnabled: false });
-      await setTextSize(plain.page, scale);
-      await plain.page.goto(`${base}/`, { waitUntil: 'networkidle' });
-      assert.ok(await noOverlap(plain.page), `no JavaScript, ${width}px at ${scale * 100}% text: no name runs into its figure`);
-      await plain.context.close();
+          if (!under && name.scrollWidth > name.clientWidth + 1) trouble.into++;
+          const text = name.firstChild; // the name, before its tags
+          const range = document.createRange();
+          let at = 0;
+          for (const word of text.textContent.split(' ')) {
+            range.setStart(text, at);
+            range.setEnd(text, at + word.length);
+            if (word && range.getClientRects().length > 1) trouble.broken++;
+            at += word.length + 1;
+          }
+        }
+        return trouble;
+      });
+    // Swept over every built page (each fee page pins its own marketplace),
+    // across the band's edge, at three text sizes: resized, not reloaded
+    // (without JavaScript the CSS alone answers).
+    for (const path of ['/', ...FEE_PAGES]) {
+      for (const scale of [1, 1.25, 1.5]) {
+        const plain = await open(null, { viewport: { width: 240, height: 800 }, javaScriptEnabled: false });
+        await setTextSize(plain.page, scale);
+        await plain.page.goto(`${base}${path}`, { waitUntil: 'networkidle' });
+        const bad = [];
+        for (let width = 240; width <= 480; width += 4) {
+          await plain.page.setViewportSize({ width, height: 800 });
+          const { into, broken } = await nameTrouble(plain.page);
+          if (into || broken) bad.push(width);
+        }
+        assert.deepEqual(bad, [], `no JavaScript, ${path} at ${scale * 100}% text: no name runs into its figure or breaks, at any width`);
+        await plain.context.close();
+      }
     }
+    // With text spacing overrides wider than the CSS allows for, a name
+    // without JavaScript breaks rather than runs into its figure.
+    const spaced = await open(null, { viewport: { width: 240, height: 800 }, javaScriptEnabled: false });
+    await spaced.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await spaced.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; line-height: 1.5 !important; }', document.styleSheets[0].cssRules.length));
+    const runInto = [];
+    for (let width = 240; width <= 480; width += 4) {
+      await spaced.page.setViewportSize({ width, height: 800 });
+      if ((await nameTrouble(spaced.page)).into) runInto.push(width);
+    }
+    assert.deepEqual(runInto, [], 'no JavaScript, text spacing overrides: no name runs into its figure');
+    await spaced.context.close();
+    // Once the script has fitted the list, it decides, not the CSS: a $12
+    // sale's short figures fit beside their names at a width the CSS alone
+    // would stack.
+    const shortFigures = await open(null, { viewport: { width: 300, height: 800 } });
+    await shortFigures.page.goto(`${base}/#price=12&cost=2`, { waitUntil: 'networkidle' });
+    assert.ok((await placement(shortFigures.page)).under.every((u) => !u), 'fitted: figures beside names where they fit');
+    assert.deepEqual(shortFigures.errors, []);
+    await shortFigures.context.close();
     for (const [width, scale] of [[320, 1.25], [300, 1]]) {
       const loaded = await open(null, { viewport: { width, height: 800 } });
       await setTextSize(loaded.page, scale);
@@ -2711,14 +2823,16 @@ if (chromium) {
         const sample = () => {
           const text = getComputedStyle(name);
           window.samples.push([`${text.fontSize} ${text.letterSpacing}`, under()]);
-          if (window.samples.length < 40) requestAnimationFrame(sample);
+          const changedAt = window.samples.findIndex(([seen]) => seen !== window.samples[0][0]);
+          if (changedAt < 0 || window.samples.length < changedAt + 3) requestAnimationFrame(sample); // until a couple of frames after the change
+          else window.sampled = true;
         };
         requestAnimationFrame(sample);
       });
       await resized.page.waitForTimeout(100);
       if (how === 'text size') await setTextSize(resized.page, 1.25);
       else await resized.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; }', document.styleSheets[0].cssRules.length)); // as a bookmarklet would
-      await resized.page.waitForFunction(() => window.samples.length >= 40);
+      await resized.page.waitForFunction(() => window.sampled, null, { timeout: 5000 });
       const samples = await resized.page.evaluate(() => window.samples);
       const changedAt = samples.findIndex(([text]) => text !== samples[0][0]);
       assert.ok(changedAt > 0 && changedAt < samples.length - 1, `${how}: the change seen mid-sampling`);

@@ -114,7 +114,7 @@ ${pctField('tiktokRate', 'TikTok Shop fee', `${pctText(RATES.tiktok.referral)} r
 <fieldset class="platforms"><legend>Marketplaces to compare</legend><div class="check-grid">${platformBoxes}</div></fieldset>
 <button type="button" class="btn btn-ghost btn-small" data-reset>Reset to defaults</button>
 </details>
-<button type="submit" class="btn btn-primary see-results" hidden>See results</button>
+<button type="submit" class="btn btn-primary see-results">See results</button>
 </form>
 </div>
 </div>

@@ -883,6 +883,14 @@ select:focus-visible {
   margin-top: 16px;
 }
 
+/* It jumps to the verdict, which needs the script. Shown by default, so a
+   script that runs after the first paint moves nothing in. */
+@media (scripting: none) {
+  .see-results {
+    display: none;
+  }
+}
+
 @media (min-width: 56.25em) {
   .see-results {
     display: none;
@@ -1151,26 +1159,32 @@ select:focus-visible {
   grid-column: 2 / -1;
 }
 
-/* A list too narrow for the built results' names beside their figures
-   stacks them by its width alone, so before app.js has run, and without
-   it, no name runs into its figure: where app.js stacks that list (12em
-   and the fixed gaps, measured), and a little wider for system fonts'
-   differences. (At 12em and under, the rule below puts every figure on its
-   own line anyway.) */
+/* Until app.js has fitted the list (in a browser that paints before it
+   runs), and without JavaScript, a list too narrow for the built results'
+   names beside their figures stacks them by its width alone, so no name
+   runs into its figure: where app.js stacks that list (12em and the fixed
+   gaps, measured), and a little wider for system fonts' differences. (At
+   12em and under, the rule below puts every figure on its own line.) */
 @container (12em < width <= calc(12em + 54px)) {
-  .results .figure {
+  .results:not(.fitted) .figure {
     grid-column: 2 / -1;
   }
 }
 
-/* What app.js measures to see the text change size or spacing: a name's
-   text alone, never shown, its width the text's whatever the list's fit. */
-.pname.fit-probe {
-  display: block;
+/* Without JavaScript, text spacing overrides can widen a name past what
+   the width above allows for: it breaks rather than runs into its figure. */
+@media (scripting: none) {
+  .pname {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* What app.js watches to see the text change size or spacing: a word on
+   its own, never shown, its width the text's whatever the list's fit. */
+.fit-probe {
   position: absolute;
   visibility: hidden;
   white-space: nowrap;
-  pointer-events: none;
 }
 
 .figure.zero {

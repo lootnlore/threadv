@@ -87,8 +87,12 @@ export function layout(page, config, assets) {
   const analytics = config.analytics.plausibleDomain
     ? `<script defer src="${assets.analytics}"></script>\n<script defer data-domain="${esc(config.analytics.plausibleDomain)}" src="${esc(config.analytics.plausibleSrc)}"></script>`
     : '';
+  // The app holds the first frame (where browsers support that), so it's
+  // the visitor's own result: a shared link, saved settings or a link to a
+  // mode drawn before anything paints, not the built example swapped out
+  // under them, with the list fitted to the screen.
   const app = page.app
-    ? `${assets.modules.map((m) => `<link rel="modulepreload" href="${m}">`).join('\n')}\n<script type="module" src="${assets.app}"></script>`
+    ? `${assets.modules.map((m) => `<link rel="modulepreload" href="${m}">`).join('\n')}\n<script type="module" blocking="render" src="${assets.app}"></script>`
     : '';
   return `<!DOCTYPE html>
 <html lang="en">
