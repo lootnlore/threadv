@@ -3202,7 +3202,7 @@ if (chromium) {
                 beside: nav.left >= brand.right - 1 && nav.top < brand.bottom,
                 shown,
                 cut: shown && name.right > brand.right + 1,
-                sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                sideways: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth), // (less: the room kept for a scrollbar)
               };
             });
             assert.ok(r.beside, `${where}: nav wrapped under the logo`);
