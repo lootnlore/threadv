@@ -340,41 +340,50 @@ if (chromium) {
     await context.close();
   });
 
-  test("the first frame is the visitor's own result, and what's typed before the script runs is kept", async () => {
+  test("the first frame is the visitor's own result, and what's changed before the script runs is kept", async () => {
+    // Opens `path` as a browser that paints before the script runs would
+    // (one without blocking="render"), the app held back until release()
+    // is called: resolves once the page has painted.
+    const openPaintingFirst = async (path, { init, ...options } = {}) => {
+      const opened = await open(null, options);
+      await opened.page.route(`${base}${path.split('#')[0]}`, async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({ response, body: (await response.text()).replace(' blocking="render"', '') });
+      });
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      await opened.page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
+        await held;
+        await route.continue();
+      });
+      if (init) await opened.page.addInitScript(init);
+      await opened.page.goto(`${base}${path}`, { waitUntil: 'commit' });
+      await opened.page.waitForFunction(() => performance.getEntriesByName('first-contentful-paint').length > 0);
+      return { ...opened, release };
+    };
     // Layout shifts while it loads (none the visitor caused), summed: a
     // link's own result, settings and fields are there from the first frame.
+    const countShifts = () => {
+      window.shifted = 0;
+      new PerformanceObserver((list) => {
+        for (const shift of list.getEntries()) if (!shift.hadRecentInput) window.shifted += shift.value;
+      }).observe({ type: 'layout-shift', buffered: true });
+    };
     const shiftsLoading = async (path, viewport, { paintsFirst = false } = {}) => {
-      const { context, page, errors } = await open(null, { viewport });
-      // A browser that paints before the script runs (one without
-      // blocking="render"): the app held back until the page has painted.
-      let painted = () => {};
+      let opened;
       if (paintsFirst) {
-        await page.route(`${base}${path.split('#')[0]}`, async (route) => {
-          const response = await route.fetch();
-          await route.fulfill({ response, body: (await response.text()).replace(' blocking="render"', '') });
-        });
-        const firstPaint = new Promise((resolve) => (painted = resolve));
-        await page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
-          await firstPaint;
-          await route.continue();
-        });
+        opened = await openPaintingFirst(path, { viewport, init: countShifts });
+        opened.release();
+      } else {
+        opened = await open(null, { viewport });
+        await opened.page.addInitScript(countShifts);
+        await opened.page.goto(`${base}${path}`, { waitUntil: 'commit' });
       }
-      await page.addInitScript(() => {
-        window.shifted = 0;
-        new PerformanceObserver((list) => {
-          for (const shift of list.getEntries()) if (!shift.hadRecentInput) window.shifted += shift.value;
-        }).observe({ type: 'layout-shift', buffered: true });
-      });
-      await page.goto(`${base}${path}`, { waitUntil: 'commit' });
-      if (paintsFirst) {
-        await page.waitForFunction(() => performance.getEntriesByName('first-contentful-paint').length > 0);
-        painted();
-      }
-      await page.waitForLoadState('networkidle');
-      await settle(page);
-      const shifted = await page.evaluate(() => window.shifted);
-      assert.deepEqual(errors, []);
-      await context.close();
+      await opened.page.waitForLoadState('networkidle');
+      await settle(opened.page);
+      const shifted = await opened.page.evaluate(() => window.shifted);
+      assert.deepEqual(opened.errors, []);
+      await opened.context.close();
       return shifted;
     };
     for (const [path, width, height] of [
@@ -386,63 +395,48 @@ if (chromium) {
       assert.equal(await shiftsLoading(path, { width, height }), 0, `${path} at ${width}x${height}: nothing shifts as it loads`);
     }
     // Where a browser paints first, the built page still moves nothing in
-    // as the script runs (See results is there from the start).
+    // as the script runs (its buttons' room is kept until they work).
     for (const [path, width, height] of [['/', 768, 1024], ['/', 1024, 1366], ['/fees/facebook/', 820, 1180]]) {
       assert.equal(await shiftsLoading(path, { width, height }, { paintsFirst: true }), 0, `${path} at ${width}x${height}, painted before the script: nothing shifts`);
     }
-    // Typed before the script runs (where a browser paints first): kept,
-    // and taken in as the visitor's own. Here the app is held back while
-    // the price and then the cost are typed.
-    const { context, page, errors } = await open(null);
-    let release;
-    const held = new Promise((resolve) => (release = resolve));
-    await page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
-      await held;
-      await route.continue();
-    });
-    await page.goto(`${base}/`, { waitUntil: 'commit' });
-    await page.waitForSelector('#f-cost', { state: 'attached' });
+    const buttonsSeen = (page) => page.evaluate(() => ['.see-results', '[data-share]'].map((sel) => getComputedStyle(document.querySelector(sel)).visibility));
+    // Typed before the script runs: kept, and taken in as the visitor's
+    // own; its buttons unseen until they work.
+    const typed = await openPaintingFirst('/');
     for (const [key, value] of [['price', '125'], ['cost', '30']]) {
-      await page.focus(`#f-${key}`);
-      await page.keyboard.press('Control+A');
-      await page.keyboard.type(value);
+      await typed.page.focus(`#f-${key}`);
+      await typed.page.keyboard.press('Control+A');
+      await typed.page.keyboard.type(value);
     }
-    release();
-    await page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('cost') === '30', null, { timeout: 5000 });
+    const before = await buttonsSeen(typed.page);
+    typed.release();
+    await typed.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('cost') === '30', null, { timeout: 5000 });
     const linked = await open('/#price=125&cost=30');
     assert.deepEqual(
-      [await page.inputValue('#f-price'), await page.inputValue('#f-cost'), await inAddressBar(page, 'price'), await verdict(page)],
-      ['125', '30', '125', await verdict(linked.page)],
-      'both kept, saved and worked out',
+      [before, await buttonsSeen(typed.page), await typed.page.inputValue('#f-price'), await typed.page.inputValue('#f-cost'), await inAddressBar(typed.page, 'price'), await verdict(typed.page)],
+      [['hidden', 'hidden'], ['visible', 'visible'], '125', '30', '125', await verdict(linked.page)],
+      'both kept, saved and worked out; the buttons seen once they work',
     );
-    assert.deepEqual(errors, []);
+    assert.deepEqual(typed.errors, []);
     await linked.context.close();
-    await context.close();
+    await typed.context.close();
     // A field left before the script runs shows its comma read as a point,
-    // as on any leaving; the one still being typed in (here emptied) waits,
-    // its value as loaded standing in: no prompt, nothing flagged or saved
-    // for it. Boxes and lists changed meanwhile are kept too. (The page
-    // isn't running anything yet: they're set as the visitor would.)
-    const early = await open(null);
-    let go;
-    const gate = new Promise((resolve) => (go = resolve));
-    await early.page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
-      await gate;
-      await route.continue();
-    });
-    await early.page.goto(`${base}/`, { waitUntil: 'commit' });
-    await early.page.waitForSelector('#f-cost', { state: 'attached' });
+    // as on any leaving; the one still being typed in (here the price,
+    // needed, emptied) waits, its value as loaded standing in: no prompt,
+    // nothing flagged or saved for it. Boxes and lists changed meanwhile
+    // are kept too. (Set as the visitor would: the page runs nothing yet.)
+    const early = await openPaintingFirst('/');
     await early.page.focus('#f-cost');
     await early.page.keyboard.press('Control+A');
     await early.page.keyboard.type('2,50');
-    await early.page.focus('#f-price'); // the price, needed, emptied on the way to another
+    await early.page.focus('#f-price');
     await early.page.keyboard.press('Control+A');
     await early.page.keyboard.press('Backspace');
     await early.page.evaluate(() => {
       document.querySelector('input[name="platform"][value="ebay"]').checked = false;
       document.querySelector('#f-ebayCategory').value = 'handbags';
     });
-    go();
+    early.release();
     await early.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('cost') === '2.50', null, { timeout: 5000 });
     await settle(early.page);
     assert.deepEqual(
@@ -461,6 +455,42 @@ if (chromium) {
     );
     assert.deepEqual(early.errors, []);
     await early.context.close();
+    // Still being typed when the script runs, '1,' waits: judged as the
+    // default where the link's value is no good, and not kept at all where
+    // the link's mode hides the field.
+    for (const [path, expected, how] of [
+      ['/#price=abc', ['1,', null, false, null], "a link's bad price: the default stands in (the defaults' clean address), nothing flagged"],
+      ['/#mode=price&cost=8', ['40', null, false, null], 'a price the List price mode hides: as loaded, nothing changed (the link as it was)'],
+    ]) {
+      const waiting = await openPaintingFirst(path);
+      await waiting.page.focus('#f-price');
+      await waiting.page.keyboard.press('Control+A');
+      await waiting.page.keyboard.type('1,');
+      waiting.release();
+      await waiting.page.waitForFunction(() => 'ready' in document.querySelector('[data-calc]').dataset, null, { timeout: 5000 });
+      await settle(waiting.page);
+      assert.deepEqual(
+        [await waiting.page.inputValue('#f-price'), await waiting.page.getAttribute('#f-price', 'aria-invalid'), (await verdict(waiting.page)).startsWith('Check'), await inAddressBar(waiting.page, 'price')],
+        expected,
+        how,
+      );
+      assert.deepEqual(waiting.errors, []);
+      await waiting.context.close();
+    }
+    // If the app never runs (a script blocker, a failed load), its buttons
+    // never show: nothing that does nothing.
+    const blocked = await open(null);
+    await blocked.page.route(/\/assets\/app\.[0-9a-f]+\.js$/, (route) => route.abort());
+    await blocked.page.goto(`${base}/`, { waitUntil: 'load' });
+    assert.deepEqual(await buttonsSeen(blocked.page), ['hidden', 'hidden'], 'no app: no buttons');
+    await blocked.context.close();
+    // A link loaded while a field has focus is read as any link is: a comma
+    // shown as the point it's read as.
+    const pasted = await open('/');
+    await pasted.page.focus('#f-cost');
+    await pasted.page.evaluate(() => (location.hash = '#price=40&cost=2,50'));
+    await pasted.page.waitForFunction(() => document.querySelector('#f-cost').value === '2.50', null, { timeout: 3000 });
+    await pasted.context.close();
   });
 
   test('saved settings survive reloads and are never touched by shared links', async () => {
@@ -2807,11 +2837,13 @@ if (chromium) {
       await page.setViewportSize({ width: viewport, height: 800 });
       viewport += Math.round(target - (await width()));
       await page.setViewportSize({ width: viewport, height: 800 });
+      assert.ok(Math.abs((await width()) - target) <= 1, `the list at ${target}px`);
       return viewport;
     };
     // Every built page (each fee page pins its own marketplace), at three
     // text sizes, at list widths around both edges of the CSS's band (12em,
-    // and 12em plus 54px): no name runs into its figure or breaks.
+    // and 12em plus 54px) and under it (where every figure has its own
+    // line): no name runs into its figure or breaks.
     for (const path of ['/', ...FEE_PAGES]) {
       for (const scale of [1, 1.25, 1.5]) {
         const plain = await open(null, { viewport: { width: 360, height: 800 }, javaScriptEnabled: false });
@@ -2819,7 +2851,7 @@ if (chromium) {
         await plain.page.goto(`${base}${path}`, { waitUntil: 'networkidle' });
         const em = await plain.page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('[data-results]')).fontSize));
         const bad = [];
-        for (const over of [-2, 2, 27, 52, 56, 60, 72, 96]) {
+        for (const over of [-48, -24, -2, 2, 27, 52, 56, 60, 72, 96]) {
           const viewport = await listAt(plain.page, 12 * em + over);
           const trouble = [...(await runsInto(plain.page)), ...(await plain.page.evaluate(avoidableSplits, '.results'))];
           if (trouble.length) bad.push(`${viewport}px: ${trouble.join(', ')}`);
@@ -2834,7 +2866,7 @@ if (chromium) {
     await spaced.page.goto(`${base}/`, { waitUntil: 'networkidle' });
     await spaced.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; line-height: 1.5 !important; }', document.styleSheets[0].cssRules.length));
     const runInto = [];
-    for (let width = 240; width <= 480; width += 8) {
+    for (let width = 240; width <= 480; width += 4) {
       await spaced.page.setViewportSize({ width, height: 800 });
       if ((await runsInto(spaced.page)).length) runInto.push(width);
     }

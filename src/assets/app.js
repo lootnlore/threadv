@@ -104,7 +104,6 @@ function setup(root) {
   let painted = null;
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
-  let loadedEarly = {}; // what the settings changed before the script ran would have been (see load)
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -169,7 +168,7 @@ function setup(root) {
     const fill = (key, value) => (kept.includes(field(key)) ? (loaded[key] = value) : setValue(key, value));
     for (const key of MAIN_KEYS) fill(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
     for (const key of TUNE_KEYS) fill(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
-    for (const key of NUMERIC) if (field(key) && field(key) !== document.activeElement) showPoint(field(key)); // (never the one being typed in)
+    for (const key of NUMERIC) if (field(key) && !(kept.includes(field(key)) && field(key) === document.activeElement)) showPoint(field(key)); // (never one still being typed in)
     if (sharedView) {
       setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS, kept);
     } else {
@@ -517,8 +516,11 @@ function setup(root) {
    * on its way to a number ("1," before "1,5", "0." before "0.75") waits
    * even then. The list is redrawn only when the result changed; what a
    * render draws waits while a press holds it (see presses).
+   * `fallback` (the first render only, with nothing on screen to keep yet)
+   * gives a value to judge the waiting field by instead; `standIn`, values
+   * read in place of what their fields hold.
    */
-  function render({ save = false, typing = '', standIn = {} } = {}) {
+  function render({ save = false, typing = '', fallback = {}, standIn = {} } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
     const state = readForm(standIn);
     const input = normalizeInputs(state.values);
@@ -528,11 +530,10 @@ function setup(root) {
     const typed = checks.find((c) => c.key === typing);
     const waits = typed && (typed.problem || typed.missing) && (!flagged.has(typing) || onItsWay(typing, state.values[typing], { sellPrice: typed.needed }));
     if (typed && (waits || stillTyping(typing, field(typing).value))) {
-      // Nothing changes until its value is usable. The first render has
-      // nothing on screen to keep (the field typed into before the script
-      // ran): its value as loaded stands in, and it's still to be judged.
-      if (rendered || !has(loadedEarly, typing)) return;
-      render({ save, standIn: { [typing]: loadedEarly[typing] } });
+      // Nothing changes until its value is usable (its fallback stands in
+      // for it, on a first render), and it's still to be judged.
+      if (!has(fallback, typing)) return;
+      render({ save, standIn: { [typing]: fallback[typing] } });
       dirty = typing;
       return;
     }
@@ -620,10 +621,10 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
-    fittedAt = fitKey();
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
+    fittedAt = fitKey(); // what that measure was taken at (no layout of its own: it's fresh)
     resultsEl.classList.toggle('stacked', squeezed);
   }
   // Refit, before the frame paints, when the column's width changes (a
@@ -662,11 +663,11 @@ function setup(root) {
 
   // ---- modes (tabs) ----
 
-  function setMode(next, { moveFocus = false, save = false, typing = '' } = {}) {
+  function setMode(next, { moveFocus = false, save = false, typing = '', fallback } = {}) {
     mode = next;
     // The tablist's one tab stop is focus's, not drawing: it moves at once.
     for (const tab of tabs) tab.tabIndex = tab.dataset.mode === mode ? 0 : -1;
-    render({ save, typing }); // which draws the tabs (when no press holds it), and the mode's fields and hints
+    render({ save, typing, fallback }); // which draws the tabs (when no press holds it), and the mode's fields and hints
     if (moveFocus) {
       // Focus too moves at once: that moves nothing under a press. The
       // scroll that brings the tab into view, the least one (clear of the
@@ -844,9 +845,19 @@ function setup(root) {
   const changedEarly = [...form.querySelectorAll('input, select')].filter((el) =>
     el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.tagName === 'SELECT' ? [...el.options].some((o) => o.selected !== o.defaultSelected) : el.value !== el.defaultValue,
   );
-  loadedEarly = load(changedEarly);
+  const loaded = load(changedEarly);
+  // A field the link's mode hides has nothing typed in it after all.
+  for (const key of MAIN_KEYS) {
+    if (!changedEarly.includes(field(key)) || !MODES[mode].hidden.includes(key)) continue;
+    setValue(key, loaded[key]);
+    showPoint(field(key));
+    changedEarly.splice(changedEarly.indexOf(field(key)), 1);
+  }
   const typingEarly = changedEarly.includes(document.activeElement) && document.activeElement.type === 'text' ? document.activeElement.name : '';
-  setMode(mode, { save: changedEarly.length > 0, typing: typingEarly });
+  // Until it's usable, it's judged as loaded (as the default, if that's no good).
+  const fallback = typingEarly ? { [typingEarly]: inputProblem(typingEarly, loaded[typingEarly]) ? DEFAULTS[typingEarly] : loaded[typingEarly] } : undefined;
+  setMode(mode, { save: changedEarly.length > 0, typing: typingEarly, fallback });
+  root.dataset.ready = ''; // its buttons work now (see styles.css)
   spoken = verdictText(); // the starting verdict is already on screen: not news
   // A pasted link, or Back/Forward between results, only changes the
   // fragment (no reload), so load that state. Plain anchors like the skip

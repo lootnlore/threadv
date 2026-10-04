@@ -1,21 +1,27 @@
-// Strips comments, indentation and blank lines from the browser modules,
-// which hold the page's first frame (see layout.mjs): fewer bytes to wait
-// for. It reads the code as JavaScript does (strings, template literals,
-// regular expressions, comments), so nothing that only looks like a
-// comment is touched, and keeps every line break that ends a line of code,
-// so automatic semicolons fall where they did. Inside a template literal
-// everything is kept as written.
+// Strips comments and indentation from the shipped scripts, which hold
+// the page's first frame (see layout.mjs): fewer bytes to wait for. It
+// reads the code as JavaScript does (strings, template literals, regular
+// expressions, comments), so nothing that only looks like a comment is
+// touched, and keeps every line break, so automatic semicolons fall where
+// they did and an error's line number is the source's. Inside a template
+// literal everything is kept as written. (A build test checks the result
+// tokenizes exactly as the source does.)
 
 const WORD = /[\w$]/;
+const SPACE = /[ \t\r]/;
 // After these words an expression starts, so a slash begins a regular
 // expression ("return /x/"); after any other word it divides ("a / b").
 const BEFORE_EXPRESSION = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'instanceof', 'new', 'delete', 'void', 'throw', 'yield', 'await', 'of']);
+// Their parentheses close a condition, not a value: "if (a) /x/.test(s)".
+const CONTROL = new Set(['if', 'while', 'for', 'with']);
 
-/** `src` without comments, indentation or blank lines. */
+/** `src` without comments or indentation. */
 export function stripJs(src) {
   let out = '';
   let i = 0;
   let lastToken = ''; // the last thing that wasn't space or a comment: decides what a slash is
+  let closedControl = false; // whether the last ")" closed an if/while/for/with condition
+  const parens = []; // for each open "(", whether it opened such a condition
   const templates = []; // brace depths at which an open ${...} returns to its template
   let depth = 0;
   const emit = (text) => {
@@ -23,15 +29,13 @@ export function stripJs(src) {
     lastToken = text;
   };
   const lineStart = () => out === '' || out.endsWith('\n');
-  const newline = () => {
-    if (!lineStart()) out += '\n'; // a blank line is dropped; a line of code keeps its end
-  };
   // Whether a slash here begins a regular expression (or divides).
   const regexAllowed = () => {
     if (lastToken === '' || lastToken.endsWith('${')) return true; // an expression starts
     if (WORD.test(lastToken[0])) return BEFORE_EXPRESSION.has(lastToken); // a name or number divides; "return" and the like start an expression
+    if (lastToken === ')') return closedControl;
     if (lastToken.length > 1) return false; // a string, template or regular expression just ended
-    return lastToken !== ')' && lastToken !== ']';
+    return lastToken !== ']';
   };
   // A template literal's text from i (just past ` or }), up to its end or a ${.
   const templateText = () => {
@@ -52,23 +56,24 @@ export function stripJs(src) {
     const c = src[i];
     const next = src[i + 1];
     if (c === '\n') {
-      newline();
+      if (out.endsWith(' ')) out = out.slice(0, -1);
+      out += '\n';
       i++;
-    } else if (c === ' ' || c === '\t' || c === '\r') {
-      // Space between tokens: one, and only where it keeps two apart.
-      while (src[i] === ' ' || src[i] === '\t' || src[i] === '\r') i++;
-      if (!lineStart() && src[i] !== '\n' && i < src.length) out += ' ';
+    } else if (SPACE.test(c)) {
+      // Space between tokens: one, never at a line's start.
+      while (SPACE.test(src[i] ?? '')) i++;
+      if (!lineStart() && !out.endsWith(' ')) out += ' ';
     } else if (c === '/' && next === '/') {
       while (i < src.length && src[i] !== '\n') i++;
-      if (out.endsWith(' ')) out = out.slice(0, -1);
     } else if (c === '/' && next === '*') {
       const end = src.indexOf('*/', i + 2);
       if (end < 0) throw new Error('stripJs: unterminated comment');
-      const hadNewline = src.slice(i, end).includes('\n');
+      const lines = src.slice(i, end).split('\n').length - 1;
       i = end + 2;
-      if (out.endsWith(' ')) out = out.slice(0, -1);
-      if (hadNewline) newline();
-      else if (WORD.test(out.at(-1) ?? '') && WORD.test(src[i] ?? '')) out += ' '; // "a/**/b" stays two words
+      if (lines) {
+        if (out.endsWith(' ')) out = out.slice(0, -1);
+        out += '\n'.repeat(lines);
+      } else if (!lineStart() && !out.endsWith(' ')) out += ' '; // "a/**/b", "-/**/-": still two tokens
     } else if (c === "'" || c === '"') {
       const start = i++;
       while (src[i] !== c) {
@@ -113,9 +118,11 @@ export function stripJs(src) {
     } else {
       if (c === '{') depth++;
       else if (c === '}') depth--;
+      else if (c === '(') parens.push(CONTROL.has(lastToken));
+      else if (c === ')') closedControl = parens.pop() ?? false;
       emit(c);
       i++;
     }
   }
-  return out.endsWith('\n') || out === '' ? out : `${out}\n`;
+  return out;
 }

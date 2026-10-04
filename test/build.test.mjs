@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
+import vm from 'node:vm';
 import config from '../site.config.mjs';
 import { FEES_VERIFIED, PLATFORMS, percentOf } from '../src/engine/fees.mjs';
 import { IRS_MILEAGE_RATES, MILEAGE_YEAR } from '../src/data/mileage.mjs';
@@ -70,16 +71,46 @@ test('stripped scripts work as written: the engine tests pass against stripped e
     writeFileSync(file, stripJs(readFileSync(file, 'utf8')));
   }
   execFileSync(process.execPath, ['--test', 'test/engine.test.mjs'], { cwd: copy, stdio: 'pipe' });
-  // Parsed, not run (app.js needs a page): modules as modules, classic scripts as scripts.
+  // Parsed, not run (app.js needs a page): modules as modules, classic
+  // scripts as the scripts a page runs them as.
   const checked = join(copy, 'checked');
   mkdirSync(checked);
   for (const file of readdirSync(join(OUT, 'assets')).filter((f) => f.endsWith('.js'))) {
-    const classic = /^(offline|analytics)\./.test(file);
-    const target = join(checked, file.replace(/\.js$/, classic ? '.cjs' : '.mjs'));
-    cpSync(join(OUT, 'assets', file), target);
-    execFileSync(process.execPath, ['--check', target], { stdio: 'pipe' });
-    assert.ok(!/^\s*\/\//m.test(readFileSync(target, 'utf8')), `${file}: comments stripped`);
+    const code = readFileSync(join(OUT, 'assets', file), 'utf8');
+    if (/^(offline|analytics)\./.test(file)) new vm.Script(code, { filename: file });
+    else {
+      writeFileSync(join(checked, file.replace(/\.js$/, '.mjs')), code);
+      execFileSync(process.execPath, ['--check', join(checked, file.replace(/\.js$/, '.mjs'))], { stdio: 'pipe' });
+    }
+    assert.ok(!/^\s*\/\//m.test(code), `${file}: comments stripped`);
   }
+});
+
+test('stripped scripts tokenize exactly as their sources, each token on its own line', () => {
+  // Read by Node's own copy of acorn, a tokenizer independent of the
+  // stripper: same tokens, same values, same line numbers (so automatic
+  // semicolons fall where they did, and errors point at the source).
+  const dir = mkdtempSync(join(tmpdir(), 'threadvet-strip-'));
+  tempDirs.push(dir);
+  const pairs = [];
+  for (const [src, classic] of [['src/engine/fees.mjs'], ['src/engine/calc.mjs'], ['src/engine/render.mjs'], ['src/assets/app.js'], ['src/assets/offline.js', true], ['src/assets/analytics.js', true]]) {
+    const source = fileURLToPath(new URL(`../${src}`, import.meta.url));
+    const stripped = join(dir, `${pairs.length}.js`);
+    writeFileSync(stripped, stripJs(readFileSync(source, 'utf8')));
+    pairs.push([source, stripped, classic ? 'script' : 'module']);
+  }
+  const reader = `
+    const { tokenizer } = require('internal/deps/acorn/acorn/dist/acorn');
+    const { readFileSync } = require('node:fs');
+    const tokens = (file, sourceType) => [...tokenizer(readFileSync(file, 'utf8'), { ecmaVersion: 'latest', sourceType, locations: true })]
+      .map((t) => JSON.stringify([t.type.label, t.value instanceof Object ? String(t.value.pattern) + '/' + t.value.flags : t.value, t.loc.start.line]));
+    for (const [source, stripped, sourceType] of JSON.parse(process.argv[1])) {
+      const [a, b] = [tokens(source, sourceType), tokens(stripped, sourceType)];
+      const at = a.findIndex((t, i) => t !== b[i]);
+      console.log(at < 0 && a.length === b.length ? 'same' : source + ': ' + a[at] + ' became ' + b[at]);
+    }`;
+  const report = execFileSync(process.execPath, ['--expose-internals', '-e', reader, JSON.stringify(pairs)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  assert.deepEqual(report.trim().split('\n'), pairs.map(() => 'same'));
 });
 
 test('every page has complete, sane metadata', () => {

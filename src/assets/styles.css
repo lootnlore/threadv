@@ -883,13 +883,18 @@ select:focus-visible {
   margin-top: 16px;
 }
 
-/* See results (a jump to the verdict) and Copy link need the script. Shown
-   by default, so a script that runs after the first paint moves nothing in. */
+/* See results (a jump to the verdict) and Copy link need the script: gone
+   without it, and unseen (their room kept, so nothing moves when they
+   appear) until it has set the calculator up. */
 @media (scripting: none) {
   .see-results,
   [data-share] {
     display: none;
   }
+}
+
+[data-calc]:not([data-ready]) :is(.see-results, [data-share]) {
+  visibility: hidden;
 }
 
 @media (min-width: 56.25em) {
