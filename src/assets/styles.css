@@ -883,17 +883,19 @@ select:focus-visible {
   margin-top: 16px;
 }
 
-/* See results (a jump to the verdict) and Copy link need the script: gone
-   without it, and unseen (their room kept, so nothing moves when they
-   appear) until it has set the calculator up. */
+/* The mode tabs, See results (a jump to the verdict), Copy link and Reset
+   need the script: gone without it, and unseen (their room kept, so
+   nothing moves when they appear) until it has set the calculator up. */
 @media (scripting: none) {
+  .modes,
   .see-results,
-  [data-share] {
+  [data-share],
+  [data-reset] {
     display: none;
   }
 }
 
-[data-calc]:not([data-ready]) :is(.see-results, [data-share]) {
+[data-calc]:not([data-ready]) :is(.modes, .see-results, [data-share], [data-reset]) {
   visibility: hidden;
 }
 

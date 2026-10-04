@@ -153,14 +153,19 @@ function setup(root) {
 
   /**
    * Fills the form from the link, else saved settings, else the defaults.
-   * `kept`: controls the visitor changed before the script ran (a browser
-   * that paints first lets them start), which keep what they show. Returns
-   * what each kept setting would have been, by name.
+   * `changed`: controls the visitor changed before the script ran (a
+   * browser that paints first lets them start), which keep what they show
+   * unless the mode hides them. Returns those `kept`, and what each kept
+   * setting would have been (`loaded`, by name).
    */
-  function load(kept = []) {
+  function load(changed = []) {
     reveal = true;
     dirty = ''; // whatever was being typed is replaced
     const params = linkParams();
+    const m = params.get('mode');
+    mode = m && has(MODES, m) ? m : 'profit';
+    // A field this mode hides has nothing typed in it after all.
+    const kept = changed.filter((el) => !MODES[mode].hidden.includes(el.name));
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
     const tune = sharedView ? Object.fromEntries(params) : (saved.values ?? {});
@@ -176,9 +181,7 @@ function setup(root) {
       const hidden = Array.isArray(saved.hidden) ? saved.hidden : [];
       setPlatforms(ALL_IDS.filter((id) => !hidden.includes(id)), kept);
     }
-    const m = params.get('mode');
-    mode = m && has(MODES, m) ? m : 'profit';
-    return loaded;
+    return { kept, loaded };
   }
 
   // Only what the user changed is stored, so when a default fee rate is
@@ -252,6 +255,9 @@ function setup(root) {
       return summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
     }
     if (!had.isConnected || had.closest('.calc-output')) return focusVerdict();
+    // A text field hidden while typed in (its mode changed under it): to the
+    // mode's tab, never to another field, which keys typed on would change.
+    if (had.matches('input[type="text"]')) return tabFor(mode).focus();
     const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(had) & Node.DOCUMENT_POSITION_FOLLOWING);
     for (const c of before.reverse()) {
       if (c.tabIndex < 0 || c.disabled || !visible(c)) continue;
@@ -531,9 +537,15 @@ function setup(root) {
     const waits = typed && (typed.problem || typed.missing) && (!flagged.has(typing) || onItsWay(typing, state.values[typing], { sellPrice: typed.needed }));
     if (typed && (waits || stillTyping(typing, field(typing).value))) {
       // Nothing changes until its value is usable (its fallback stands in
-      // for it, on a first render), and it's still to be judged.
+      // for it on a first render, or the default if that's no good either),
+      // and it's still to be judged.
       if (!has(fallback, typing)) return;
-      render({ save, standIn: { [typing]: fallback[typing] } });
+      const usable = (value) => {
+        const { values } = readForm({ [typing]: value });
+        const c = check(values, ids, normalizeInputs(values)).find((one) => one.key === typing);
+        return !c.problem && !c.missing;
+      };
+      render({ save, standIn: { [typing]: usable(fallback[typing]) ? fallback[typing] : DEFAULTS[typing] } });
       dirty = typing;
       return;
     }
@@ -621,11 +633,13 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
+    const was = resultsEl.classList.contains('stacked');
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     fittedAt = fitKey(); // what that measure was taken at (no layout of its own: it's fresh)
     resultsEl.classList.toggle('stacked', squeezed);
+    if (squeezed !== was) fittedAt = fitKey(); // a list newly stacked (or not) can change the column (a page scrollbar)
   }
   // Refit, before the frame paints, when the column's width changes (a
   // phone turned: watched on the verdict, which spans it) or the text's size
@@ -845,19 +859,10 @@ function setup(root) {
   const changedEarly = [...form.querySelectorAll('input, select')].filter((el) =>
     el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.tagName === 'SELECT' ? [...el.options].some((o) => o.selected !== o.defaultSelected) : el.value !== el.defaultValue,
   );
-  const loaded = load(changedEarly);
-  // A field the link's mode hides has nothing typed in it after all.
-  for (const key of MAIN_KEYS) {
-    if (!changedEarly.includes(field(key)) || !MODES[mode].hidden.includes(key)) continue;
-    setValue(key, loaded[key]);
-    showPoint(field(key));
-    changedEarly.splice(changedEarly.indexOf(field(key)), 1);
-  }
-  const typingEarly = changedEarly.includes(document.activeElement) && document.activeElement.type === 'text' ? document.activeElement.name : '';
-  // Until it's usable, it's judged as loaded (as the default, if that's no good).
-  const fallback = typingEarly ? { [typingEarly]: inputProblem(typingEarly, loaded[typingEarly]) ? DEFAULTS[typingEarly] : loaded[typingEarly] } : undefined;
-  setMode(mode, { save: changedEarly.length > 0, typing: typingEarly, fallback });
-  root.dataset.ready = ''; // its buttons work now (see styles.css)
+  const { kept, loaded } = load(changedEarly);
+  const typingEarly = kept.includes(document.activeElement) && document.activeElement.type === 'text' ? document.activeElement.name : '';
+  root.dataset.ready = ''; // its tabs and buttons work now, and can take focus (see styles.css)
+  setMode(mode, { save: kept.length > 0, typing: typingEarly, fallback: typingEarly ? { [typingEarly]: loaded[typingEarly] } : undefined });
   spoken = verdictText(); // the starting verdict is already on screen: not news
   // A pasted link, or Back/Forward between results, only changes the
   // fragment (no reload), so load that state. Plain anchors like the skip

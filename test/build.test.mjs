@@ -15,6 +15,7 @@ import { ogData, rowsToShow, CARD_ROWS } from '../scripts/og-data.mjs';
 import { DEFAULTS } from '../src/engine/calc.mjs';
 import { builtOutput } from '../src/engine/render.mjs';
 import { stripJs } from '../scripts/strip-js.mjs';
+import { MODULES, CLASSIC_SCRIPTS } from '../scripts/assets.mjs';
 
 const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
 const tempDirs = [OUT];
@@ -77,7 +78,7 @@ test('stripped scripts work as written: the engine tests pass against stripped e
   mkdirSync(checked);
   for (const file of readdirSync(join(OUT, 'assets')).filter((f) => f.endsWith('.js'))) {
     const code = readFileSync(join(OUT, 'assets', file), 'utf8');
-    if (/^(offline|analytics)\./.test(file)) new vm.Script(code, { filename: file });
+    if (CLASSIC_SCRIPTS.some(([, name]) => file.startsWith(`${name}.`))) new vm.Script(code, { filename: file });
     else {
       writeFileSync(join(checked, file.replace(/\.js$/, '.mjs')), code);
       execFileSync(process.execPath, ['--check', join(checked, file.replace(/\.js$/, '.mjs'))], { stdio: 'pipe' });
@@ -93,23 +94,33 @@ test('stripped scripts tokenize exactly as their sources, each token on its own 
   const dir = mkdtempSync(join(tmpdir(), 'threadvet-strip-'));
   tempDirs.push(dir);
   const pairs = [];
-  for (const [src, classic] of [['src/engine/fees.mjs'], ['src/engine/calc.mjs'], ['src/engine/render.mjs'], ['src/assets/app.js'], ['src/assets/offline.js', true], ['src/assets/analytics.js', true]]) {
+  for (const [src, classic] of [...MODULES.map(([file]) => [file, false]), ...CLASSIC_SCRIPTS.map(([file]) => [file, true])]) {
     const source = fileURLToPath(new URL(`../${src}`, import.meta.url));
     const stripped = join(dir, `${pairs.length}.js`);
     writeFileSync(stripped, stripJs(readFileSync(source, 'utf8')));
     pairs.push([source, stripped, classic ? 'script' : 'module']);
   }
+  // (Node keeps acorn at this internal path; were it moved, this fails
+  // saying so, rather than passing unchecked.)
   const reader = `
     const { tokenizer } = require('internal/deps/acorn/acorn/dist/acorn');
     const { readFileSync } = require('node:fs');
+    const shown = (v) => (v && typeof v === 'object' && 'pattern' in v ? '/' + v.pattern + '/' + v.flags : typeof v + ':' + String(v));
     const tokens = (file, sourceType) => [...tokenizer(readFileSync(file, 'utf8'), { ecmaVersion: 'latest', sourceType, locations: true })]
-      .map((t) => JSON.stringify([t.type.label, t.value instanceof Object ? String(t.value.pattern) + '/' + t.value.flags : t.value, t.loc.start.line]));
+      .map((t) => t.type.label + ' ' + shown(t.value) + ' @' + t.loc.start.line);
     for (const [source, stripped, sourceType] of JSON.parse(process.argv[1])) {
       const [a, b] = [tokens(source, sourceType), tokens(stripped, sourceType)];
       const at = a.findIndex((t, i) => t !== b[i]);
-      console.log(at < 0 && a.length === b.length ? 'same' : source + ': ' + a[at] + ' became ' + b[at]);
+      if (at >= 0) console.log(source + ': token ' + at + ', ' + a[at] + ', became ' + b[at]);
+      else if (a.length !== b.length) console.log(source + ': ' + a.length + ' tokens became ' + b.length);
+      else console.log('same');
     }`;
-  const report = execFileSync(process.execPath, ['--expose-internals', '-e', reader, JSON.stringify(pairs)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  let report;
+  try {
+    report = execFileSync(process.execPath, ['--expose-internals', '-e', reader, JSON.stringify(pairs)], { encoding: 'utf8', stdio: 'pipe' });
+  } catch (err) {
+    assert.fail(`the token check could not run: ${err.stderr || err.message}`);
+  }
   assert.deepEqual(report.trim().split('\n'), pairs.map(() => 'same'));
 });
 

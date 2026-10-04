@@ -121,6 +121,7 @@ export function stripJs(src) {
       else if (c === '(') parens.push(CONTROL.has(lastToken));
       else if (c === ')') closedControl = parens.pop() ?? false;
       emit(c);
+      if ((c === '+' || c === '-') && src[i - 1] === c) lastToken = c + c; // "i++ / 2" divides
       i++;
     }
   }
