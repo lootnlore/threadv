@@ -6,7 +6,7 @@
 //   node scripts/build.mjs --out tmp  -> tmp/
 import { mkdir, readFile, writeFile, rm, cp, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { stripJs } from './strip-js.mjs';
@@ -104,7 +104,20 @@ async function write(rel, content) {
   await writeFile(file, content);
 }
 
+/** The shipped scripts' names, as the rest of the site reads them (see scripts/assets.mjs). */
+function checkAssetNames() {
+  const all = [...MODULES, ...CLASSIC_SCRIPTS];
+  for (const [src, name] of all) {
+    if (!/^[a-z]+$/.test(name) || name === 'css') throw new Error(`${src}: published as "${name}", but a name is lowercase letters only, and not "css" (see scripts/assets.mjs)`);
+    if (all.filter(([, other]) => other === name).length > 1) throw new Error(`${src}: "${name}" is published twice`);
+  }
+  for (const [src, name] of MODULES) {
+    if (basename(src).replace(/\.m?js$/, '') !== name) throw new Error(`${src}: a module is published under its file's name (what its importers name it), not "${name}"`);
+  }
+}
+
 async function build() {
+  checkAssetNames(); // before anything is wiped
   const todo = validateConfig();
   await assertSafeToClean(OUT);
   await rm(OUT, { recursive: true, force: true });
@@ -114,7 +127,6 @@ async function build() {
   const css = minifyCss(await readFile(join(ROOT, 'src/assets/styles.css'), 'utf8'));
   const published = { css: `styles.${hash(css)}.css` };
   await write(`assets/${published.css}`, css);
-  for (const [src, name] of [...MODULES, ...CLASSIC_SCRIPTS]) if (!/^[a-z]+$/.test(name)) throw new Error(`${src}: published as "${name}", but names are lowercase letters only (see scripts/assets.mjs)`);
   for (const [src, name] of MODULES) {
     // Comments, indentation and blank lines stripped (see strip-js.mjs: it
     // reads the code as JavaScript does, not by pattern), nothing renamed.

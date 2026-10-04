@@ -71,9 +71,7 @@ function debounce(fn, ms) {
 
 function setup(root) {
   const form = root.querySelector('form');
-  // The mode's panel: a tab panel only with the script that runs its tabs.
-  const panel = root.querySelector('.calc-panel');
-  panel.setAttribute('role', 'tabpanel');
+  const panel = root.querySelector('.calc-panel'); // a tab panel once drawn by the script that runs its tabs
   const tabs = [...root.querySelectorAll('[role="tab"]')];
   const tabFor = (m) => tabs.find((tab) => tab.dataset.mode === m);
   const hint = root.querySelector('[data-hint]');
@@ -240,10 +238,14 @@ function setup(root) {
   };
   /**
    * Focus where it was before a draw, if the draw hid or replaced what had
-   * it (the list redrawn, the prompt in its place, a field or the shared
-   * note hidden), rather than dropped to the page: the same row in the new
-   * list, else the verdict for anything in the results column, else the
-   * nearest control before it in the form that takes focus. Run once the
+   * it (the list redrawn, the prompt in its place, a field, Reset or the
+   * shared note hidden), rather than dropped to the page: the same row in
+   * the new list, else the verdict for anything in the results column.
+   * Something in the form (its mode or a setting changed under it) hands
+   * focus to the nearest part of the form still shown around it, focusable
+   * only while it has focus: where the visitor was, in view, and where the
+   * keys typed on change nothing (another control would take them: a field
+   * the digits, a box the space, a tab or a list the arrows). Run once the
    * draw is done, so the verdict focused is the new one (and isn't then
    * read out again). A draw never runs while a press holds it: this may
    * scroll.
@@ -257,21 +259,13 @@ function setup(root) {
       return summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
     }
     if (!had.isConnected || had.closest('.calc-output')) return focusVerdict();
-    // A text field hidden while typed in (its mode or a setting changed under
-    // it): to the verdict (read out, as focus does), where the keys typed on
-    // change nothing (another field would take them, a tab or a list would
-    // switch on arrows), and the view stays where it was.
-    if (had.matches('input[type="text"]')) {
-      verdictEl.focus({ preventScroll: true });
-      spoken = verdictText();
-      return;
+    let around = had.parentElement;
+    while (around !== root && !visible(around)) around = around.parentElement;
+    if (!around.hasAttribute('tabindex')) {
+      around.tabIndex = -1;
+      around.addEventListener('blur', () => around.removeAttribute('tabindex'), { once: true });
     }
-    const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(had) & Node.DOCUMENT_POSITION_FOLLOWING);
-    for (const c of before.reverse()) {
-      if (c.tabIndex < 0 || c.disabled || !visible(c)) continue;
-      c.focus();
-      if (document.activeElement === c) return; // (one inside a closed panel can refuse it)
-    }
+    around.focus({ preventScroll: true });
   }
   /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
   const onShow = (key, m, input) =>
@@ -572,6 +566,7 @@ function setup(root) {
       const had = document.activeElement;
       if (m !== drawnMode) {
         for (const tab of tabs) tab.setAttribute('aria-selected', String(tab.dataset.mode === m));
+        panel.setAttribute('role', 'tabpanel');
         panel.setAttribute('aria-labelledby', `tab-${m}`);
         hint.textContent = MODES[m].hint;
         hintFor('target').dataset.default = MODES[m].targetHint;
@@ -641,11 +636,13 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
+    const was = resultsEl.classList.contains('stacked');
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     fittedAt = fitKey(); // what that measure was taken at (no layout of its own: it's fresh)
     resultsEl.classList.toggle('stacked', squeezed);
+    if (squeezed !== was) fittedAt = fitKey(); // as it now stands (see below: a scrollbar)
   }
   // Refit, before the frame paints, when the column's width changes (a
   // phone turned: watched on the verdict, which spans it) or the text's size
@@ -653,9 +650,12 @@ function setup(root) {
   // alone): compared with what the list was last fitted at, so the
   // verdict's height (its own words rewrapping) changes nothing, and a
   // change before the first frame is caught. Neither depends on the list's
-  // fit (these pages are taller than any screen, so stacking never brings
-  // or takes away a page scrollbar), so fitting from here can't resize
-  // what's watched (a "ResizeObserver loop").
+  // fit, so fitting from here doesn't resize what's watched, but for one
+  // case: stacking makes the page outgrow the window (or no longer), and a
+  // scrollbar that takes room (desktop scrollbars, not phones') comes or
+  // goes. Then the column changes in the callback: the browser reports a
+  // "ResizeObserver loop" and looks again next frame, and the fit, recorded
+  // as it now stands, settles at once.
   const probe = document.createElement('span');
   probe.className = 'fit-probe';
   probe.setAttribute('aria-hidden', 'true');

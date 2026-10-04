@@ -512,15 +512,23 @@ if (chromium) {
     await pasted.page.waitForFunction(() => document.querySelector('#f-cost').value === '2.50', null, { timeout: 3000 });
     assert.deepEqual(pasted.errors, []);
     await pasted.context.close();
-    // A text field hidden while typed in (its mode changed under it, by a
-    // link at load or later): focus goes to the verdict (read out), where the
-    // keys typed on (digits, End, Home, arrows) change nothing: not another
-    // field, nor the mode. Max buy hides the cost.
+    // A control in the form hidden while it has focus (its mode or a
+    // setting changed under it, by a link at load or later): focus goes to
+    // the form around where it was, in view, where the keys typed on
+    // (digits, End, Home, arrows, Space) change nothing: not another field,
+    // the mode or a box. Focusable only while it has focus.
+    const around = (page, sel) =>
+      page.evaluate((hidden) => {
+        const at = document.activeElement;
+        const box = at.getBoundingClientRect();
+        return [at !== document.body && at.contains(document.querySelector(hidden)), box.bottom > 0 && box.top < innerHeight];
+      }, sel);
     const typeOn = async (page) => {
-      for (const key of ['7', 'End', 'Home', 'ArrowRight', 'ArrowLeft', '5']) await page.keyboard.press(key);
+      for (const key of ['7', 'End', 'Home', 'ArrowRight', 'ArrowLeft', 'Space', '5']) await page.keyboard.press(key);
       await settle(page);
-      return page.evaluate(() => [document.activeElement.matches('[data-verdict]') ? 'verdict' : document.activeElement.id, document.querySelector('[role="tab"][aria-selected="true"]').dataset.mode, document.querySelector('#f-price').value, location.hash]);
+      return page.evaluate(() => [document.querySelector('[role="tab"][aria-selected="true"]').dataset.mode, document.querySelector('#f-price').value, location.hash]);
     };
+    // Max buy hides the cost.
     const hiddenAtLoad = await openPaintingFirst('/#mode=maxbuy&price=50');
     await hiddenAtLoad.page.focus('#f-cost');
     await hiddenAtLoad.page.keyboard.press('Control+A');
@@ -528,32 +536,52 @@ if (chromium) {
     hiddenAtLoad.release();
     await hiddenAtLoad.page.waitForFunction(() => 'ready' in document.querySelector('[data-calc]').dataset, null, { timeout: 5000 });
     await settle(hiddenAtLoad.page);
-    assert.deepEqual(await typeOn(hiddenAtLoad.page), ['verdict', 'maxbuy', '50', '#mode=maxbuy&price=50'], 'at load: focus on the verdict, the keys typed on change nothing');
+    assert.deepEqual(await around(hiddenAtLoad.page, '[data-field="cost"]'), [true, true], 'at load: focus around where the cost was, in view');
+    assert.deepEqual(await typeOn(hiddenAtLoad.page), ['maxbuy', '50', '#mode=maxbuy&price=50'], 'at load: the keys typed on change nothing');
     assert.deepEqual(hiddenAtLoad.errors, []);
     await hiddenAtLoad.context.close();
     const hiddenLater = await open('/');
     await hiddenLater.page.focus('#f-cost');
     await hiddenLater.page.evaluate(() => (location.hash = '#mode=maxbuy&price=50'));
     await hiddenLater.page.waitForFunction(() => document.querySelector('[data-field="cost"]').hidden, null, { timeout: 3000 });
-    const [focused, chosen, price, hash] = await typeOn(hiddenLater.page);
-    assert.deepEqual([focused, chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['verdict', 'maxbuy', '50', 'maxbuy'], 'by a link later: the same');
+    assert.deepEqual(await around(hiddenLater.page, '[data-field="cost"]'), [true, true], 'by a link later: the same');
+    const [chosen, price, hash] = await typeOn(hiddenLater.page);
+    assert.deepEqual([chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['maxbuy', '50', 'maxbuy'], 'by a link later: the keys typed on change nothing');
+    await hiddenLater.page.keyboard.press('Tab');
+    assert.equal(await hiddenLater.page.evaluate(() => document.querySelectorAll('.calc-input [tabindex="-1"]:not([role="tab"])').length), 0, 'focus moved on: focusable no more');
     assert.deepEqual(hiddenLater.errors, []);
     await hiddenLater.context.close();
-    // A setting's field hidden the same way (a link changing eBay's
-    // category from custom, its rate field with it): focus to the verdict,
-    // and the view stays where the visitor was.
-    const rate = await open('/');
-    await rate.page.locator('.tune > summary').click();
-    await rate.page.selectOption('#f-ebayCategory', 'custom');
-    await rate.page.focus('#f-ebayCustomRate');
-    await rate.page.locator('#f-ebayCustomRate').scrollIntoViewIfNeeded();
-    const scrolledTo = await rate.page.evaluate(() => scrollY);
-    await rate.page.evaluate(() => (location.hash = '#s=1&mode=profit&price=40&cost=8&ebayCategory=most'));
-    await rate.page.waitForFunction(() => document.querySelector('[data-field="ebayCustomRate"]').hidden, null, { timeout: 3000 });
-    await settle(rate.page);
-    assert.deepEqual([await rate.page.evaluate(() => document.activeElement.matches('[data-verdict]')), await rate.page.evaluate(() => scrollY)], [true, scrolledTo], "eBay's rate field hidden by a link: focus on the verdict, the view unmoved");
-    assert.deepEqual(rate.errors, []);
-    await rate.context.close();
+    // Settings' controls the same way: eBay's rate field (a link changing
+    // its category from custom), and Reset (a shared link, which has no
+    // Reset): focus around them, the view where the visitor was, and a
+    // Space changes no box.
+    for (const [how, prepare, hidden] of [
+      ["eBay's rate field", async (page) => {
+        await page.selectOption('#f-ebayCategory', 'custom');
+        await page.focus('#f-ebayCustomRate');
+      }, '[data-field="ebayCustomRate"]'],
+      ['Reset', (page) => page.focus('[data-reset]'), '[data-reset]'],
+    ]) {
+      const settings = await open('/');
+      await settings.page.locator('.tune > summary').click();
+      await prepare(settings.page);
+      await settings.page.locator(':focus').scrollIntoViewIfNeeded();
+      const scrolledTo = await settings.page.evaluate(() => scrollY);
+      await settings.page.evaluate(() => (location.hash = '#s=1&mode=profit&price=40&cost=8&ebayCategory=most'));
+      await settings.page.waitForFunction((sel) => document.querySelector(sel).closest('[hidden]'), hidden, { timeout: 3000 });
+      await settle(settings.page);
+      const [aroundIt, inView] = await around(settings.page, hidden);
+      const viewAfter = await settings.page.evaluate(() => scrollY);
+      await settings.page.keyboard.press('Space'); // (it may scroll the page, as on any text)
+      await settle(settings.page);
+      assert.deepEqual(
+        [aroundIt, inView, viewAfter, await settings.page.locator('.result').count()],
+        [true, true, scrolledTo, 9],
+        `${how} hidden by a link: focus around it, in view, the view unmoved; a Space changes no box`,
+      );
+      assert.deepEqual(settings.errors, []);
+      await settings.context.close();
+    }
   });
 
   test('saved settings survive reloads and are never touched by shared links', async () => {
@@ -1424,8 +1452,9 @@ if (chromium) {
       await tp.getByRole('tab', { name: 'Profit' }).click();
     }
     // A field the new mode hides, still drawn and typed into during the
-    // hold: once it's hidden, focus goes to the verdict, not dropped to the
-    // page, nor into another field (which keys typed on would change).
+    // hold: once it's hidden, focus goes to the form around where it was,
+    // not dropped to the page, nor into another field (which keys typed on
+    // would change).
     aim = await tapFirstRow();
     await tp.focus('[role="tab"][aria-selected="true"]');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
@@ -1433,7 +1462,7 @@ if (chromium) {
     for (let i = 0; i < 6 && (await tp.evaluate(() => document.activeElement.id)) !== 'f-cost'; i++) await tp.keyboard.press('Tab');
     await tp.keyboard.type('5');
     await pan(aim.finger);
-    assert.deepEqual([await selectedTab(), await tp.evaluate(() => document.activeElement.matches('[data-verdict]'))], ['Max buy', true], 'focus kept, on the verdict');
+    assert.deepEqual([await selectedTab(), await tp.evaluate(() => document.activeElement.contains(document.querySelector('[data-field="cost"]')))], ['Max buy', true], 'focus kept, around where the field was');
     await tp.getByRole('tab', { name: 'Profit' }).click();
     // Go is dropped by a tap into the field itself (placing the caret is
     // editing on), and by typing on or moving the caret after it.
@@ -1469,9 +1498,9 @@ if (chromium) {
     await tp.keyboard.press('Enter');
     await pan(aim.finger);
     assert.deepEqual(
-      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement.name)],
-      [savedBefore, false, 'platform'],
-      'Reset did nothing on a shared link; hidden once drawn, its focus went to the control before it',
+      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement.contains(document.querySelector('[data-reset]')))],
+      [savedBefore, false, true],
+      'Reset did nothing on a shared link; hidden once drawn, its focus went to the form around it',
     );
     // Likewise focus on the shared note's link when the note goes (back on your own view).
     await tp.focus('[data-shared-note] a');
@@ -2980,8 +3009,9 @@ if (chromium) {
     // Once the script has fitted the list, it decides, not the CSS: a $12
     // sale's short figures fit beside their names at a width the CSS alone
     // would stack.
-    const shortFigures = await open(null, { viewport: { width: 300, height: 800 } });
+    const shortFigures = await open(null, { viewport: { width: 320, height: 800 } });
     await shortFigures.page.goto(`${base}/#price=12&cost=2`, { waitUntil: 'networkidle' });
+    await listAt(shortFigures.page, 240); // in the CSS's band (12em to 12em plus 54px)
     assert.ok((await placement(shortFigures.page)).under.every((u) => !u), 'fitted: figures beside names where they fit');
     assert.deepEqual(shortFigures.errors, []);
     await shortFigures.context.close();
@@ -3009,8 +3039,9 @@ if (chromium) {
     // Sampled as each frame starts, so a frame's sample is what the one
     // before it painted.
     for (const how of ['text size', 'text spacing']) {
-      const resized = await open(null, { viewport: { width: how === 'text size' ? 380 : 360, height: 800 } });
+      const resized = await open(null, { viewport: { width: 400, height: 800 } });
       await resized.page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
+      await listAt(resized.page, how === 'text size' ? 314 : 294); // beside now, squeezed once the text grows
       assert.ok((await placement(resized.page)).under.every((u) => !u), `${how}: beside to begin with`);
       await resized.page.evaluate(() => {
         window.samples = [];

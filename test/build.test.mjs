@@ -124,6 +124,24 @@ test('stripped scripts tokenize exactly as their sources, each token on its own 
   assert.deepEqual(report.trim().split('\n'), pairs.map(() => 'same'));
 });
 
+test('the build refuses asset names the site cannot read, before it wipes anything', () => {
+  const copy = copyProject();
+  const run = () => execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe' });
+  run(); // a good build there to keep
+  const list = join(copy, 'scripts/assets.mjs');
+  const good = readFileSync(list, 'utf8');
+  for (const [from, to, why] of [
+    ["['src/assets/offline.js', 'offline']", "['src/assets/offline.js', 'off-line']", /lowercase letters only/],
+    ["['src/assets/offline.js', 'offline']", "['src/assets/offline.js', 'css']", /not "css"/],
+    ["['src/assets/analytics.js', 'analytics']", "['src/assets/analytics.js', 'offline']", /published twice/],
+    ["['src/engine/fees.mjs', 'fees']", "['src/engine/fees.mjs', 'pricing']", /its file's name/],
+  ]) {
+    writeFileSync(list, good.replace(from, to));
+    assert.throws(run, (err) => why.test(String(err.stderr)), to);
+    assert.ok(existsSync(join(copy, 'dist/index.html')), `${to}: the last build kept`);
+  }
+});
+
 test('every page has complete, sane metadata', () => {
   for (const { file, src } of html) {
     assert.match(src, /^<!DOCTYPE html>\n<html lang="en">/, file);
