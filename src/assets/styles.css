@@ -55,6 +55,11 @@
 }
 
 html {
+  /* A desktop scrollbar's room is kept whether or not the page is long
+     enough to need one, so the page's width doesn't change when it starts
+     or stops (the results' height can do that). Phones' scrollbars overlay
+     the page and take no room. */
+  scrollbar-gutter: stable;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   scroll-padding-top: 5rem;
@@ -675,6 +680,18 @@ summary,
   align-content: start;
   min-width: 0;
   margin-bottom: 12px;
+}
+
+/* Said, and focused, where a field or Reset was hidden while it had focus
+   (app.js keepFocus), until it's shown again. */
+.focus-note {
+  display: block;
+  grid-column: 1 / -1;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 12px;
+  font-size: 0.92rem;
+  color: var(--muted);
 }
 
 /* Dropdowns need the room to show the chosen option. */

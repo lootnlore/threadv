@@ -82,6 +82,18 @@ function avoidableSplits(root) {
   return [...new Set(found)];
 }
 
+/**
+ * Runs in the page: the note focused in place of the hidden `hidden` (see
+ * keepFocus in app.js), as [its words, whether it sits right where that is,
+ * whether it's in view], or what has focus instead.
+ */
+function focusNote(hidden) {
+  const at = document.activeElement;
+  if (!at.matches('.focus-note')) return [`focus on <${at.tagName.toLowerCase()} class="${at.className}">`];
+  const box = at.getBoundingClientRect();
+  return [at.textContent, at.nextElementSibling === document.querySelector(hidden), box.bottom > 0 && box.top < innerHeight];
+}
+
 let server;
 let base;
 let browser;
@@ -115,8 +127,12 @@ if (chromium) {
     if (DIST) rmSync(DIST, { recursive: true, force: true });
   });
 
+  // A phone's window (the default) is a phone's: its scrollbars overlay
+  // the page, so the gutter kept for desktop scrollbars (styles.css) takes
+  // no room, as on a real one.
   const open = async (path = '/', options = {}) => {
-    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...options });
+    const viewport = options.viewport ?? { width: 390, height: 844 };
+    const context = await browser.newContext({ viewport, isMobile: viewport.width < 800, ...options });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -513,21 +529,20 @@ if (chromium) {
     assert.deepEqual(pasted.errors, []);
     await pasted.context.close();
     // A control in the form hidden while it has focus (its mode or a
-    // setting changed under it, by a link at load or later): focus goes to
-    // the form around where it was, in view, where the keys typed on
+    // setting changed under it, by a link at load or later): a note in its
+    // place says why and takes focus, in view, where the keys typed on
     // (digits, End, Home, arrows, Space) change nothing: not another field,
-    // the mode or a box. Focusable only while it has focus.
-    const around = (page, sel) =>
-      page.evaluate((hidden) => {
-        const at = document.activeElement;
-        const box = at.getBoundingClientRect();
-        return [at !== document.body && at.contains(document.querySelector(hidden)), box.bottom > 0 && box.top < innerHeight];
-      }, sel);
+    // the mode or a box. Tab and Shift+Tab carry on from there. The note
+    // stays while the control is hidden (gone sooner, it would move the
+    // form under what's focused next), and goes when it's shown again,
+    // handing focus back if it still has it.
+    const notes = (page) => page.evaluate(() => [...document.querySelectorAll('.focus-note')].map((n) => n.textContent));
     const typeOn = async (page) => {
       for (const key of ['7', 'End', 'Home', 'ArrowRight', 'ArrowLeft', 'Space', '5']) await page.keyboard.press(key);
       await settle(page);
       return page.evaluate(() => [document.querySelector('[role="tab"][aria-selected="true"]').dataset.mode, document.querySelector('#f-price').value, location.hash]);
     };
+    const COST_NOTE = ['You paid: not used in Max buy mode.', true, true];
     // Max buy hides the cost.
     const hiddenAtLoad = await openPaintingFirst('/#mode=maxbuy&price=50');
     await hiddenAtLoad.page.focus('#f-cost');
@@ -536,31 +551,43 @@ if (chromium) {
     hiddenAtLoad.release();
     await hiddenAtLoad.page.waitForFunction(() => 'ready' in document.querySelector('[data-calc]').dataset, null, { timeout: 5000 });
     await settle(hiddenAtLoad.page);
-    assert.deepEqual(await around(hiddenAtLoad.page, '[data-field="cost"]'), [true, true], 'at load: focus around where the cost was, in view');
+    assert.deepEqual(await hiddenAtLoad.page.evaluate(focusNote, '[data-field="cost"]'), COST_NOTE, "at load: a note in the cost's place, in view");
     assert.deepEqual(await typeOn(hiddenAtLoad.page), ['maxbuy', '50', '#mode=maxbuy&price=50'], 'at load: the keys typed on change nothing');
+    await hiddenAtLoad.page.keyboard.press('Shift+Tab');
+    await settle(hiddenAtLoad.page);
+    assert.deepEqual([await hiddenAtLoad.page.evaluate(() => document.activeElement.id), await notes(hiddenAtLoad.page)], ['f-price', [COST_NOTE[0]]], 'Shift+Tab: the field before the cost; the note stays');
     assert.deepEqual(hiddenAtLoad.errors, []);
     await hiddenAtLoad.context.close();
     const hiddenLater = await open('/');
+    const to = async (mode) => {
+      await hiddenLater.page.evaluate((m) => (location.hash = `#mode=${m}&price=50`), mode);
+      await hiddenLater.page.waitForFunction((m) => document.querySelector('[data-field="cost"]').hidden === (m === 'maxbuy'), mode, { timeout: 3000 });
+      await settle(hiddenLater.page);
+    };
     await hiddenLater.page.focus('#f-cost');
-    await hiddenLater.page.evaluate(() => (location.hash = '#mode=maxbuy&price=50'));
-    await hiddenLater.page.waitForFunction(() => document.querySelector('[data-field="cost"]').hidden, null, { timeout: 3000 });
-    assert.deepEqual(await around(hiddenLater.page, '[data-field="cost"]'), [true, true], 'by a link later: the same');
+    await to('maxbuy');
+    assert.deepEqual(await hiddenLater.page.evaluate(focusNote, '[data-field="cost"]'), COST_NOTE, 'by a link later: the same');
     const [chosen, price, hash] = await typeOn(hiddenLater.page);
     assert.deepEqual([chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['maxbuy', '50', 'maxbuy'], 'by a link later: the keys typed on change nothing');
+    await to('profit');
+    assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-cost', []], 'the cost shown again: focus back on it, and the note goes');
+    await to('maxbuy');
     await hiddenLater.page.keyboard.press('Tab');
-    assert.equal(await hiddenLater.page.evaluate(() => document.querySelectorAll('.calc-input [tabindex="-1"]:not([role="tab"])').length), 0, 'focus moved on: focusable no more');
+    await settle(hiddenLater.page);
+    assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-ship', [COST_NOTE[0]]], 'Tab: the field after the cost; the note stays');
+    await to('profit');
+    assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-ship', []], 'the cost shown again: the note goes, focus left where it is');
     assert.deepEqual(hiddenLater.errors, []);
     await hiddenLater.context.close();
     // Settings' controls the same way: eBay's rate field (a link changing
     // its category from custom), and Reset (a shared link, which has no
-    // Reset): focus around them, the view where the visitor was, and a
-    // Space changes no box.
-    for (const [how, prepare, hidden] of [
+    // Reset): the view where the visitor was, and a Space changes no box.
+    for (const [how, prepare, hidden, says] of [
       ["eBay's rate field", async (page) => {
         await page.selectOption('#f-ebayCategory', 'custom');
         await page.focus('#f-ebayCustomRate');
-      }, '[data-field="ebayCustomRate"]'],
-      ['Reset', (page) => page.focus('[data-reset]'), '[data-reset]'],
+      }, '[data-field="ebayCustomRate"]', 'eBay category rate: not used with this eBay category.'],
+      ['Reset', (page) => page.focus('[data-reset]'), '[data-reset]', 'Reset: not offered on a shared result.'],
     ]) {
       const settings = await open('/');
       await settings.page.locator('.tune > summary').click();
@@ -570,14 +597,14 @@ if (chromium) {
       await settings.page.evaluate(() => (location.hash = '#s=1&mode=profit&price=40&cost=8&ebayCategory=most'));
       await settings.page.waitForFunction((sel) => document.querySelector(sel).closest('[hidden]'), hidden, { timeout: 3000 });
       await settle(settings.page);
-      const [aroundIt, inView] = await around(settings.page, hidden);
+      const noted = await settings.page.evaluate(focusNote, hidden);
       const viewAfter = await settings.page.evaluate(() => scrollY);
       await settings.page.keyboard.press('Space'); // (it may scroll the page, as on any text)
       await settle(settings.page);
       assert.deepEqual(
-        [aroundIt, inView, viewAfter, await settings.page.locator('.result').count()],
-        [true, true, scrolledTo, 9],
-        `${how} hidden by a link: focus around it, in view, the view unmoved; a Space changes no box`,
+        [noted, viewAfter, await settings.page.locator('.result').count()],
+        [[says, true, true], scrolledTo, 9],
+        `${how} hidden by a link: a note in its place, the view unmoved; a Space changes no box`,
       );
       assert.deepEqual(settings.errors, []);
       await settings.context.close();
@@ -1452,8 +1479,8 @@ if (chromium) {
       await tp.getByRole('tab', { name: 'Profit' }).click();
     }
     // A field the new mode hides, still drawn and typed into during the
-    // hold: once it's hidden, focus goes to the form around where it was,
-    // not dropped to the page, nor into another field (which keys typed on
+    // hold: once it's hidden, focus goes to a note in its place, not
+    // dropped to the page, nor into another field (which keys typed on
     // would change).
     aim = await tapFirstRow();
     await tp.focus('[role="tab"][aria-selected="true"]');
@@ -1462,7 +1489,7 @@ if (chromium) {
     for (let i = 0; i < 6 && (await tp.evaluate(() => document.activeElement.id)) !== 'f-cost'; i++) await tp.keyboard.press('Tab');
     await tp.keyboard.type('5');
     await pan(aim.finger);
-    assert.deepEqual([await selectedTab(), await tp.evaluate(() => document.activeElement.contains(document.querySelector('[data-field="cost"]')))], ['Max buy', true], 'focus kept, around where the field was');
+    assert.deepEqual([await selectedTab(), await tp.evaluate(focusNote, '[data-field="cost"]')], ['Max buy', ['You paid: not used in Max buy mode.', true, true]], 'focus kept, on a note where the field was');
     await tp.getByRole('tab', { name: 'Profit' }).click();
     // Go is dropped by a tap into the field itself (placing the caret is
     // editing on), and by typing on or moving the caret after it.
@@ -1481,8 +1508,8 @@ if (chromium) {
     }
     // Reset is for your own view only. A shared link loaded during a hold
     // leaves it drawn until the finger lifts, but it does nothing: saved
-    // settings stay. Once it's hidden, focus on it goes to the control
-    // before it, not to the page.
+    // settings stay. Once it's hidden, focus on it goes to a note in its
+    // place, not to the page.
     await tp.evaluate(() => document.querySelector('.tune').setAttribute('open', ''));
     await tp.fill('#f-taxRate', '9'); // a saved setting
     await tp.locator('#f-taxRate').press('Tab');
@@ -1498,9 +1525,9 @@ if (chromium) {
     await tp.keyboard.press('Enter');
     await pan(aim.finger);
     assert.deepEqual(
-      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), await tp.evaluate(() => document.activeElement.contains(document.querySelector('[data-reset]')))],
+      [await tp.evaluate(() => localStorage.getItem('threadvet:settings:v2')), await tp.isVisible('[data-reset]'), (await tp.evaluate(focusNote, '[data-reset]'))[1]],
       [savedBefore, false, true],
-      'Reset did nothing on a shared link; hidden once drawn, its focus went to the form around it',
+      'Reset did nothing on a shared link; hidden once drawn, its focus went to a note in its place',
     );
     // Likewise focus on the shared note's link when the note goes (back on your own view).
     await tp.focus('[data-shared-note] a');
@@ -2523,7 +2550,7 @@ if (chromium) {
             const r = el.getBoundingClientRect();
             if (r.width && (r.right > box.right + 0.5 || r.left < box.left - 0.5)) found.push(`outside the card: ${el.className || el.tagName}`);
           }
-          if (document.documentElement.scrollWidth > innerWidth) found.push('page scrolls sideways');
+          if (document.documentElement.scrollWidth > document.documentElement.clientWidth) found.push('page scrolls sideways');
           // Nor may any text spill out of its own box (e.g. "Marketplace" in a checkbox column)...
           for (const el of calc.querySelectorAll('label, .check, [role=tab], .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
             if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) found.push(`text spills out: ${el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}"`);
@@ -2610,7 +2637,7 @@ if (chromium) {
         const align = await page.evaluate(() => {
           const row = document.querySelector('.result');
           const left = (sel) => row.querySelector(sel).getBoundingClientRect().left;
-          return { sub: left('.result-sub'), bd: left('.breakdown dl'), name: left('.pname'), rankShown: row.querySelector('.rank').offsetWidth > 0, wide: innerWidth / parseFloat(getComputedStyle(document.documentElement).fontSize) > 30 };
+          return { sub: left('.result-sub'), bd: left('.breakdown dl'), name: left('.pname'), rankShown: row.querySelector('.rank').offsetWidth > 0, wide: document.documentElement.clientWidth / parseFloat(getComputedStyle(document.documentElement).fontSize) > 30 };
         });
         assert.ok(Math.abs(align.bd - align.sub) <= 1, `${where}: breakdown at ${align.bd}, details line at ${align.sub}`);
         if (align.rankShown && align.wide) assert.ok(Math.abs(align.sub - align.name) <= 1, `${where}: details line at ${align.sub}, name at ${align.name}`);
@@ -3071,6 +3098,28 @@ if (chromium) {
     }
   });
 
+  test("a desktop scrollbar coming or going leaves the results column's width as it was", async () => {
+    // Real desktop scrollbars, which take room (headless hides them).
+    const desktop = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined, ignoreDefaultArgs: ['--hide-scrollbars'] });
+    try {
+      const page = await (await desktop.newContext({ viewport: { width: 1000, height: 1400 } })).newPage();
+      await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+      const column = () => page.evaluate(() => [document.querySelector('[data-verdict]').clientWidth, document.documentElement.scrollHeight > innerHeight]);
+      const [long, overflows] = await column();
+      // Only the calculator left: the page no longer needs a scrollbar.
+      await page.evaluate(() => {
+        const calc = document.querySelector('#calculator');
+        for (const el of document.body.querySelectorAll('*')) if (!el.contains(calc) && !calc.contains(el)) el.style.display = 'none';
+      });
+      const short = await column();
+      await page.evaluate(() => (document.documentElement.style.scrollbarGutter = 'auto'));
+      const [unkept] = await column();
+      assert.deepEqual([overflows, short, unkept - long], [true, [long, false], 15], 'its room kept: the same width either way (15px more without that)');
+    } finally {
+      await desktop.close();
+    }
+  });
+
   test('fee tables show their numbers on a phone without scrolling sideways', async () => {
     for (const width of [320, 360, 390]) {
       const { context, page } = await open(null, { viewport: { width, height: 800 } });
@@ -3111,7 +3160,7 @@ if (chromium) {
             for (const path of pages) {
               await page.goto(base + path, { waitUntil: 'domcontentloaded' });
               await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
-              const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+              const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
               const found = [...(over > 0 ? [`scrolls sideways +${over}px`] : []), ...(await page.evaluate(avoidableSplits, 'body'))];
               if (found.length) problems.push(`${env ? 'configured' : 'default'}, ${width}px, text ${text * 100}%, ${path}: ${found.join('; ')}`);
             }
@@ -3145,7 +3194,7 @@ if (chromium) {
                 beside: nav.left >= brand.right - 1 && nav.top < brand.bottom,
                 shown,
                 cut: shown && name.right > brand.right + 1,
-                sideways: document.documentElement.scrollWidth - innerWidth,
+                sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
               };
             });
             assert.ok(r.beside, `${where}: nav wrapped under the logo`);

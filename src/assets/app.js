@@ -241,16 +241,28 @@ function setup(root) {
    * it (the list redrawn, the prompt in its place, a field, Reset or the
    * shared note hidden), rather than dropped to the page: the same row in
    * the new list, else the verdict for anything in the results column.
-   * Something in the form (its mode or a setting changed under it) hands
-   * focus to the nearest part of the form still shown around it, focusable
-   * only while it has focus: where the visitor was, in view, and where the
-   * keys typed on change nothing (another control would take them: a field
-   * the digits, a box the space, a tab or a list the arrows). Run once the
-   * draw is done, so the verdict focused is the new one (and isn't then
-   * read out again). A draw never runs while a press holds it: this may
-   * scroll.
+   * A field or Reset hidden (its mode or a setting changed under it) leaves
+   * a short note in its place saying why, focused instead: where the
+   * visitor was, so Tab and Shift+Tab carry on from there, in view, read
+   * out in a few words, and where the keys typed change nothing (another
+   * control would take them: a field the digits, a box the space, a tab or
+   * a list the arrows). The note stays while what it stands for is hidden
+   * (gone sooner, it would move the form under the next thing focused),
+   * and goes in the draw that shows it again, handing focus back if it
+   * still has it. Run once the draw is done, so the verdict focused is the
+   * new one (and isn't then read out again). A draw never runs while a
+   * press holds it: this may scroll.
    */
-  function keepFocus(had) {
+  const notes = new Map(); // a hidden control -> the note in its place
+  function keepFocus(had, m) {
+    let back = null;
+    for (const [control, note] of notes) {
+      if (control.closest('[hidden]')) continue;
+      if (had === note) back = control;
+      note.remove();
+      notes.delete(control);
+    }
+    if (back) return back.focus({ preventScroll: true });
     if (!had || had === document.body || (had.isConnected && !had.closest('[hidden]'))) return;
     const row = had.closest('.result')?.dataset.id; // (closest() works in a list since replaced)
     const summary = row && resultsEl.querySelector(`[data-id="${row}"] summary`);
@@ -259,13 +271,21 @@ function setup(root) {
       return summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
     }
     if (!had.isConnected || had.closest('.calc-output')) return focusVerdict();
-    let around = had.parentElement;
-    while (around !== root && !visible(around)) around = around.parentElement;
-    if (!around.hasAttribute('tabindex')) {
-      around.tabIndex = -1;
-      around.addEventListener('blur', () => around.removeAttribute('tabindex'), { once: true });
-    }
-    around.focus({ preventScroll: true });
+    const note = document.createElement('span');
+    note.className = 'focus-note';
+    note.tabIndex = -1;
+    note.textContent = whyHidden(had, m);
+    had.closest('[hidden]').before(note); // (a field's box, or Reset)
+    notes.set(had, note);
+    note.focus({ preventScroll: true });
+  }
+  /** Why the draw for mode `m` hides `control` (a field or Reset), for the note in its place. */
+  function whyHidden(control, m) {
+    if (control === resetBtn) return 'Reset: not offered on a shared result.';
+    const key = control.closest('[data-field]').dataset.field;
+    const label = labelOf(key);
+    if (MODES[m].hidden.includes(key)) return `${label}: not used in ${MODES[m].label} mode.`;
+    return `${label}: not used with this eBay category.`; // the custom rate (see onShow)
   }
   /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
   const onShow = (key, m, input) =>
@@ -583,7 +603,7 @@ function setup(root) {
       if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
       reveal = false;
       paint(next);
-      keepFocus(had);
+      keepFocus(had, m);
     };
     if (holding()) drawDue = draw;
     else {
@@ -636,13 +656,11 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
-    const was = resultsEl.classList.contains('stacked');
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
-    fittedAt = fitKey(); // what that measure was taken at (no layout of its own: it's fresh)
     resultsEl.classList.toggle('stacked', squeezed);
-    if (squeezed !== was) fittedAt = fitKey(); // as it now stands (see below: a scrollbar)
+    fittedAt = fitKey(); // as it now stands (see below)
   }
   // Refit, before the frame paints, when the column's width changes (a
   // phone turned: watched on the verdict, which spans it) or the text's size
@@ -650,12 +668,12 @@ function setup(root) {
   // alone): compared with what the list was last fitted at, so the
   // verdict's height (its own words rewrapping) changes nothing, and a
   // change before the first frame is caught. Neither depends on the list's
-  // fit, so fitting from here doesn't resize what's watched, but for one
-  // case: stacking makes the page outgrow the window (or no longer), and a
-  // scrollbar that takes room (desktop scrollbars, not phones') comes or
-  // goes. Then the column changes in the callback: the browser reports a
-  // "ResizeObserver loop" and looks again next frame, and the fit, recorded
-  // as it now stands, settles at once.
+  // fit, so fitting from here doesn't resize what's watched. (A desktop
+  // scrollbar coming or going as the list's height changes would: its room
+  // is kept for it, see styles.css. Where it can't be, the fit is recorded
+  // as it ends, scrollbar and all, and stands: stacking narrows the column
+  // only for names already squeezed, unstacking widens it only for names
+  // that fit.)
   const probe = document.createElement('span');
   probe.className = 'fit-probe';
   probe.setAttribute('aria-hidden', 'true');

@@ -4,7 +4,7 @@
 //
 //   node scripts/build.mjs            -> dist/
 //   node scripts/build.mjs --out tmp  -> tmp/
-import { mkdir, readFile, writeFile, rm, cp, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, cp, readdir, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outArg = process.argv.indexOf('--out');
 if (outArg > -1 && !/^[^-]/.test(process.argv[outArg + 1] ?? '')) throw new Error('--out needs a directory');
 const OUT = resolve(ROOT, outArg > -1 ? process.argv[outArg + 1] : 'dist');
+// Built beside OUT, then swapped in once complete: a build that stops
+// part-way leaves the last one as it was.
+const STAGE = join(dirname(OUT), `.${basename(OUT)}.building`);
 const MARKER = '.threadvet-build';
 const quiet = process.argv.includes('--quiet');
 
@@ -34,7 +37,7 @@ const hash = (...parts) => {
   return h.digest('hex').slice(0, 10);
 };
 
-/** The build wipes OUT, so only allow folders it created (or new/empty ones). */
+/** The build replaces `dir` (OUT, or STAGE), so only allow folders it created (or new/empty ones). */
 async function assertSafeToClean(dir) {
   const rel = relative(dir, ROOT);
   if (!rel.startsWith('..')) throw new Error(`Refusing to build into ${dir}: it contains the project.`);
@@ -99,7 +102,7 @@ function validateConfig() {
 }
 
 async function write(rel, content) {
-  const file = join(OUT, rel);
+  const file = join(STAGE, rel);
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, content);
 }
@@ -114,14 +117,33 @@ function checkAssetNames() {
   for (const [src, name] of MODULES) {
     if (basename(src).replace(/\.m?js$/, '') !== name) throw new Error(`${src}: a module is published under its file's name (what its importers name it), not "${name}"`);
   }
+  for (const needed of ['app', 'offline', 'analytics']) {
+    if (!all.some(([, name]) => name === needed)) throw new Error(`scripts/assets.mjs: nothing is published as "${needed}", the name the pages load it by`);
+  }
 }
 
 async function build() {
-  checkAssetNames(); // before anything is wiped
+  checkAssetNames();
   const todo = validateConfig();
   await assertSafeToClean(OUT);
-  await rm(OUT, { recursive: true, force: true });
-  await write(MARKER, 'Created by scripts/build.mjs. This folder is wiped on every build.\n');
+  await assertSafeToClean(STAGE); // one a build that crashed left behind, or someone's own folder of that name
+  await rm(STAGE, { recursive: true, force: true });
+  try {
+    const built = await buildInto();
+    await rm(OUT, { recursive: true, force: true });
+    await rename(STAGE, OUT);
+    if (!quiet) {
+      console.log(`Built ${built.pages.length} pages to ${OUT} (cache ${built.swVersion}) for ${config.url}`);
+      if (todo.length) console.log(`\nTo start earning:\n${todo.map((t) => `  - ${t}`).join('\n')}\n`);
+    }
+  } finally {
+    await rm(STAGE, { recursive: true, force: true }); // gone already, unless the build stopped
+  }
+}
+
+/** Writes the whole site to STAGE. */
+async function buildInto() {
+  await write(MARKER, 'Created by scripts/build.mjs. This folder is replaced on every build.\n');
 
   // ---- assets: content-hashed names, so a URL always means the same bytes ----
   const css = minifyCss(await readFile(join(ROOT, 'src/assets/styles.css'), 'utf8'));
@@ -151,9 +173,9 @@ async function build() {
   await write('assets/manifest.json', `${JSON.stringify(Object.values(published), null, 2)}\n`);
   // Skip dotfiles (.DS_Store...): nginx refuses them, which would break precaching.
   const iconFiles = (await readdir(join(ROOT, 'src/assets/icons'))).filter((f) => !f.startsWith('.')).sort();
-  for (const f of iconFiles) await cp(join(ROOT, 'src/assets/icons', f), join(OUT, 'assets/icons', f));
-  await cp(join(ROOT, 'src/assets/og.png'), join(OUT, 'assets/og.png'));
-  await cp(join(ROOT, 'src/assets/favicon.ico'), join(OUT, 'favicon.ico'));
+  for (const f of iconFiles) await cp(join(ROOT, 'src/assets/icons', f), join(STAGE, 'assets/icons', f));
+  await cp(join(ROOT, 'src/assets/og.png'), join(STAGE, 'assets/og.png'));
+  await cp(join(ROOT, 'src/assets/favicon.ico'), join(STAGE, 'favicon.ico'));
 
   const url = (name) => `/assets/${name}`;
   const assets = {
@@ -239,11 +261,6 @@ ${indexable.map((p) => `<url><loc>${abs(config, p.path)}</loc><lastmod>${p.lastm
     .replace("'__VERSION__'", JSON.stringify(swVersion))
     .replace('__PRECACHE__', JSON.stringify(precache));
   await write('sw.js', sw);
-
-  if (!quiet) {
-    console.log(`Built ${pages.length} pages to ${OUT} (cache ${swVersion}) for ${config.url}`);
-    if (todo.length) console.log(`\nTo start earning:\n${todo.map((t) => `  - ${t}`).join('\n')}\n`);
-  }
   return { pages, swVersion };
 }
 
