@@ -569,12 +569,20 @@ if (chromium) {
     assert.deepEqual(await hiddenLater.page.evaluate(focusNote, '[data-field="cost"]'), COST_NOTE, 'by a link later: the same');
     const [chosen, price, hash] = await typeOn(hiddenLater.page);
     assert.deepEqual([chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['maxbuy', '50', 'maxbuy'], 'by a link later: the keys typed on change nothing');
+    // Drawn again, the cost still hidden: the note stands, focus on it.
+    await hiddenLater.page.evaluate(() => (location.hash = '#mode=maxbuy&price=60'));
+    await hiddenLater.page.waitForFunction(() => document.querySelector('#f-price').value === '60', null, { timeout: 3000 });
+    await settle(hiddenLater.page);
+    assert.deepEqual((await hiddenLater.page.evaluate(focusNote, '[data-field="cost"]')).slice(0, 2), COST_NOTE.slice(0, 2), 'drawn again, the cost still hidden: the note stands');
     await to('profit');
     assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-cost', []], 'the cost shown again: focus back on it, and the note goes');
     await to('maxbuy');
     await hiddenLater.page.keyboard.press('Tab');
     await settle(hiddenLater.page);
     assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-ship', [COST_NOTE[0]]], 'Tab: the field after the cost; the note stays');
+    await hiddenLater.page.keyboard.type('1');
+    await settle(hiddenLater.page);
+    assert.deepEqual(await notes(hiddenLater.page), [COST_NOTE[0]], 'typed into that field (drawn again): the note stays, so nothing moves under it');
     await to('profit');
     assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-ship', []], 'the cost shown again: the note goes, focus left where it is');
     assert.deepEqual(hiddenLater.errors, []);
