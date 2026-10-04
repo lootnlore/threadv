@@ -104,6 +104,7 @@ function setup(root) {
   let painted = null;
   let shown = null; // what it shows, or will once no press holds its drawing
   let dirty = ''; // the text field typed into since the last judged render
+  let loadedEarly = {}; // what the settings changed before the script ran would have been (see load)
   const canShare = typeof navigator.share === 'function';
   const shareSupported = Boolean(navigator.clipboard) || canShare;
 
@@ -117,8 +118,8 @@ function setup(root) {
     else el.value = String(value);
   }
 
-  function setPlatforms(ids) {
-    for (const box of form.querySelectorAll('input[name="platform"]')) box.checked = ids.includes(box.value);
+  function setPlatforms(ids, keep = []) {
+    for (const box of form.querySelectorAll('input[name="platform"]')) if (!keep.includes(box)) box.checked = ids.includes(box.value);
   }
 
   // A comma read as the decimal point, shown as one where a value is taken
@@ -133,7 +134,8 @@ function setup(root) {
     if (document.activeElement === el) el.setSelectionRange(...caret); // the caret (or selection) stays as it was
   }
 
-  function readForm() {
+  /** The form's values; `standIn` gives some in place of what their fields hold (see render). */
+  function readForm(standIn = {}) {
     const data = new FormData(form);
     const values = {};
     // A setting with no field on the page (say, a new option declared before its
@@ -141,7 +143,7 @@ function setup(root) {
     // comma read as the decimal point is a point here, so a link, saved
     // settings and the result don't depend on which one was typed.
     for (const key of [...MAIN_KEYS, ...TUNE_KEYS]) {
-      const raw = field(key) ? (data.get(key) ?? '') : DEFAULTS[key];
+      const raw = has(standIn, key) ? standIn[key] : field(key) ? (data.get(key) ?? '') : DEFAULTS[key];
       values[key] = NUMERIC.includes(key) ? withDecimalPoint(key, raw) : raw;
     }
     values.depopBoost = data.has('depopBoost');
@@ -152,29 +154,32 @@ function setup(root) {
 
   /**
    * Fills the form from the link, else saved settings, else the defaults.
-   * `typed`: text fields typed into before the script ran (a browser that
-   * paints first lets the visitor start), which keep what was typed.
+   * `kept`: controls the visitor changed before the script ran (a browser
+   * that paints first lets them start), which keep what they show. Returns
+   * what each kept setting would have been, by name.
    */
-  function load(typed = []) {
+  function load(kept = []) {
     reveal = true;
     dirty = ''; // whatever was being typed is replaced
     const params = linkParams();
     sharedView = params.has(SHARE_FLAG);
     const saved = sharedView ? {} : storage.read();
     const tune = sharedView ? Object.fromEntries(params) : (saved.values ?? {});
-    const fill = (key, value) => typed.includes(key) || setValue(key, value);
+    const loaded = {};
+    const fill = (key, value) => (kept.includes(field(key)) ? (loaded[key] = value) : setValue(key, value));
     for (const key of MAIN_KEYS) fill(key, params.has(key) ? params.get(key) : DEFAULTS[key]);
     for (const key of TUNE_KEYS) fill(key, has(tune, key) ? tune[key] : DEFAULTS[key]);
-    for (const key of NUMERIC) if (field(key) && !typed.includes(key)) showPoint(field(key));
+    for (const key of NUMERIC) if (field(key) && field(key) !== document.activeElement) showPoint(field(key)); // (never the one being typed in)
     if (sharedView) {
-      setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS);
+      setPlatforms(params.get('platforms')?.split(',') ?? ALL_IDS, kept);
     } else {
       // Saved as the marketplaces the user turned OFF, so ones added later show up.
       const hidden = Array.isArray(saved.hidden) ? saved.hidden : [];
-      setPlatforms(ALL_IDS.filter((id) => !hidden.includes(id)));
+      setPlatforms(ALL_IDS.filter((id) => !hidden.includes(id)), kept);
     }
     const m = params.get('mode');
     mode = m && has(MODES, m) ? m : 'profit';
+    return loaded;
   }
 
   // Only what the user changed is stored, so when a default fee rate is
@@ -513,16 +518,24 @@ function setup(root) {
    * even then. The list is redrawn only when the result changed; what a
    * render draws waits while a press holds it (see presses).
    */
-  function render({ save = false, typing = '' } = {}) {
+  function render({ save = false, typing = '', standIn = {} } = {}) {
     renderSoon.cancel(); // this render reads everything a queued one would
-    const state = readForm();
+    const state = readForm(standIn);
     const input = normalizeInputs(state.values);
     // A marketplace's own fee page always shows it, even if the visitor hid it.
     const ids = focus && !state.platforms.includes(focus) ? [...state.platforms, focus] : state.platforms;
     const checks = check(state.values, ids, input);
     const typed = checks.find((c) => c.key === typing);
     const waits = typed && (typed.problem || typed.missing) && (!flagged.has(typing) || onItsWay(typing, state.values[typing], { sellPrice: typed.needed }));
-    if (typed && (waits || stillTyping(typing, field(typing).value))) return;
+    if (typed && (waits || stillTyping(typing, field(typing).value))) {
+      // Nothing changes until its value is usable. The first render has
+      // nothing on screen to keep (the field typed into before the script
+      // ran): its value as loaded stands in, and it's still to be judged.
+      if (rendered || !has(loadedEarly, typing)) return;
+      render({ save, standIn: { [typing]: loadedEarly[typing] } });
+      dirty = typing;
+      return;
+    }
     dirty = '';
     rendered = state;
     for (const c of checks) {
@@ -607,6 +620,7 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
+    fittedAt = fitKey();
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
@@ -614,24 +628,20 @@ function setup(root) {
   }
   // Refit, before the frame paints, when the column's width changes (a
   // phone turned: watched on the verdict, which spans it) or the text's size
-  // or spacing does (watched on a hidden name, whose width is its text's
-  // alone). Neither depends on the list's fit, so fitting from here can't
-  // resize what's watched (a "ResizeObserver loop"); the verdict's height
-  // (its own words rewrapping) changes nothing.
+  // or spacing does (watched on a hidden word, whose width is its text's
+  // alone): compared with what the list was last fitted at, so the
+  // verdict's height (its own words rewrapping) changes nothing, and a
+  // change before the first frame is caught. Neither depends on the list's
+  // fit, so fitting from here can't resize what's watched (a
+  // "ResizeObserver loop").
   const probe = document.createElement('span');
   probe.className = 'fit-probe';
   probe.setAttribute('aria-hidden', 'true');
   probe.textContent = 'Marketplace';
   resultsEl.after(probe);
-  const widths = new Map(); // each watched one's, as last seen (the first look sets it: paint fits the list itself)
-  const refit = new ResizeObserver((entries) => {
-    let changed = false;
-    for (const { target, contentRect } of entries) {
-      if (widths.has(target) && widths.get(target) !== contentRect.width) changed = true;
-      widths.set(target, contentRect.width);
-    }
-    if (changed && resultsEl.clientWidth) fitResults();
-  });
+  const fitKey = () => `${verdictEl.clientWidth} ${probe.offsetWidth}`;
+  let fittedAt = '';
+  const refit = new ResizeObserver(() => resultsEl.clientWidth && fitKey() !== fittedAt && fitResults());
   refit.observe(verdictEl);
   refit.observe(probe);
 
@@ -652,11 +662,11 @@ function setup(root) {
 
   // ---- modes (tabs) ----
 
-  function setMode(next, { moveFocus = false, save = false } = {}) {
+  function setMode(next, { moveFocus = false, save = false, typing = '' } = {}) {
     mode = next;
     // The tablist's one tab stop is focus's, not drawing: it moves at once.
     for (const tab of tabs) tab.tabIndex = tab.dataset.mode === mode ? 0 : -1;
-    render({ save }); // which draws the tabs (when no press holds it), and the mode's fields and hints
+    render({ save, typing }); // which draws the tabs (when no press holds it), and the mode's fields and hints
     if (moveFocus) {
       // Focus too moves at once: that moves nothing under a press. The
       // scroll that brings the tab into view, the least one (clear of the
@@ -828,15 +838,15 @@ function setup(root) {
     });
   }
 
-  // Typed before the script ran: taken in as the visitor's own edits (the
-  // one still being typed in waiting as any keystroke does).
-  const typedEarly = [...MAIN_KEYS, ...TUNE_KEYS].filter((key) => field(key)?.type === 'text' && field(key).value !== field(key).defaultValue);
-  load(typedEarly);
-  setMode(mode);
-  if (typedEarly.length) {
-    dirty = typedEarly.find((key) => field(key) === document.activeElement) ?? '';
-    render({ save: true, typing: dirty });
-  }
+  // Changed before the script ran (where a browser paints first): kept, as
+  // the visitor's own edits, and saved; the field still being typed in
+  // waits as any keystroke does (see render).
+  const changedEarly = [...form.querySelectorAll('input, select')].filter((el) =>
+    el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.tagName === 'SELECT' ? [...el.options].some((o) => o.selected !== o.defaultSelected) : el.value !== el.defaultValue,
+  );
+  loadedEarly = load(changedEarly);
+  const typingEarly = changedEarly.includes(document.activeElement) && document.activeElement.type === 'text' ? document.activeElement.name : '';
+  setMode(mode, { save: changedEarly.length > 0, typing: typingEarly });
   spoken = verdictText(); // the starting verdict is already on screen: not news
   // A pasted link, or Back/Forward between results, only changes the
   // fragment (no reload), so load that state. Plain anchors like the skip

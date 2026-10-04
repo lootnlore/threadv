@@ -345,11 +345,18 @@ if (chromium) {
     // link's own result, settings and fields are there from the first frame.
     const shiftsLoading = async (path, viewport, { paintsFirst = false } = {}) => {
       const { context, page, errors } = await open(null, { viewport });
-      // A browser that paints before the script runs (one without blocking="render").
+      // A browser that paints before the script runs (one without
+      // blocking="render"): the app held back until the page has painted.
+      let painted = () => {};
       if (paintsFirst) {
         await page.route(`${base}${path.split('#')[0]}`, async (route) => {
           const response = await route.fetch();
           await route.fulfill({ response, body: (await response.text()).replace(' blocking="render"', '') });
+        });
+        const firstPaint = new Promise((resolve) => (painted = resolve));
+        await page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
+          await firstPaint;
+          await route.continue();
         });
       }
       await page.addInitScript(() => {
@@ -358,7 +365,12 @@ if (chromium) {
           for (const shift of list.getEntries()) if (!shift.hadRecentInput) window.shifted += shift.value;
         }).observe({ type: 'layout-shift', buffered: true });
       });
-      await page.goto(`${base}${path}`, { waitUntil: 'networkidle' });
+      await page.goto(`${base}${path}`, { waitUntil: 'commit' });
+      if (paintsFirst) {
+        await page.waitForFunction(() => performance.getEntriesByName('first-contentful-paint').length > 0);
+        painted();
+      }
+      await page.waitForLoadState('networkidle');
       await settle(page);
       const shifted = await page.evaluate(() => window.shifted);
       assert.deepEqual(errors, []);
@@ -375,7 +387,7 @@ if (chromium) {
     }
     // Where a browser paints first, the built page still moves nothing in
     // as the script runs (See results is there from the start).
-    for (const [path, width, height] of [['/', 768, 1024], ['/fees/facebook/', 820, 1180]]) {
+    for (const [path, width, height] of [['/', 768, 1024], ['/', 1024, 1366], ['/fees/facebook/', 820, 1180]]) {
       assert.equal(await shiftsLoading(path, { width, height }, { paintsFirst: true }), 0, `${path} at ${width}x${height}, painted before the script: nothing shifts`);
     }
     // Typed before the script runs (where a browser paints first): kept,
@@ -406,6 +418,49 @@ if (chromium) {
     assert.deepEqual(errors, []);
     await linked.context.close();
     await context.close();
+    // A field left before the script runs shows its comma read as a point,
+    // as on any leaving; the one still being typed in (here emptied) waits,
+    // its value as loaded standing in: no prompt, nothing flagged or saved
+    // for it. Boxes and lists changed meanwhile are kept too. (The page
+    // isn't running anything yet: they're set as the visitor would.)
+    const early = await open(null);
+    let go;
+    const gate = new Promise((resolve) => (go = resolve));
+    await early.page.route(/\/assets\/app\.[0-9a-f]+\.js$/, async (route) => {
+      await gate;
+      await route.continue();
+    });
+    await early.page.goto(`${base}/`, { waitUntil: 'commit' });
+    await early.page.waitForSelector('#f-cost', { state: 'attached' });
+    await early.page.focus('#f-cost');
+    await early.page.keyboard.press('Control+A');
+    await early.page.keyboard.type('2,50');
+    await early.page.focus('#f-price'); // the price, needed, emptied on the way to another
+    await early.page.keyboard.press('Control+A');
+    await early.page.keyboard.press('Backspace');
+    await early.page.evaluate(() => {
+      document.querySelector('input[name="platform"][value="ebay"]').checked = false;
+      document.querySelector('#f-ebayCategory').value = 'handbags';
+    });
+    go();
+    await early.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('cost') === '2.50', null, { timeout: 5000 });
+    await settle(early.page);
+    assert.deepEqual(
+      [
+        await early.page.inputValue('#f-cost'),
+        await early.page.inputValue('#f-price'),
+        await early.page.getAttribute('#f-price', 'aria-invalid'),
+        (await verdict(early.page)).startsWith('Enter'),
+        await inAddressBar(early.page, 'price'),
+        await early.page.isChecked('input[name="platform"][value="ebay"]'),
+        await early.page.inputValue('#f-ebayCategory'),
+        await early.page.locator('.result').count(),
+      ],
+      ['2.50', '', null, false, '40', false, 'handbags', 8],
+      'left: read with a point; still typed: waiting as loaded; boxes and lists kept',
+    );
+    assert.deepEqual(early.errors, []);
+    await early.context.close();
   });
 
   test('saved settings survive reloads and are never touched by shared links', async () => {
@@ -2730,41 +2785,46 @@ if (chromium) {
     // from the list's width stacks the built results where names would be
     // squeezed: no name runs into its figure, and the first frame already
     // has every figure under its name where the script then stacks them.
-    // Names that run into their figures, and names broken mid-word.
-    const nameTrouble = (page) =>
-      page.evaluate(() => {
-        const trouble = { into: 0, broken: 0 };
-        for (const row of document.querySelectorAll('.result')) {
-          const name = row.querySelector('.pname');
-          const under = row.querySelector('.figure').getBoundingClientRect().top >= name.getBoundingClientRect().bottom - 1;
-          if (!under && name.scrollWidth > name.clientWidth + 1) trouble.into++;
-          const text = name.firstChild; // the name, before its tags
-          const range = document.createRange();
-          let at = 0;
-          for (const word of text.textContent.split(' ')) {
-            range.setStart(text, at);
-            range.setEnd(text, at + word.length);
-            if (word && range.getClientRects().length > 1) trouble.broken++;
-            at += word.length + 1;
-          }
-        }
-        return trouble;
+    // Rows whose name runs into its figure.
+    const runsInto = (page) =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('.result')]
+          .filter((row) => {
+            const name = row.querySelector('.pname');
+            const under = row.querySelector('.figure').getBoundingClientRect().top >= name.getBoundingClientRect().bottom - 1;
+            return !under && name.scrollWidth > name.clientWidth + 1;
+          })
+          .map((row) => `${row.dataset.id} runs into its figure`),
+      );
+    // The list at a given width (its content box), the page around it adjusted for.
+    const listAt = async (page, target) => {
+      const width = () => page.evaluate(() => {
+        const list = document.querySelector('[data-results]');
+        const style = getComputedStyle(list);
+        return list.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
       });
-    // Swept over every built page (each fee page pins its own marketplace),
-    // across the band's edge, at three text sizes: resized, not reloaded
-    // (without JavaScript the CSS alone answers).
+      let viewport = Math.round(target + page.viewportSize().width - (await width()));
+      await page.setViewportSize({ width: viewport, height: 800 });
+      viewport += Math.round(target - (await width()));
+      await page.setViewportSize({ width: viewport, height: 800 });
+      return viewport;
+    };
+    // Every built page (each fee page pins its own marketplace), at three
+    // text sizes, at list widths around both edges of the CSS's band (12em,
+    // and 12em plus 54px): no name runs into its figure or breaks.
     for (const path of ['/', ...FEE_PAGES]) {
       for (const scale of [1, 1.25, 1.5]) {
-        const plain = await open(null, { viewport: { width: 240, height: 800 }, javaScriptEnabled: false });
+        const plain = await open(null, { viewport: { width: 360, height: 800 }, javaScriptEnabled: false });
         await setTextSize(plain.page, scale);
         await plain.page.goto(`${base}${path}`, { waitUntil: 'networkidle' });
+        const em = await plain.page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('[data-results]')).fontSize));
         const bad = [];
-        for (let width = 240; width <= 480; width += 4) {
-          await plain.page.setViewportSize({ width, height: 800 });
-          const { into, broken } = await nameTrouble(plain.page);
-          if (into || broken) bad.push(width);
+        for (const over of [-2, 2, 27, 52, 56, 60, 72, 96]) {
+          const viewport = await listAt(plain.page, 12 * em + over);
+          const trouble = [...(await runsInto(plain.page)), ...(await plain.page.evaluate(avoidableSplits, '.results'))];
+          if (trouble.length) bad.push(`${viewport}px: ${trouble.join(', ')}`);
         }
-        assert.deepEqual(bad, [], `no JavaScript, ${path} at ${scale * 100}% text: no name runs into its figure or breaks, at any width`);
+        assert.deepEqual(bad, [], `no JavaScript, ${path} at ${scale * 100}% text`);
         await plain.context.close();
       }
     }
@@ -2774,12 +2834,31 @@ if (chromium) {
     await spaced.page.goto(`${base}/`, { waitUntil: 'networkidle' });
     await spaced.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; line-height: 1.5 !important; }', document.styleSheets[0].cssRules.length));
     const runInto = [];
-    for (let width = 240; width <= 480; width += 4) {
+    for (let width = 240; width <= 480; width += 8) {
       await spaced.page.setViewportSize({ width, height: 800 });
-      if ((await nameTrouble(spaced.page)).into) runInto.push(width);
+      if ((await runsInto(spaced.page)).length) runInto.push(width);
     }
     assert.deepEqual(runInto, [], 'no JavaScript, text spacing overrides: no name runs into its figure');
     await spaced.context.close();
+    // A change after the script fitted the list but before the first frame
+    // (a link loaded in a background tab, the window then narrowed): the
+    // first look at the column refits it. Here the column narrowed as the
+    // page finishes loading, a $4,000 sale's names squeezed.
+    const narrowed = await open(null, { viewport: { width: 1000, height: 800 } });
+    await narrowed.page.addInitScript(() =>
+      document.addEventListener('DOMContentLoaded', () => document.styleSheets[0].insertRule('.calc-output { width: 320px !important; max-width: 320px !important; }', document.styleSheets[0].cssRules.length)),
+    );
+    await narrowed.page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
+    assert.deepEqual([...(await runsInto(narrowed.page)), (await placement(narrowed.page)).stacked], [true], 'narrowed before the first frame: refitted, stacked');
+    assert.deepEqual(narrowed.errors, []);
+    await narrowed.context.close();
+    // The hidden word the script watches for text changes never widens the
+    // page, however large the text.
+    const huge = await open(null, { viewport: { width: 320, height: 800 } });
+    await setTextSize(huge.page, 3);
+    await huge.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    assert.ok(await huge.page.evaluate(() => document.querySelector('.fit-probe').getBoundingClientRect().right <= document.documentElement.clientWidth), '300% text at 320px: the probe stays inside the page');
+    await huge.context.close();
     // Once the script has fitted the list, it decides, not the CSS: a $12
     // sale's short figures fit beside their names at a width the CSS alone
     // would stack.

@@ -883,10 +883,11 @@ select:focus-visible {
   margin-top: 16px;
 }
 
-/* It jumps to the verdict, which needs the script. Shown by default, so a
-   script that runs after the first paint moves nothing in. */
+/* See results (a jump to the verdict) and Copy link need the script. Shown
+   by default, so a script that runs after the first paint moves nothing in. */
 @media (scripting: none) {
-  .see-results {
+  .see-results,
+  [data-share] {
     display: none;
   }
 }
@@ -1180,9 +1181,11 @@ select:focus-visible {
 }
 
 /* What app.js watches to see the text change size or spacing: a word on
-   its own, never shown, its width the text's whatever the list's fit. */
+   its own, never shown, its width the text's whatever the list's fit. Held
+   to the right edge, so at any text size it can't widen the page. */
 .fit-probe {
   position: absolute;
+  inset-inline-end: 0;
   visibility: hidden;
   white-space: nowrap;
 }

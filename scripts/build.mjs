@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { stripJs } from './strip-js.mjs';
 import config from '../site.config.mjs';
 import { layout } from '../src/pages/layout.mjs';
 import { abs } from '../src/pages/components.mjs';
@@ -121,9 +122,9 @@ async function build() {
   const published = { css: `styles.${hash(css)}.css` };
   await write(`assets/${published.css}`, css);
   for (const [src, name] of MODULES) {
-    // JS ships unminified: it is small, gzip does most of the work, and a
-    // regex "minifier" is one clever edit away from deleting real code.
-    const code = (await readFile(join(ROOT, src), 'utf8')).replace(
+    // Comments, indentation and blank lines stripped (see strip-js.mjs: it
+    // reads the code as JavaScript does, not by pattern), nothing renamed.
+    const code = stripJs(await readFile(join(ROOT, src), 'utf8')).replace(
       /from (['"])(?:\.\.\/engine\/|\.\/)([a-z]+)\.mjs\1/g,
       (_, quote, mod) => {
         if (!published[mod]) throw new Error(`${src} imports ${mod} before it is built; fix MODULES order`);
@@ -138,7 +139,7 @@ async function build() {
   }
   // Classic (non-module) scripts: offline support on every page, and analytics.
   for (const name of ['offline', 'analytics']) {
-    const code = await readFile(join(ROOT, `src/assets/${name}.js`), 'utf8');
+    const code = stripJs(await readFile(join(ROOT, `src/assets/${name}.js`), 'utf8'));
     published[name] = `${name}.${hash(code)}.js`;
     await write(`assets/${published[name]}`, code);
   }

@@ -13,6 +13,7 @@ import { createStaticHandler, insideRoot } from '../scripts/serve.mjs';
 import { ogData, rowsToShow, CARD_ROWS } from '../scripts/og-data.mjs';
 import { DEFAULTS } from '../src/engine/calc.mjs';
 import { builtOutput } from '../src/engine/render.mjs';
+import { stripJs } from '../scripts/strip-js.mjs';
 
 const OUT = mkdtempSync(join(tmpdir(), 'threadvet-'));
 const tempDirs = [OUT];
@@ -57,6 +58,27 @@ test('each calculator is built showing builtOutput(), which the app takes as alr
     const { tone, verdict, list } = builtOutput(focus);
     assert.ok(src.includes(`<div class="verdict verdict-${tone}" data-verdict tabindex="-1">${verdict}</div>`), `${file}: its verdict`);
     assert.ok(src.includes(`aria-label="Results by marketplace">${list}</ul>`), `${file}: its list`);
+  }
+});
+
+test('stripped scripts work as written: the engine tests pass against stripped engine code, and every published script parses', () => {
+  const copy = copyProject();
+  mkdirSync(join(copy, 'test'));
+  cpSync(fileURLToPath(new URL('./engine.test.mjs', import.meta.url)), join(copy, 'test/engine.test.mjs'));
+  for (const name of ['fees', 'calc', 'render']) {
+    const file = join(copy, `src/engine/${name}.mjs`);
+    writeFileSync(file, stripJs(readFileSync(file, 'utf8')));
+  }
+  execFileSync(process.execPath, ['--test', 'test/engine.test.mjs'], { cwd: copy, stdio: 'pipe' });
+  // Parsed, not run (app.js needs a page): modules as modules, classic scripts as scripts.
+  const checked = join(copy, 'checked');
+  mkdirSync(checked);
+  for (const file of readdirSync(join(OUT, 'assets')).filter((f) => f.endsWith('.js'))) {
+    const classic = /^(offline|analytics)\./.test(file);
+    const target = join(checked, file.replace(/\.js$/, classic ? '.cjs' : '.mjs'));
+    cpSync(join(OUT, 'assets', file), target);
+    execFileSync(process.execPath, ['--check', target], { stdio: 'pipe' });
+    assert.ok(!/^\s*\/\//m.test(readFileSync(target, 'utf8')), `${file}: comments stripped`);
   }
 });
 
