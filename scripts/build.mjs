@@ -114,6 +114,7 @@ async function build() {
   const css = minifyCss(await readFile(join(ROOT, 'src/assets/styles.css'), 'utf8'));
   const published = { css: `styles.${hash(css)}.css` };
   await write(`assets/${published.css}`, css);
+  for (const [src, name] of [...MODULES, ...CLASSIC_SCRIPTS]) if (!/^[a-z]+$/.test(name)) throw new Error(`${src}: published as "${name}", but names are lowercase letters only (see scripts/assets.mjs)`);
   for (const [src, name] of MODULES) {
     // Comments, indentation and blank lines stripped (see strip-js.mjs: it
     // reads the code as JavaScript does, not by pattern), nothing renamed.
@@ -146,7 +147,7 @@ async function build() {
   const assets = {
     css: url(published.css),
     app: url(published.app),
-    modules: ['fees', 'calc', 'render'].map((m) => url(published[m])),
+    modules: MODULES.filter(([, name]) => name !== 'app').map(([, name]) => url(published[name])), // preloaded with it
     analytics: url(published.analytics),
     offline: url(published.offline),
   };

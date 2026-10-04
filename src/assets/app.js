@@ -71,7 +71,9 @@ function debounce(fn, ms) {
 
 function setup(root) {
   const form = root.querySelector('form');
-  const panel = root.querySelector('[role="tabpanel"]');
+  // The mode's panel: a tab panel only with the script that runs its tabs.
+  const panel = root.querySelector('.calc-panel');
+  panel.setAttribute('role', 'tabpanel');
   const tabs = [...root.querySelectorAll('[role="tab"]')];
   const tabFor = (m) => tabs.find((tab) => tab.dataset.mode === m);
   const hint = root.querySelector('[data-hint]');
@@ -255,9 +257,15 @@ function setup(root) {
       return summary.scrollIntoView({ block: 'nearest' }); // its new place may be off screen
     }
     if (!had.isConnected || had.closest('.calc-output')) return focusVerdict();
-    // A text field hidden while typed in (its mode changed under it): to the
-    // mode's tab, never to another field, which keys typed on would change.
-    if (had.matches('input[type="text"]')) return tabFor(mode).focus();
+    // A text field hidden while typed in (its mode or a setting changed under
+    // it): to the verdict (read out, as focus does), where the keys typed on
+    // change nothing (another field would take them, a tab or a list would
+    // switch on arrows), and the view stays where it was.
+    if (had.matches('input[type="text"]')) {
+      verdictEl.focus({ preventScroll: true });
+      spoken = verdictText();
+      return;
+    }
     const before = [...root.querySelectorAll('.calc-input :is(a[href], button, input, select, summary)')].filter((c) => c.compareDocumentPosition(had) & Node.DOCUMENT_POSITION_FOLLOWING);
     for (const c of before.reverse()) {
       if (c.tabIndex < 0 || c.disabled || !visible(c)) continue;
@@ -633,13 +641,11 @@ function setup(root) {
   // so the list stays even. (Until this runs, and without it, a list narrow
   // enough is stacked by its width alone: see styles.css.)
   function fitResults() {
-    const was = resultsEl.classList.contains('stacked');
     resultsEl.classList.add('fitted'); // measured as it is, not as guessed
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     fittedAt = fitKey(); // what that measure was taken at (no layout of its own: it's fresh)
     resultsEl.classList.toggle('stacked', squeezed);
-    if (squeezed !== was) fittedAt = fitKey(); // a list newly stacked (or not) can change the column (a page scrollbar)
   }
   // Refit, before the frame paints, when the column's width changes (a
   // phone turned: watched on the verdict, which spans it) or the text's size
@@ -647,8 +653,9 @@ function setup(root) {
   // alone): compared with what the list was last fitted at, so the
   // verdict's height (its own words rewrapping) changes nothing, and a
   // change before the first frame is caught. Neither depends on the list's
-  // fit, so fitting from here can't resize what's watched (a
-  // "ResizeObserver loop").
+  // fit (these pages are taller than any screen, so stacking never brings
+  // or takes away a page scrollbar), so fitting from here can't resize
+  // what's watched (a "ResizeObserver loop").
   const probe = document.createElement('span');
   probe.className = 'fit-probe';
   probe.setAttribute('aria-hidden', 'true');
@@ -861,8 +868,8 @@ function setup(root) {
   );
   const { kept, loaded } = load(changedEarly);
   const typingEarly = kept.includes(document.activeElement) && document.activeElement.type === 'text' ? document.activeElement.name : '';
-  root.dataset.ready = ''; // its tabs and buttons work now, and can take focus (see styles.css)
   setMode(mode, { save: kept.length > 0, typing: typingEarly, fallback: typingEarly ? { [typingEarly]: loaded[typingEarly] } : undefined });
+  root.dataset.ready = ''; // set up: its tabs and buttons work now (see styles.css)
   spoken = verdictText(); // the starting verdict is already on screen: not news
   // A pasted link, or Back/Forward between results, only changes the
   // fragment (no reload), so load that state. Plain anchors like the skip

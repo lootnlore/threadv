@@ -88,7 +88,7 @@ export function calculator({ focus } = {}) {
   return `<section class="calc" id="calculator" aria-label="Reseller profit calculator" data-calc${focus ? ` data-focus="${focus}"` : ''}>
 <div class="calc-input">
 <div class="modes" role="tablist" aria-label="What do you want to know?">${tabs}</div>
-<div class="calc-panel" id="calc-panel" role="tabpanel" aria-labelledby="tab-profit">
+<div class="calc-panel" id="calc-panel">
 <form class="calc-form" method="dialog" autocomplete="off">
 <p class="mode-hint" data-hint>${MODES.profit.hint}</p>
 <div class="fields">

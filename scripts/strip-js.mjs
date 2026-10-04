@@ -120,8 +120,9 @@ export function stripJs(src) {
       else if (c === '}') depth--;
       else if (c === '(') parens.push(CONTROL.has(lastToken));
       else if (c === ')') closedControl = parens.pop() ?? false;
+      const doubled = (c === '+' || c === '-') && lastToken === c && src[i - 1] === c; // the second of "++" (not "a+++/re/"'s third)
       emit(c);
-      if ((c === '+' || c === '-') && src[i - 1] === c) lastToken = c + c; // "i++ / 2" divides
+      if (doubled) lastToken = c + c; // "i++ / 2" divides
       i++;
     }
   }

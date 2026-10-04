@@ -252,6 +252,7 @@ if (chromium) {
   test('results are pre-rendered without JavaScript', async () => {
     const { context, page } = await open('/', { javaScriptEnabled: false });
     assert.equal(await page.locator('.result').count(), 9);
+    assert.equal(await page.locator('[role="tabpanel"]').count(), 0, 'no tab panel announced without the tabs that run it');
     assert.match(await verdict(page), /Worth it\./);
     assert.ok(await page.locator('[data-share]').isHidden());
     assert.ok(await page.locator('.see-results').isHidden());
@@ -512,9 +513,14 @@ if (chromium) {
     assert.deepEqual(pasted.errors, []);
     await pasted.context.close();
     // A text field hidden while typed in (its mode changed under it, by a
-    // link at load or later): focus goes to the mode's tab, never another
-    // field, so the keys typed on change nothing. Max buy hides the cost.
-    const focusAfter = (page) => page.evaluate(() => document.activeElement.getAttribute('role') ?? document.activeElement.id);
+    // link at load or later): focus goes to the verdict (read out), where the
+    // keys typed on (digits, End, Home, arrows) change nothing: not another
+    // field, nor the mode. Max buy hides the cost.
+    const typeOn = async (page) => {
+      for (const key of ['7', 'End', 'Home', 'ArrowRight', 'ArrowLeft', '5']) await page.keyboard.press(key);
+      await settle(page);
+      return page.evaluate(() => [document.activeElement.matches('[data-verdict]') ? 'verdict' : document.activeElement.id, document.querySelector('[role="tab"][aria-selected="true"]').dataset.mode, document.querySelector('#f-price').value, location.hash]);
+    };
     const hiddenAtLoad = await openPaintingFirst('/#mode=maxbuy&price=50');
     await hiddenAtLoad.page.focus('#f-cost');
     await hiddenAtLoad.page.keyboard.press('Control+A');
@@ -522,20 +528,32 @@ if (chromium) {
     hiddenAtLoad.release();
     await hiddenAtLoad.page.waitForFunction(() => 'ready' in document.querySelector('[data-calc]').dataset, null, { timeout: 5000 });
     await settle(hiddenAtLoad.page);
-    await hiddenAtLoad.page.keyboard.type('75');
-    await settle(hiddenAtLoad.page);
-    assert.deepEqual([await focusAfter(hiddenAtLoad.page), await hiddenAtLoad.page.inputValue('#f-price')], ['tab', '50'], 'at load: focus on the tab, the price untouched');
+    assert.deepEqual(await typeOn(hiddenAtLoad.page), ['verdict', 'maxbuy', '50', '#mode=maxbuy&price=50'], 'at load: focus on the verdict, the keys typed on change nothing');
     assert.deepEqual(hiddenAtLoad.errors, []);
     await hiddenAtLoad.context.close();
     const hiddenLater = await open('/');
     await hiddenLater.page.focus('#f-cost');
     await hiddenLater.page.evaluate(() => (location.hash = '#mode=maxbuy&price=50'));
     await hiddenLater.page.waitForFunction(() => document.querySelector('[data-field="cost"]').hidden, null, { timeout: 3000 });
-    await hiddenLater.page.keyboard.type('9');
-    await settle(hiddenLater.page);
-    assert.deepEqual([await focusAfter(hiddenLater.page), await hiddenLater.page.inputValue('#f-price')], ['tab', '50'], 'by a link later: the same');
+    const [focused, chosen, price, hash] = await typeOn(hiddenLater.page);
+    assert.deepEqual([focused, chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['verdict', 'maxbuy', '50', 'maxbuy'], 'by a link later: the same');
     assert.deepEqual(hiddenLater.errors, []);
     await hiddenLater.context.close();
+    // A setting's field hidden the same way (a link changing eBay's
+    // category from custom, its rate field with it): focus to the verdict,
+    // and the view stays where the visitor was.
+    const rate = await open('/');
+    await rate.page.locator('.tune > summary').click();
+    await rate.page.selectOption('#f-ebayCategory', 'custom');
+    await rate.page.focus('#f-ebayCustomRate');
+    await rate.page.locator('#f-ebayCustomRate').scrollIntoViewIfNeeded();
+    const scrolledTo = await rate.page.evaluate(() => scrollY);
+    await rate.page.evaluate(() => (location.hash = '#s=1&mode=profit&price=40&cost=8&ebayCategory=most'));
+    await rate.page.waitForFunction(() => document.querySelector('[data-field="ebayCustomRate"]').hidden, null, { timeout: 3000 });
+    await settle(rate.page);
+    assert.deepEqual([await rate.page.evaluate(() => document.activeElement.matches('[data-verdict]')), await rate.page.evaluate(() => scrollY)], [true, scrolledTo], "eBay's rate field hidden by a link: focus on the verdict, the view unmoved");
+    assert.deepEqual(rate.errors, []);
+    await rate.context.close();
   });
 
   test('saved settings survive reloads and are never touched by shared links', async () => {
@@ -1406,8 +1424,8 @@ if (chromium) {
       await tp.getByRole('tab', { name: 'Profit' }).click();
     }
     // A field the new mode hides, still drawn and typed into during the
-    // hold: once it's hidden, focus goes to the mode's tab, not dropped to
-    // the page, nor into another field (which keys typed on would change).
+    // hold: once it's hidden, focus goes to the verdict, not dropped to the
+    // page, nor into another field (which keys typed on would change).
     aim = await tapFirstRow();
     await tp.focus('[role="tab"][aria-selected="true"]');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [aim.finger] });
@@ -1415,7 +1433,7 @@ if (chromium) {
     for (let i = 0; i < 6 && (await tp.evaluate(() => document.activeElement.id)) !== 'f-cost'; i++) await tp.keyboard.press('Tab');
     await tp.keyboard.type('5');
     await pan(aim.finger);
-    assert.deepEqual([await selectedTab(), await focusedText()], ['Max buy', 'tab-maxbuy'], 'focus kept, on the tab');
+    assert.deepEqual([await selectedTab(), await tp.evaluate(() => document.activeElement.matches('[data-verdict]'))], ['Max buy', true], 'focus kept, on the verdict');
     await tp.getByRole('tab', { name: 'Profit' }).click();
     // Go is dropped by a tap into the field itself (placing the caret is
     // editing on), and by typing on or moving the caret after it.

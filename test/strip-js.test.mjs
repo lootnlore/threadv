@@ -21,6 +21,7 @@ test('keeps what only looks like a comment', () => {
     'if (ok) /a  b/.test(s);\n', // and after a condition's parenthesis
     'x = (a) / b / c;\n', // division, after a value's parenthesis too
     'n = i++ / 2; m = j-- / 2;\n', // and after ++ and --
+    'x = a+++/re  x/.source.length;\n', // but a regular expression after "a++ +"
     'n = 1.5e-3 / 2;\n', // numbers
     "s.replace(/[&<>\"']/g, f);\n",
   ];

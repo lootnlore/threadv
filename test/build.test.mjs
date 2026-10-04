@@ -67,8 +67,8 @@ test('stripped scripts work as written: the engine tests pass against stripped e
   const copy = copyProject();
   mkdirSync(join(copy, 'test'));
   cpSync(fileURLToPath(new URL('./engine.test.mjs', import.meta.url)), join(copy, 'test/engine.test.mjs'));
-  for (const name of ['fees', 'calc', 'render']) {
-    const file = join(copy, `src/engine/${name}.mjs`);
+  for (const [src] of MODULES.filter(([file]) => file.startsWith('src/engine/'))) {
+    const file = join(copy, src);
     writeFileSync(file, stripJs(readFileSync(file, 'utf8')));
   }
   execFileSync(process.execPath, ['--test', 'test/engine.test.mjs'], { cwd: copy, stdio: 'pipe' });
