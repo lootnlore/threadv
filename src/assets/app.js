@@ -315,7 +315,6 @@ function setup(root) {
     const open = openIds();
     resultsEl.innerHTML = list;
     for (const id of open) resultsEl.querySelector(`[data-id="${id}"] details`)?.setAttribute('open', '');
-    fitResults();
   }
 
   /** What to ask for instead of results, as [html, field to fix], or null when they can be worked out. */
@@ -581,7 +580,7 @@ function setup(root) {
       if (out.verdict !== was.verdict) showVerdict(out); // (its tone goes with its words)
       show(resultsEl, true); // before the list is fitted: hidden, it measures nothing
       if (out.list !== was.list) showList(out.list);
-      else fitResults(); // as it is, now shown (at load, say, or back from a prompt at a new width)
+      fitResults(); // as now shown: a new list, or the same at load or back from a prompt at a new width
       show(shareBtn, shareSupported);
       painted = { verdict: out.verdict, list: out.list };
     }
@@ -599,19 +598,35 @@ function setup(root) {
 
   // Figures sit beside the names unless a name no longer fits beside its
   // figure (a big amount, large text): then every figure moves under its name,
-  // so the list stays even. (Without JavaScript, figures stay beside names,
-  // which wrap in their column; only messages move under them.)
+  // so the list stays even. (A list narrow enough is stacked by its width
+  // alone, before this runs and without it: see styles.css.)
   function fitResults() {
     resultsEl.classList.remove('stacked');
     const squeezed = [...resultsEl.querySelectorAll('.pname')].some((name) => name.scrollWidth > name.clientWidth + 1);
     resultsEl.classList.toggle('stacked', squeezed);
   }
-  // Refit when the column's width or the text changes (a phone turned, a
-  // larger text size, text spacing overrides), before that frame paints.
-  // Watched on the verdict, which spans the column and reflows with its
-  // text but not with the list's fit, so fitting from here can't resize
-  // what's watched (a "ResizeObserver loop").
-  new ResizeObserver(() => resultsEl.clientWidth && fitResults()).observe(verdictEl);
+  // Refit, before the frame paints, when the column's width changes (a
+  // phone turned: watched on the verdict, which spans it) or the text's size
+  // or spacing does (watched on a hidden name, whose width is its text's
+  // alone). Neither depends on the list's fit, so fitting from here can't
+  // resize what's watched (a "ResizeObserver loop"); the verdict's height
+  // (its own words rewrapping) changes nothing.
+  const probe = document.createElement('span');
+  probe.className = 'pname fit-probe';
+  probe.setAttribute('aria-hidden', 'true');
+  probe.textContent = 'Marketplace';
+  resultsEl.after(probe);
+  let columnWidth = 0;
+  const refit = new ResizeObserver((entries) => {
+    let changed = false;
+    for (const { target, contentRect } of entries) {
+      if (target === probe) changed = true;
+      else if (contentRect.width !== columnWidth) [changed, columnWidth] = [true, contentRect.width];
+    }
+    if (changed && resultsEl.clientWidth) fitResults();
+  });
+  refit.observe(verdictEl);
+  refit.observe(probe);
 
   // Screen readers hear the verdict once the user pauses, not after every
   // keystroke, and only when it changed. Nothing is announced on page load.

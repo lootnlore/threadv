@@ -1151,6 +1151,28 @@ select:focus-visible {
   grid-column: 2 / -1;
 }
 
+/* A list too narrow for the built results' names beside their figures
+   stacks them by its width alone, so before app.js has run, and without
+   it, no name runs into its figure: where app.js stacks that list (12em
+   and the fixed gaps, measured), and a little wider for system fonts'
+   differences. (At 12em and under, the rule below puts every figure on its
+   own line anyway.) */
+@container (12em < width <= calc(12em + 54px)) {
+  .results .figure {
+    grid-column: 2 / -1;
+  }
+}
+
+/* What app.js measures to see the text change size or spacing: a name's
+   text alone, never shown, its width the text's whatever the list's fit. */
+.pname.fit-probe {
+  display: block;
+  position: absolute;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .figure.zero {
   color: var(--muted);
 }

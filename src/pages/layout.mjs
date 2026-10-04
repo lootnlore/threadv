@@ -87,11 +87,8 @@ export function layout(page, config, assets) {
   const analytics = config.analytics.plausibleDomain
     ? `<script defer src="${assets.analytics}"></script>\n<script defer data-domain="${esc(config.analytics.plausibleDomain)}" src="${esc(config.analytics.plausibleSrc)}"></script>`
     : '';
-  // The app holds the page's first frame (where browsers support that): it
-  // fits the pre-rendered results to the screen (figures under names when a
-  // name would be squeezed), so they never paint unfitted and then jump.
   const app = page.app
-    ? `${assets.modules.map((m) => `<link rel="modulepreload" href="${m}">`).join('\n')}\n<script type="module" blocking="render" src="${assets.app}"></script>`
+    ? `${assets.modules.map((m) => `<link rel="modulepreload" href="${m}">`).join('\n')}\n<script type="module" src="${assets.app}"></script>`
     : '';
   return `<!DOCTYPE html>
 <html lang="en">

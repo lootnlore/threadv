@@ -2594,8 +2594,8 @@ if (chromium) {
         stacked: document.querySelector('[data-results]').classList.contains('stacked'),
         under: [...document.querySelectorAll('.result')].map((r) => r.querySelector('.figure').getBoundingClientRect().top >= r.querySelector('.pname').getBoundingClientRect().bottom - 1),
       }));
-    // Whether the list is stacked in the first frame it's shown in from now
-    // on: resolves once a change made by `act` has shown it.
+    // Whether every figure is under its name in the first frame the list is
+    // shown in from now on: resolves once a change made by `act` shows it.
     const firstFrameShown = async (page, act) => {
       await page.evaluate(() => {
         window.firstFrame = undefined;
@@ -2603,7 +2603,7 @@ if (chromium) {
         new MutationObserver((_, watch) => {
           if (list.hidden) return;
           watch.disconnect();
-          requestAnimationFrame(() => (window.firstFrame = list.classList.contains('stacked')));
+          requestAnimationFrame(() => (window.firstFrame = [...list.querySelectorAll('.result')].every((row) => row.querySelector('.figure').getBoundingClientRect().top >= row.querySelector('.pname').getBoundingClientRect().bottom - 1)));
         }).observe(list, { attributes: true, attributeFilter: ['hidden'] });
       });
       await act();
@@ -2623,7 +2623,7 @@ if (chromium) {
     assert.ok(r.stacked && r.under.every(Boolean), 'a $4,000 sale on a 320px phone: every figure under its name');
     // A new list that replaces a prompt is fitted once shown: stacked from
     // its first frame, not jumping to it after.
-    assert.equal(await firstFrameShown(page, promptThen(page, '5000')), true, 'a new list after a prompt: stacked from its first frame');
+    assert.deepEqual([await firstFrameShown(page, promptThen(page, '5000')), (await placement(page)).stacked], [true, true], 'a new list after a prompt: stacked from its first frame, and after');
     // So is the same list back after a prompt, shown at a new width (a
     // phone turned while the prompt was up).
     await page.setViewportSize({ width: 900, height: 800 });
@@ -2657,36 +2657,73 @@ if (chromium) {
     assert.ok(!r.stacked && r.under.every((u) => !u), 'default sale on a 390px phone: figures beside names');
     assert.deepEqual(errors, []);
     await context.close();
-    // Loaded as built where names would be squeezed, the list is fitted in
-    // the page's first frame that has it: the script holds that frame.
+    // Before the script fits the list, and without JavaScript, a CSS guess
+    // from the list's width stacks the built results where names would be
+    // squeezed: no name runs into its figure, and the first frame already
+    // has every figure under its name where the script then stacks them.
+    const noOverlap = (page) =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('.result')].every((row) => {
+          const name = row.querySelector('.pname');
+          const under = row.querySelector('.figure').getBoundingClientRect().top >= name.getBoundingClientRect().bottom - 1;
+          return under || name.scrollWidth <= name.clientWidth + 1;
+        }),
+      );
+    for (const [width, scale] of [[280, 1], [300, 1], [320, 1.25], [336, 1], [360, 1.5], [390, 1]]) {
+      const plain = await open(null, { viewport: { width, height: 800 }, javaScriptEnabled: false });
+      await setTextSize(plain.page, scale);
+      await plain.page.goto(`${base}/`, { waitUntil: 'networkidle' });
+      assert.ok(await noOverlap(plain.page), `no JavaScript, ${width}px at ${scale * 100}% text: no name runs into its figure`);
+      await plain.context.close();
+    }
     for (const [width, scale] of [[320, 1.25], [300, 1]]) {
       const loaded = await open(null, { viewport: { width, height: 800 } });
       await setTextSize(loaded.page, scale);
       await loaded.page.addInitScript(() => {
         const frame = () => {
-          const list = document.querySelector('[data-results]');
-          if (list) window.firstFrame = list.classList.contains('stacked');
+          const rows = [...document.querySelectorAll('.result')];
+          if (rows.length) window.firstFrame = rows.every((row) => row.querySelector('.figure').getBoundingClientRect().top >= row.querySelector('.pname').getBoundingClientRect().bottom - 1);
           else requestAnimationFrame(frame);
         };
         requestAnimationFrame(frame);
       });
       await loaded.page.goto(`${base}/`, { waitUntil: 'networkidle' });
-      assert.equal(await loaded.page.evaluate(() => window.firstFrame), true, `${width}px at ${scale * 100}% text: stacked in the first frame`);
+      assert.equal(await loaded.page.evaluate(() => window.firstFrame), true, `${width}px at ${scale * 100}% text: every figure under its name in the first frame`);
+      assert.ok((await placement(loaded.page)).under.every(Boolean), 'and after the script has run');
       assert.deepEqual(loaded.errors, []);
       await loaded.context.close();
     }
-    // Refitted, before the frame paints, when the text grows at the same
-    // width: a larger text size, or text spacing overrides (WCAG 1.4.12).
+    // Refitted before the frame paints when the text grows at the same
+    // width: a larger text size, or text spacing overrides (WCAG 1.4.12:
+    // letters and words wider, the lines as they were). A $4,000 sale, at
+    // widths the script decides (wider than the CSS stacks by itself).
+    // Sampled as each frame starts, so a frame's sample is what the one
+    // before it painted.
     for (const how of ['text size', 'text spacing']) {
-      const resized = await open('/', { viewport: { width: how === 'text size' ? 320 : 336, height: 800 } });
-      assert.equal((await placement(resized.page)).stacked, false, `${how}: beside to begin with`);
+      const resized = await open(null, { viewport: { width: how === 'text size' ? 380 : 360, height: 800 } });
+      await resized.page.goto(`${base}/#price=4000&cost=100`, { waitUntil: 'networkidle' });
+      assert.ok((await placement(resized.page)).under.every((u) => !u), `${how}: beside to begin with`);
+      await resized.page.evaluate(() => {
+        window.samples = [];
+        const list = document.querySelector('[data-results]');
+        const name = list.querySelector('.pname');
+        const under = () => [...list.querySelectorAll('.result')].every((row) => row.querySelector('.figure').getBoundingClientRect().top >= row.querySelector('.pname').getBoundingClientRect().bottom - 1);
+        const sample = () => {
+          const text = getComputedStyle(name);
+          window.samples.push([`${text.fontSize} ${text.letterSpacing}`, under()]);
+          if (window.samples.length < 40) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+      await resized.page.waitForTimeout(100);
       if (how === 'text size') await setTextSize(resized.page, 1.25);
-      else {
-        await resized.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; line-height: 1.5 !important; }', document.styleSheets[0].cssRules.length)); // as a bookmarklet would
-      }
-      await resized.page.waitForTimeout(300);
+      else await resized.page.evaluate(() => document.styleSheets[0].insertRule('* { letter-spacing: .12em !important; word-spacing: .16em !important; }', document.styleSheets[0].cssRules.length)); // as a bookmarklet would
+      await resized.page.waitForFunction(() => window.samples.length >= 40);
+      const samples = await resized.page.evaluate(() => window.samples);
+      const changedAt = samples.findIndex(([text]) => text !== samples[0][0]);
+      assert.ok(changedAt > 0 && changedAt < samples.length - 1, `${how}: the change seen mid-sampling`);
       r = await placement(resized.page);
-      assert.ok(r.stacked && r.under.every(Boolean), `${how} grown at the same width: refitted, every figure under its name`);
+      assert.deepEqual([samples[changedAt + 1][1], r.stacked && r.under.every(Boolean)], [true, true], `${how} grown at the same width: refitted in the frame it changed, every figure under its name`);
       assert.deepEqual(resized.errors, []);
       await resized.context.close();
     }
