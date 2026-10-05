@@ -248,17 +248,26 @@ test('builds running at the same time into one folder leave it whole', async () 
   const copy = copyProject();
   const out = join(copy, 'site');
   const files = (dir) => readdirSync(dir, { recursive: true }).sort();
-  const build = () =>
-    new Promise((done) => {
-      const child = spawn(process.execPath, ['scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy });
-      let stderr = '';
-      child.stderr.on('data', (d) => (stderr += d));
-      child.on('close', (code) => done({ code, stderr }));
-    });
+  const build = () => {
+    const child = spawn(process.execPath, ['scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    const finished = new Promise((done) => child.on('close', (code) => done({ code, stderr })));
+    return Object.assign(finished, { stage: join(copy, `.site.building-${child.pid}`) });
+  };
+  // Once a build has started writing (its stage there to see).
+  const writing = async (running) => {
+    for (let waited = 0; waited < 10_000 && !existsSync(running.stage); waited += 5) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(existsSync(running.stage), 'the first build started writing');
+  };
   await build();
   const whole = files(out);
+  // Started together, and the second once the first is writing (so it
+  // finds the first's stage beside the output, which isn't its to sweep).
   for (let round = 0; round < 6; round++) {
-    const results = await Promise.all([build(), build()]);
+    const first = build();
+    if (round % 2) await writing(first);
+    const results = await Promise.all([first, build()]);
     assert.deepEqual(files(out), whole, `round ${round}: the output whole`);
     assert.deepEqual(readdirSync(copy).filter((name) => name.includes('.building')), [], `round ${round}: nothing left beside it`);
     for (const { code, stderr } of results) {
