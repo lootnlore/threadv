@@ -401,6 +401,42 @@ syncBuiltinESMExports();
   for (const name of ['published', 'moved']) rmSync(`${out}.${name}`, { force: true });
   assert.deepEqual(results, [{ code: 0, stderr: '' }, { code: 0, stderr: '' }], 'both published, neither kept anything');
   assert.deepEqual([files(out), readdirSync(copy).filter((name) => name.startsWith('.site.'))], [whole, []], 'its output moved aside mid-clear-up: nothing left');
+  // A build between its two renames, over an output built hours ago: its
+  // moved-aside last build keeps that old time, but another build's sweep
+  // leaves it alone (its stage is there), rather than putting it back.
+  writeFileSync(
+    join(copy, 'between.mjs'),
+    `import fs from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const out = process.env.PAUSE_OUT;
+const rename = fs.rename;
+fs.rename = async (from, to) => {
+  await rename(from, to);
+  if (from !== out) return;
+  writeFileSync(\`\${out}.aside\`, '');
+  for (let i = 0; i < 4000 && !existsSync(\`\${out}.go\`); i++) await new Promise((r) => setTimeout(r, 5));
+};
+syncBuiltinESMExports();
+`,
+  );
+  const hoursAgo = new Date(Date.now() - 3 * 3600_000);
+  utimesSync(out, hoursAgo, hoursAgo);
+  const midSwap = new Promise((done) => {
+    const child = spawn(process.execPath, ['--import', './between.mjs', 'scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy, env: { ...process.env, PAUSE_OUT: out } });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => done({ code, stderr }));
+  });
+  for (let waited = 0; waited < 10_000 && !existsSync(`${out}.aside`); waited += 5) await new Promise((r) => setTimeout(r, 5));
+  const other = await build();
+  const asideKept = readdirSync(copy).some((name) => name.endsWith('-old'));
+  writeFileSync(`${out}.go`, '');
+  const resumed = await midSwap;
+  for (const name of ['aside', 'go']) rmSync(`${out}.${name}`, { force: true });
+  assert.deepEqual([other.code, asideKept], [0, true], "another build's sweep left the mid-swap build's last one alone");
+  assert.match(resumed.stderr, /Another build of .* finished at the same moment/, 'the paused build found the other\'s in place');
+  assert.deepEqual([files(out), readdirSync(copy).filter((name) => name.startsWith('.site.'))], [whole, []], 'then: the output whole, nothing left');
   // A big leftover from a build that died, for both to find at once (rounds
   // 0 and 2): one takes it, and neither finds it half-deleted.
   const leftover = () => {

@@ -136,8 +136,11 @@ function checkAssetNames() {
  * build is fresh too: each removal touches it). Whether a build is running
  * isn't asked of its process: one in another container can't be seen from
  * here. A last build moved aside goes back if OUT is missing (its swap
- * never finished); an empty folder goes (a build killed at once); a folder
- * without the build's marker is left alone, said: maybe someone's own.
+ * never finished), unless its build's stage is still there: that build is
+ * between its two renames (moved aside, a folder keeps its old time, so
+ * it can look stale at once). An empty folder goes (a build killed at
+ * once); one without the build's marker is left alone, said: maybe
+ * someone's own.
  */
 async function sweepStages() {
   for (const name of await readdir(dirname(OUT)).catch(() => [])) {
@@ -145,6 +148,7 @@ async function sweepStages() {
     const dir = join(dirname(OUT), name);
     const age = await stat(dir).then((st) => Date.now() - st.mtimeMs, () => -1); // (-1: gone already)
     if (age < STALE_MS) continue;
+    if (name.endsWith('-old') && existsSync(dir.slice(0, -'-old'.length))) continue; // its build is mid-swap
     const ours = await readdir(dir).then((names) => names.includes(MARKER), () => false);
     if (!ours) {
       const emptied = await rmdir(dir).then(() => true, () => false); // (only ever removes an empty one)
@@ -197,7 +201,7 @@ async function build() {
     // Decided by what this build did, not by whether OUT is there now:
     // another build may have just moved it aside for its own swap.
     if (!keepPrevious) await rm(PREVIOUS, { recursive: true, force: true });
-    else console.error(`The last build is kept in ${PREVIOUS}: rename it to ${OUT} (a build an hour from now puts it back).`);
+    else console.error(`The last build is kept in ${PREVIOUS}: rename it to ${OUT} (the first build once it's an hour old puts it back).`);
   }
 }
 
