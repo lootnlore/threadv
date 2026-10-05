@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, existsSync, statSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -230,8 +230,8 @@ test('refuses to wipe folders it did not create', () => {
   assert.ok(existsSync(join(foreign, 'keep.txt')) && existsSync(join(copy, 'src/engine/fees.mjs')), 'nothing was deleted');
   // Beside the output: a stage, or a last build moved aside, untouched for
   // an hour (its build died) is swept; fresh ones (a build running, maybe
-  // in another container, which removes its own) are left alone; a folder
-  // of that name the build didn't make stops it, kept.
+  // in another container, which removes its own) are left alone, and so,
+  // said, is a folder of that name the build didn't make.
   const beside = mkdtempSync(join(tmpdir(), 'threadvet-beside-'));
   tempDirs.push(beside);
   const stage = (name, { ours = true, hoursAgo = 0 } = {}) => {
@@ -247,7 +247,8 @@ test('refuses to wipe folders it did not create', () => {
   run(join(beside, 'site'));
   assert.deepEqual(readdirSync(beside).sort(), ['.site.building-live01', '.site.building-live02-old', 'site'], "a dead build's leftovers swept; a running build's left");
   stage('.site.building-mine01', { ours: false, hoursAgo: 2 });
-  assert.throws(() => run(join(beside, 'site')), /not created by this build/);
+  const { status, stderr } = spawnSync(process.execPath, ['scripts/build.mjs', '--out', join(beside, 'site'), '--quiet'], { cwd: copy, encoding: 'utf8' });
+  assert.deepEqual([status, /Left .*building-mine01 alone/.test(stderr)], [0, true], stderr);
   assert.ok(existsSync(join(beside, '.site.building-mine01/keep.txt')), 'nothing was deleted beside it');
   run(OUT); // its own previous output is fine
 });

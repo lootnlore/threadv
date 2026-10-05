@@ -5,6 +5,7 @@
 //   node scripts/build.mjs            -> dist/
 //   node scripts/build.mjs --out tmp  -> tmp/
 import { mkdir, readFile, writeFile, rm, cp, readdir, rename, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,10 +132,11 @@ function checkAssetNames() {
 /**
  * Removes what builds that died part-way left beside OUT: a stage, or a
  * last build moved aside, untouched for an hour. Anything fresher is a
- * running build's, which removes its own. (Whether a build is running
+ * running build's, which removes its own (and one being swept by another
+ * build is fresh too: each removal touches it). Whether a build is running
  * isn't asked of its process: one in another container can't be seen from
- * here.) Each is first renamed out of the way, so of builds sweeping at
- * once only one takes it, and none finds it half-deleted.
+ * here. A folder without the build's marker is left alone, said, not
+ * removed: someone's own, or (rarely) one another build is sweeping.
  */
 async function sweepStages() {
   for (const name of await readdir(dirname(OUT)).catch(() => [])) {
@@ -142,10 +144,9 @@ async function sweepStages() {
     const dir = join(dirname(OUT), name);
     const age = await stat(dir).then((st) => Date.now() - st.mtimeMs, () => -1); // (-1: gone already)
     if (age < STALE_MS) continue;
-    await assertSafeToClean(dir);
-    const taken = join(dirname(OUT), `.${basename(OUT)}.swept-${randomBytes(6).toString('hex')}`);
-    const mine = await rename(dir, taken).then(() => true, (err) => (err.code === 'ENOENT' ? false : Promise.reject(err)));
-    if (mine) await rm(taken, { recursive: true, force: true });
+    const ours = await readdir(dir).then((names) => names.includes(MARKER), () => false);
+    if (ours) await rm(dir, { recursive: true, force: true });
+    else if (existsSync(dir)) console.warn(`Left ${dir} alone: this build didn't make it. Delete it if it isn't yours.`);
   }
 }
 
