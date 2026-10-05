@@ -4,7 +4,7 @@
 //
 //   node scripts/build.mjs            -> dist/
 //   node scripts/build.mjs --out tmp  -> tmp/
-import { mkdir, readFile, writeFile, rm, cp, readdir, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, rmdir, cp, readdir, rename, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -130,13 +130,14 @@ function checkAssetNames() {
 }
 
 /**
- * Removes what builds that died part-way left beside OUT: a stage, or a
+ * Clears what builds that died part-way left beside OUT: a stage, or a
  * last build moved aside, untouched for an hour. Anything fresher is a
  * running build's, which removes its own (and one being swept by another
  * build is fresh too: each removal touches it). Whether a build is running
  * isn't asked of its process: one in another container can't be seen from
- * here. A folder without the build's marker is left alone, said, not
- * removed: someone's own, or (rarely) one another build is sweeping.
+ * here. A last build moved aside goes back if OUT is missing (its swap
+ * never finished); an empty folder goes (a build killed at once); a folder
+ * without the build's marker is left alone, said: maybe someone's own.
  */
 async function sweepStages() {
   for (const name of await readdir(dirname(OUT)).catch(() => [])) {
@@ -145,8 +146,12 @@ async function sweepStages() {
     const age = await stat(dir).then((st) => Date.now() - st.mtimeMs, () => -1); // (-1: gone already)
     if (age < STALE_MS) continue;
     const ours = await readdir(dir).then((names) => names.includes(MARKER), () => false);
-    if (ours) await rm(dir, { recursive: true, force: true });
-    else if (existsSync(dir)) console.warn(`Left ${dir} alone: this build didn't make it. Delete it if it isn't yours.`);
+    if (!ours) {
+      const emptied = await rmdir(dir).then(() => true, () => false); // (only ever removes an empty one)
+      if (!emptied && existsSync(dir)) console.warn(`Left ${dir} alone: it has no build marker (another build may be removing it). Delete it if it isn't yours.`);
+    } else if (!(name.endsWith('-old') && (await rename(dir, OUT).then(() => true, () => false)))) {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -184,7 +189,10 @@ async function build() {
     }
   } finally {
     await rm(STAGE, { recursive: true, force: true }); // gone already, unless the build stopped
-    await rm(PREVIOUS, { recursive: true, force: true });
+    // The last build, moved aside, goes once OUT is in place again; if
+    // neither this build nor it could be put there, it's kept, and said.
+    if (existsSync(OUT)) await rm(PREVIOUS, { recursive: true, force: true });
+    else if (existsSync(PREVIOUS)) console.error(`The last build is kept in ${PREVIOUS}: rename it to ${OUT} (a build an hour from now puts it back).`);
   }
 }
 

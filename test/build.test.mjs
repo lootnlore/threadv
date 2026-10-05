@@ -244,6 +244,8 @@ test('refuses to wipe folders it did not create', () => {
   stage('.site.building-dead02-old', { hoursAgo: 2 });
   stage('.site.building-live01');
   stage('.site.building-live02-old');
+  mkdirSync(join(beside, '.site.building-empty01')); // a build killed before it wrote anything
+  utimesSync(join(beside, '.site.building-empty01'), new Date(Date.now() - 7200_000), new Date(Date.now() - 7200_000));
   run(join(beside, 'site'));
   assert.deepEqual(readdirSync(beside).sort(), ['.site.building-live01', '.site.building-live02-old', 'site'], "a dead build's leftovers swept; a running build's left");
   stage('.site.building-mine01', { ours: false, hoursAgo: 2 });
@@ -311,6 +313,30 @@ syncBuiltinESMExports();
   );
   assert.throws(run, (err) => /removed while it ran/.test(String(err.stderr)));
   assert.deepEqual([readdirSync(out, { recursive: true }).sort(), left()], [whole, []], 'its folder swept mid-build: nothing published');
+  const swept = readFileSync(join(copy, 'fault.mjs'), 'utf8');
+  // If neither the new build nor the last can be put in place, the last is
+  // kept beside it, and said; a build an hour later puts it back (here, one
+  // that then publishes nothing of its own).
+  writeFileSync(
+    join(copy, 'fault.mjs'),
+    `import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+const rename = fs.rename;
+fs.rename = async (from, to) => {
+  if (to === process.env.FAULT_OUT) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  return rename(from, to);
+};
+syncBuiltinESMExports();
+`,
+  );
+  assert.throws(run, (err) => /The last build is kept in .*-old/.test(String(err.stderr)));
+  const [aside] = left();
+  assert.deepEqual([existsSync(out), left().length, readdirSync(join(copy, aside), { recursive: true }).sort()], [false, 1, whole], 'neither put in place: the last build kept, whole');
+  const hourAgo = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(join(copy, aside), hourAgo, hourAgo);
+  writeFileSync(join(copy, 'fault.mjs'), swept);
+  assert.throws(run, (err) => /removed while it ran/.test(String(err.stderr)));
+  assert.deepEqual([readdirSync(out, { recursive: true }).sort(), left()], [whole, []], 'an hour on: put back');
 });
 
 test('builds running at the same time into one folder leave it whole', async () => {
