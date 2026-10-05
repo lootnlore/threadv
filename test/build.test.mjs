@@ -228,10 +228,10 @@ test('refuses to wipe folders it did not create', () => {
   writeFileSync(join(foreign, 'keep.txt'), 'mine');
   assert.throws(() => run(foreign), /not created by this build/);
   assert.ok(existsSync(join(foreign, 'keep.txt')) && existsSync(join(copy, 'src/engine/fees.mjs')), 'nothing was deleted');
-  // Beside the output: a stage untouched for an hour (its build died) and a
-  // last build moved aside are swept; a fresh stage (a build running,
-  // maybe in another container) is left alone; a folder of that name the
-  // build didn't make stops it, kept.
+  // Beside the output: a stage, or a last build moved aside, untouched for
+  // an hour (its build died) is swept; fresh ones (a build running, maybe
+  // in another container, which removes its own) are left alone; a folder
+  // of that name the build didn't make stops it, kept.
   const beside = mkdtempSync(join(tmpdir(), 'threadvet-beside-'));
   tempDirs.push(beside);
   const stage = (name, { ours = true, hoursAgo = 0 } = {}) => {
@@ -241,17 +241,18 @@ test('refuses to wipe folders it did not create', () => {
     utimesSync(join(beside, name), when, when);
   };
   stage('.site.building-dead01', { hoursAgo: 2 });
-  stage('.site.building-live01-old');
-  stage('.site.building-live02');
+  stage('.site.building-dead02-old', { hoursAgo: 2 });
+  stage('.site.building-live01');
+  stage('.site.building-live02-old');
   run(join(beside, 'site'));
-  assert.deepEqual(readdirSync(beside).sort(), ['.site.building-live02', 'site'], "a dead build's stage and a moved-aside build swept; a running build's stage left");
+  assert.deepEqual(readdirSync(beside).sort(), ['.site.building-live01', '.site.building-live02-old', 'site'], "a dead build's leftovers swept; a running build's left");
   stage('.site.building-mine01', { ours: false, hoursAgo: 2 });
   assert.throws(() => run(join(beside, 'site')), /not created by this build/);
   assert.ok(existsSync(join(beside, '.site.building-mine01/keep.txt')), 'nothing was deleted beside it');
   run(OUT); // its own previous output is fine
 });
 
-test('a build that fails while replacing the last one never leaves it part-deleted', () => {
+test('a build that fails while replacing the last one never leaves it part-deleted, or gone', () => {
   // The last build is moved aside whole, never deleted where it stands:
   // here deleting it would fail part-way (one file gone, then an error).
   const copy = copyProject();
@@ -275,6 +276,40 @@ syncBuiltinESMExports(); // (the build's own import of rm sees this one)
   const whole = readdirSync(out, { recursive: true }).sort();
   run();
   assert.deepEqual(readdirSync(out, { recursive: true }).sort(), whole);
+  const left = () => readdirSync(copy).filter((name) => name.startsWith('.site.'));
+  // Nor if putting the new one in its place fails (on Windows a virus
+  // scanner can hold a new folder): the last one goes back.
+  writeFileSync(
+    join(copy, 'fault.mjs'),
+    `import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+const rename = fs.rename;
+fs.rename = async (from, to) => {
+  if (to === process.env.FAULT_OUT && !from.endsWith('-old')) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  return rename(from, to);
+};
+syncBuiltinESMExports();
+`,
+  );
+  assert.throws(run, (err) => /EPERM/.test(String(err.stderr)));
+  assert.deepEqual([readdirSync(out, { recursive: true }).sort(), left()], [whole, []], 'the swap refused: the last build back, whole');
+  // Nor if the build's own folder was swept while it was paused (over an
+  // hour: a laptop asleep), and what it wrote after rebuilt only part of it.
+  writeFileSync(
+    join(copy, 'fault.mjs'),
+    `import fs from 'node:fs/promises';
+import { unlinkSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const writeFile = fs.writeFile;
+fs.writeFile = async (file, ...rest) => {
+  if (String(file).endsWith('/sw.js')) unlinkSync(String(file).replace(/sw\\.js$/, '.threadvet-build'));
+  return writeFile(file, ...rest);
+};
+syncBuiltinESMExports();
+`,
+  );
+  assert.throws(run, (err) => /removed while it ran/.test(String(err.stderr)));
+  assert.deepEqual([readdirSync(out, { recursive: true }).sort(), left()], [whole, []], 'its folder swept mid-build: nothing published');
 });
 
 test('builds running at the same time into one folder leave it whole', async () => {
@@ -298,12 +333,23 @@ test('builds running at the same time into one folder leave it whole', async () 
   const whole = files(out);
   // Started together, and the second once the first is writing (so it
   // finds the first's stage beside the output, which isn't its to sweep).
+  // A big leftover from a build that died, for both to find at once (rounds
+  // 0 and 2): one takes it, and neither finds it half-deleted.
+  const leftover = () => {
+    const dir = join(copy, '.site.building-dead');
+    mkdirSync(join(dir, 'files'), { recursive: true });
+    writeFileSync(join(dir, '.threadvet-build'), '');
+    for (let i = 0; i < 2000; i++) writeFileSync(join(dir, 'files', `${i}.html`), '');
+    const when = new Date(Date.now() - 2 * 3600_000);
+    utimesSync(dir, when, when);
+  };
   for (let round = 0; round < 6; round++) {
+    if (round % 4 === 0) leftover();
     const first = build();
     if (round % 2) await writing();
     const results = await Promise.all([first, build()]);
     assert.deepEqual(files(out), whole, `round ${round}: the output whole`);
-    assert.deepEqual(readdirSync(copy).filter((name) => name.includes('.building')), [], `round ${round}: nothing left beside it`);
+    assert.deepEqual(readdirSync(copy).filter((name) => name.startsWith('.site.')), [], `round ${round}: nothing left beside it`);
     for (const { code, stderr } of results) {
       // One may find the other's build swapped in first: said, not hidden.
       if (code) assert.match(stderr, /Another build of .* finished at the same moment/, `round ${round}`);

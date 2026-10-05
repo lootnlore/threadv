@@ -129,20 +129,23 @@ function checkAssetNames() {
 }
 
 /**
- * Removes what builds that died part-way left beside OUT: a stage untouched
- * for an hour, and any last build moved aside (only ever there to be
- * deleted, by its own build if that's still running: removing it twice is
- * harmless). Whether a build is running isn't asked of its process: one in
- * another container can't be seen from here.
+ * Removes what builds that died part-way left beside OUT: a stage, or a
+ * last build moved aside, untouched for an hour. Anything fresher is a
+ * running build's, which removes its own. (Whether a build is running
+ * isn't asked of its process: one in another container can't be seen from
+ * here.) Each is first renamed out of the way, so of builds sweeping at
+ * once only one takes it, and none finds it half-deleted.
  */
 async function sweepStages() {
   for (const name of await readdir(dirname(OUT)).catch(() => [])) {
     if (!name.startsWith(STAGE_PREFIX)) continue;
     const dir = join(dirname(OUT), name);
-    const aside = name.endsWith('-old');
-    if (!aside && Date.now() - (await stat(dir)).mtimeMs < STALE_MS) continue;
+    const age = await stat(dir).then((st) => Date.now() - st.mtimeMs, () => -1); // (-1: gone already)
+    if (age < STALE_MS) continue;
     await assertSafeToClean(dir);
-    await rm(dir, { recursive: true, force: true });
+    const taken = join(dirname(OUT), `.${basename(OUT)}.swept-${randomBytes(6).toString('hex')}`);
+    const mine = await rename(dir, taken).then(() => true, (err) => (err.code === 'ENOENT' ? false : Promise.reject(err)));
+    if (mine) await rm(taken, { recursive: true, force: true });
   }
 }
 
@@ -159,13 +162,20 @@ async function build() {
   PREVIOUS = `${STAGE}-old`;
   try {
     const built = await buildInto();
+    // Still this build's own folder: one paused for over an hour (a laptop
+    // asleep) may find it swept, and only what it wrote since in its place.
+    await stat(join(STAGE, MARKER)).catch(() => {
+      throw new Error(`This build's folder was removed while it ran (paused for over an hour?); ${OUT} is as it was.`);
+    });
     // The last build aside, then this one in its place: OUT is missing only
     // between two renames. Another build may have swapped its own in first.
     await rename(OUT, PREVIOUS).catch((err) => {
       if (err.code !== 'ENOENT') throw err;
     });
-    await rename(STAGE, OUT).catch((err) => {
-      throw ['ENOTEMPTY', 'EEXIST'].includes(err.code) ? new Error(`Another build of ${OUT} finished at the same moment; it stands, whole.`) : err;
+    await rename(STAGE, OUT).catch(async (err) => {
+      if (['ENOTEMPTY', 'EEXIST'].includes(err.code)) throw new Error(`Another build of ${OUT} finished at the same moment; it stands, whole.`);
+      await rename(PREVIOUS, OUT).catch(() => {}); // the last build back (there's none on a first build)
+      throw err;
     });
     if (!quiet) {
       console.log(`Built ${built.pages.length} pages to ${OUT} (cache ${built.swVersion}) for ${config.url}`);
