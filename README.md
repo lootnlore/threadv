@@ -153,7 +153,7 @@ product/                 the paid spreadsheet generator and its verification
 ## Quality bar
 
 - `npm test` checks every fee formula against hand-computed values, proves the list-price search finds the exact lowest price (brute force across random settings and every fee cliff), and checks the built site for broken links, metadata, structured data, asset hashing and template leaks.
-- `npm run test:e2e` drives a real browser through sharing links, saved settings, input validation, keyboard use, no-JavaScript rendering and offline mode. CI runs it on every push.
+- `npm run test:e2e` drives a real browser through sharing links, saved settings, input validation, keyboard use, no-JavaScript rendering and offline mode. CI runs it on every push to `main` and every pull request.
 - `python3 product/verify_tracker.py` proves the spreadsheet's fees, payout and profit match the website engine to the cent on 420 sales across all marketplaces.
 - Lighthouse scores 100 for performance, accessibility, best practices and SEO on mobile and desktop; axe reports no accessibility violations in light or dark mode; every page passes html-validate (`npx html-validate@11 "dist/**/*.html"`, rules in `.htmlvalidate.json`; CI runs it).
 - The deploy files were tested against real nginx and SSH: caching, redirects, security headers, 404s, release switching, pruning and rollback safety.
