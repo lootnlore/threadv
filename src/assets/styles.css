@@ -704,6 +704,11 @@ summary,
   align-self: center;
 }
 
+/* Its ring inside its own padding: clear of the next column's input. */
+.focus-note:focus-visible {
+  outline-offset: calc(-1 * var(--ring-width));
+}
+
 /* Dropdowns need the room to show the chosen option. */
 .field-wide {
   grid-column: 1 / -1;

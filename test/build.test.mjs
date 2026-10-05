@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, existsSync, statSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, existsSync, statSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
@@ -128,6 +128,9 @@ test('the build refuses asset names the site cannot read, and a failed build kee
   const copy = copyProject();
   const run = () => execFileSync(process.execPath, ['scripts/build.mjs', '--quiet'], { cwd: copy, stdio: 'pipe' });
   run(); // a good build there to keep
+  // Readable as any folder made here is (a web server runs as another user).
+  mkdirSync(join(copy, 'plain'));
+  assert.equal(statSync(join(copy, 'dist')).mode & 0o777, statSync(join(copy, 'plain')).mode & 0o777, 'the output has a plain folder\'s permissions');
   const kept = readdirSync(join(copy, 'dist')).sort();
   const list = join(copy, 'scripts/assets.mjs');
   const good = readFileSync(list, 'utf8');
@@ -225,23 +228,53 @@ test('refuses to wipe folders it did not create', () => {
   writeFileSync(join(foreign, 'keep.txt'), 'mine');
   assert.throws(() => run(foreign), /not created by this build/);
   assert.ok(existsSync(join(foreign, 'keep.txt')) && existsSync(join(copy, 'src/engine/fees.mjs')), 'nothing was deleted');
-  // Beside the output, what a build that died part-way left (named for a
-  // process that's gone) is swept; a folder of that name it didn't make
-  // stops the build, kept.
+  // Beside the output: a stage untouched for an hour (its build died) and a
+  // last build moved aside are swept; a fresh stage (a build running,
+  // maybe in another container) is left alone; a folder of that name the
+  // build didn't make stops it, kept.
   const beside = mkdtempSync(join(tmpdir(), 'threadvet-beside-'));
   tempDirs.push(beside);
-  const gone = '.site.building-2147483647'; // no process has that number
-  mkdirSync(join(beside, gone));
-  writeFileSync(join(beside, gone, '.threadvet-build'), '');
-  writeFileSync(join(beside, gone, 'half.html'), '');
+  const stage = (name, { ours = true, hoursAgo = 0 } = {}) => {
+    mkdirSync(join(beside, name));
+    writeFileSync(join(beside, name, ours ? '.threadvet-build' : 'keep.txt'), '');
+    const when = new Date(Date.now() - hoursAgo * 3600_000);
+    utimesSync(join(beside, name), when, when);
+  };
+  stage('.site.building-dead01', { hoursAgo: 2 });
+  stage('.site.building-live01-old');
+  stage('.site.building-live02');
   run(join(beside, 'site'));
-  assert.deepEqual(readdirSync(beside), ['site'], 'a dead build\'s stage swept');
-  rmSync(join(beside, 'site'), { recursive: true });
-  mkdirSync(join(beside, gone));
-  writeFileSync(join(beside, gone, 'keep.txt'), 'mine');
+  assert.deepEqual(readdirSync(beside).sort(), ['.site.building-live02', 'site'], "a dead build's stage and a moved-aside build swept; a running build's stage left");
+  stage('.site.building-mine01', { ours: false, hoursAgo: 2 });
   assert.throws(() => run(join(beside, 'site')), /not created by this build/);
-  assert.ok(existsSync(join(beside, gone, 'keep.txt')), 'nothing was deleted beside it');
+  assert.ok(existsSync(join(beside, '.site.building-mine01/keep.txt')), 'nothing was deleted beside it');
   run(OUT); // its own previous output is fine
+});
+
+test('a build that fails while replacing the last one never leaves it part-deleted', () => {
+  // The last build is moved aside whole, never deleted where it stands:
+  // here deleting it would fail part-way (one file gone, then an error).
+  const copy = copyProject();
+  const out = join(copy, 'site');
+  const run = () => execFileSync(process.execPath, ['--import', './fault.mjs', 'scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy, stdio: 'pipe', env: { ...process.env, FAULT_OUT: out } });
+  writeFileSync(
+    join(copy, 'fault.mjs'),
+    `import fs from 'node:fs/promises';
+import { unlinkSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const rm = fs.rm;
+fs.rm = async (path, options) => {
+  if (path !== process.env.FAULT_OUT) return rm(path, options);
+  unlinkSync(\`\${path}/robots.txt\`);
+  throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+};
+syncBuiltinESMExports(); // (the build's own import of rm sees this one)
+`,
+  );
+  run();
+  const whole = readdirSync(out, { recursive: true }).sort();
+  run();
+  assert.deepEqual(readdirSync(out, { recursive: true }).sort(), whole);
 });
 
 test('builds running at the same time into one folder leave it whole', async () => {
@@ -253,12 +286,13 @@ test('builds running at the same time into one folder leave it whole', async () 
     let stderr = '';
     child.stderr.on('data', (d) => (stderr += d));
     const finished = new Promise((done) => child.on('close', (code) => done({ code, stderr })));
-    return Object.assign(finished, { stage: join(copy, `.site.building-${child.pid}`) });
+    return finished;
   };
   // Once a build has started writing (its stage there to see).
-  const writing = async (running) => {
-    for (let waited = 0; waited < 10_000 && !existsSync(running.stage); waited += 5) await new Promise((r) => setTimeout(r, 5));
-    assert.ok(existsSync(running.stage), 'the first build started writing');
+  const staged = () => readdirSync(copy).some((name) => name.startsWith('.site.building-'));
+  const writing = async () => {
+    for (let waited = 0; waited < 10_000 && !staged(); waited += 5) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(staged(), 'the first build started writing');
   };
   await build();
   const whole = files(out);
@@ -266,7 +300,7 @@ test('builds running at the same time into one folder leave it whole', async () 
   // finds the first's stage beside the output, which isn't its to sweep).
   for (let round = 0; round < 6; round++) {
     const first = build();
-    if (round % 2) await writing(first);
+    if (round % 2) await writing();
     const results = await Promise.all([first, build()]);
     assert.deepEqual(files(out), whole, `round ${round}: the output whole`);
     assert.deepEqual(readdirSync(copy).filter((name) => name.includes('.building')), [], `round ${round}: nothing left beside it`);

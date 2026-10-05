@@ -4,8 +4,8 @@
 //
 //   node scripts/build.mjs            -> dist/
 //   node scripts/build.mjs --out tmp  -> tmp/
-import { mkdir, readFile, writeFile, rm, cp, readdir, rename } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile, rm, cp, readdir, rename, stat } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,12 +24,15 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outArg = process.argv.indexOf('--out');
 if (outArg > -1 && !/^[^-]/.test(process.argv[outArg + 1] ?? '')) throw new Error('--out needs a directory');
 const OUT = resolve(ROOT, outArg > -1 ? process.argv[outArg + 1] : 'dist');
-// Each build writes to its own folder beside OUT (named for its process),
-// then swaps it in once complete: a build that stops part-way, or another
-// running at the same time, never leaves OUT half-written.
+// Each build writes to its own folder beside OUT (a name no other build,
+// on this machine or another sharing the folder, can have), then swaps it
+// in once complete: a build that stops part-way, or another running at the
+// same time, never leaves OUT half-written. Set in build().
 const STAGE_PREFIX = `.${basename(OUT)}.building-`;
-const STAGE = join(dirname(OUT), `${STAGE_PREFIX}${process.pid}`);
-const PREVIOUS = `${STAGE}-old`; // the last build, moved aside for the swap
+let STAGE;
+let PREVIOUS; // the last build, moved aside for the swap
+// No build takes this long: a stage untouched for it was left by one that died.
+const STALE_MS = 60 * 60 * 1000;
 const MARKER = '.threadvet-build';
 const quiet = process.argv.includes('--quiet');
 
@@ -125,21 +128,19 @@ function checkAssetNames() {
   }
 }
 
-const running = (pid) => {
-  try {
-    process.kill(pid, 0); // (a signal that only asks)
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM'; // someone else's
-  }
-};
-
-/** Removes what builds that died part-way left beside OUT (their process gone). */
+/**
+ * Removes what builds that died part-way left beside OUT: a stage untouched
+ * for an hour, and any last build moved aside (only ever there to be
+ * deleted, by its own build if that's still running: removing it twice is
+ * harmless). Whether a build is running isn't asked of its process: one in
+ * another container can't be seen from here.
+ */
 async function sweepStages() {
   for (const name of await readdir(dirname(OUT)).catch(() => [])) {
-    const pid = name.startsWith(STAGE_PREFIX) && Number(/^(\d+)(?:-old)?$/.exec(name.slice(STAGE_PREFIX.length))?.[1]);
-    if (!pid || (pid !== process.pid && running(pid))) continue; // (this process's name: from one that had its number before)
+    if (!name.startsWith(STAGE_PREFIX)) continue;
     const dir = join(dirname(OUT), name);
+    const aside = name.endsWith('-old');
+    if (!aside && Date.now() - (await stat(dir)).mtimeMs < STALE_MS) continue;
     await assertSafeToClean(dir);
     await rm(dir, { recursive: true, force: true });
   }
@@ -150,6 +151,12 @@ async function build() {
   const todo = validateConfig();
   await assertSafeToClean(OUT);
   await sweepStages();
+  await mkdir(dirname(OUT), { recursive: true });
+  // (Not mkdtemp: its folder is the owner's alone, and this one becomes the
+  // site, which a web server running as another user must read.)
+  STAGE = join(dirname(OUT), `${STAGE_PREFIX}${randomBytes(6).toString('hex')}`);
+  await mkdir(STAGE); // (fails, rather than share, if the name is taken)
+  PREVIOUS = `${STAGE}-old`;
   try {
     const built = await buildInto();
     // The last build aside, then this one in its place: OUT is missing only
