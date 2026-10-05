@@ -360,6 +360,47 @@ test('builds running at the same time into one folder leave it whole', async () 
   const whole = files(out);
   // Started together, and the second once the first is writing (so it
   // finds the first's stage beside the output, which isn't its to sweep).
+  // A build that has published, while another moves its output aside for
+  // its own swap, still clears up after itself (it published: OUT being
+  // missing for that moment isn't its failure).
+  writeFileSync(
+    join(copy, 'pause.mjs'),
+    `import fs from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const out = process.env.PAUSE_OUT;
+const signal = (name) => writeFileSync(\`\${out}.\${name}\`, '');
+const until = async (name) => {
+  for (let i = 0; i < 2000 && !existsSync(\`\${out}.\${name}\`); i++) await new Promise((r) => setTimeout(r, 5));
+};
+const rename = fs.rename;
+fs.rename = async (from, to) => {
+  await rename(from, to);
+  if (process.env.PAUSE_ROLE === 'published' && to === out && !from.endsWith('-old')) {
+    signal('published');
+    await until('moved'); // the other build has moved this one's output aside
+  }
+  if (process.env.PAUSE_ROLE === 'mover' && from === out) {
+    signal('moved');
+    await new Promise((r) => setTimeout(r, 300)); // its own build not in yet
+  }
+};
+syncBuiltinESMExports();
+`,
+  );
+  const paused = (role) =>
+    new Promise((done) => {
+      const child = spawn(process.execPath, ['--import', './pause.mjs', 'scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy, env: { ...process.env, PAUSE_OUT: out, PAUSE_ROLE: role } });
+      let stderr = '';
+      child.stderr.on('data', (d) => (stderr += d));
+      child.on('close', (code) => done({ code, stderr }));
+    });
+  const publisher = paused('published');
+  for (let waited = 0; waited < 10_000 && !existsSync(`${out}.published`); waited += 5) await new Promise((r) => setTimeout(r, 5));
+  const results = await Promise.all([publisher, paused('mover')]);
+  for (const name of ['published', 'moved']) rmSync(`${out}.${name}`, { force: true });
+  assert.deepEqual(results, [{ code: 0, stderr: '' }, { code: 0, stderr: '' }], 'both published, neither kept anything');
+  assert.deepEqual([files(out), readdirSync(copy).filter((name) => name.startsWith('.site.'))], [whole, []], 'its output moved aside mid-clear-up: nothing left');
   // A big leftover from a build that died, for both to find at once (rounds
   // 0 and 2): one takes it, and neither finds it half-deleted.
   const leftover = () => {

@@ -166,6 +166,7 @@ async function build() {
   STAGE = join(dirname(OUT), `${STAGE_PREFIX}${randomBytes(6).toString('hex')}`);
   await mkdir(STAGE); // (fails, rather than share, if the name is taken)
   PREVIOUS = `${STAGE}-old`;
+  let keepPrevious = false; // the last build, if neither it nor this one could be put in place
   try {
     const built = await buildInto();
     // Still this build's own folder: one paused for over an hour (a laptop
@@ -180,7 +181,11 @@ async function build() {
     });
     await rename(STAGE, OUT).catch(async (err) => {
       if (['ENOTEMPTY', 'EEXIST'].includes(err.code)) throw new Error(`Another build of ${OUT} finished at the same moment; it stands, whole.`);
-      await rename(PREVIOUS, OUT).catch(() => {}); // the last build back (there's none on a first build)
+      // The last build back (there's none on a first build, and another
+      // build's may have taken its place by now).
+      await rename(PREVIOUS, OUT).catch((again) => {
+        keepPrevious = !['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(again.code);
+      });
       throw err;
     });
     if (!quiet) {
@@ -189,10 +194,10 @@ async function build() {
     }
   } finally {
     await rm(STAGE, { recursive: true, force: true }); // gone already, unless the build stopped
-    // The last build, moved aside, goes once OUT is in place again; if
-    // neither this build nor it could be put there, it's kept, and said.
-    if (existsSync(OUT)) await rm(PREVIOUS, { recursive: true, force: true });
-    else if (existsSync(PREVIOUS)) console.error(`The last build is kept in ${PREVIOUS}: rename it to ${OUT} (a build an hour from now puts it back).`);
+    // Decided by what this build did, not by whether OUT is there now:
+    // another build may have just moved it aside for its own swap.
+    if (!keepPrevious) await rm(PREVIOUS, { recursive: true, force: true });
+    else console.error(`The last build is kept in ${PREVIOUS}: rename it to ${OUT} (a build an hour from now puts it back).`);
   }
 }
 
