@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, existsSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -144,7 +144,7 @@ test('the build refuses asset names the site cannot read, and a failed build kee
     writeFileSync(list, good.replace(from, to));
     assert.throws(run, (err) => why.test(String(err.stderr)), to);
     assert.deepEqual(readdirSync(join(copy, 'dist')).sort(), kept, `${to}: the last build kept, whole`);
-    assert.ok(!existsSync(join(copy, '.dist.building')), `${to}: nothing half-built left`);
+    assert.deepEqual(readdirSync(copy).filter((name) => name.startsWith('.dist.building')), [], `${to}: nothing half-built left`);
   }
 });
 
@@ -225,14 +225,47 @@ test('refuses to wipe folders it did not create', () => {
   writeFileSync(join(foreign, 'keep.txt'), 'mine');
   assert.throws(() => run(foreign), /not created by this build/);
   assert.ok(existsSync(join(foreign, 'keep.txt')) && existsSync(join(copy, 'src/engine/fees.mjs')), 'nothing was deleted');
-  // Nor the folder beside the output it builds in first, if not its own.
+  // Beside the output, what a build that died part-way left (named for a
+  // process that's gone) is swept; a folder of that name it didn't make
+  // stops the build, kept.
   const beside = mkdtempSync(join(tmpdir(), 'threadvet-beside-'));
   tempDirs.push(beside);
-  mkdirSync(join(beside, '.site.building'));
-  writeFileSync(join(beside, '.site.building/keep.txt'), 'mine');
+  const gone = '.site.building-2147483647'; // no process has that number
+  mkdirSync(join(beside, gone));
+  writeFileSync(join(beside, gone, '.threadvet-build'), '');
+  writeFileSync(join(beside, gone, 'half.html'), '');
+  run(join(beside, 'site'));
+  assert.deepEqual(readdirSync(beside), ['site'], 'a dead build\'s stage swept');
+  rmSync(join(beside, 'site'), { recursive: true });
+  mkdirSync(join(beside, gone));
+  writeFileSync(join(beside, gone, 'keep.txt'), 'mine');
   assert.throws(() => run(join(beside, 'site')), /not created by this build/);
-  assert.ok(existsSync(join(beside, '.site.building/keep.txt')), 'nothing was deleted beside it');
+  assert.ok(existsSync(join(beside, gone, 'keep.txt')), 'nothing was deleted beside it');
   run(OUT); // its own previous output is fine
+});
+
+test('builds running at the same time into one folder leave it whole', async () => {
+  const copy = copyProject();
+  const out = join(copy, 'site');
+  const files = (dir) => readdirSync(dir, { recursive: true }).sort();
+  const build = () =>
+    new Promise((done) => {
+      const child = spawn(process.execPath, ['scripts/build.mjs', '--out', out, '--quiet'], { cwd: copy });
+      let stderr = '';
+      child.stderr.on('data', (d) => (stderr += d));
+      child.on('close', (code) => done({ code, stderr }));
+    });
+  await build();
+  const whole = files(out);
+  for (let round = 0; round < 6; round++) {
+    const results = await Promise.all([build(), build()]);
+    assert.deepEqual(files(out), whole, `round ${round}: the output whole`);
+    assert.deepEqual(readdirSync(copy).filter((name) => name.includes('.building')), [], `round ${round}: nothing left beside it`);
+    for (const { code, stderr } of results) {
+      // One may find the other's build swapped in first: said, not hidden.
+      if (code) assert.match(stderr, /Another build of .* finished at the same moment/, `round ${round}`);
+    }
+  }
 });
 
 test('build rejects source changes that would ship a broken site', () => {

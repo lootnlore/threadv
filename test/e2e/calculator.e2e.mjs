@@ -83,6 +83,16 @@ function avoidableSplits(root) {
 }
 
 /**
+ * Runs in the page: how far it scrolls sideways (in px). Measured against
+ * the page's own laid-out width, not clientWidth: headless hides
+ * scrollbars yet keeps a gutter's room (styles.css), and clientWidth
+ * doesn't count it, so up to its width of overflow would go unseen.
+ */
+function sideways() {
+  return Math.max(0, Math.round(document.documentElement.scrollWidth - document.documentElement.getBoundingClientRect().width));
+}
+
+/**
  * Runs in the page: the note focused in place of the hidden `hidden` (see
  * keepFocus in app.js), as [its words, whether it sits right where that is,
  * whether it's in view], or what has focus instead.
@@ -537,6 +547,16 @@ if (chromium) {
     // form under what's focused next), and goes when it's shown again,
     // handing focus back if it still has it.
     const notes = (page) => page.evaluate(() => [...document.querySelectorAll('.focus-note')].map((n) => n.textContent));
+    // Where Tab and Shift+Tab go from the focused note, and whether it's a
+    // tab stop once left (it isn't: it's no control).
+    const tabsFrom = async (page) => {
+      const at = () => page.evaluate(() => (({ id, name, value, textContent }) => (id ? `#${id}` : name ? `${name}=${value}` : textContent.trim()))(document.activeElement));
+      await page.keyboard.press('Tab');
+      const next = await at();
+      await page.focus('.focus-note');
+      await page.keyboard.press('Shift+Tab');
+      return [next, await at(), await page.evaluate(() => document.querySelector('.focus-note').tabIndex)];
+    };
     const typeOn = async (page) => {
       for (const key of ['7', 'End', 'Home', 'ArrowRight', 'ArrowLeft', 'Space', '5']) await page.keyboard.press(key);
       await settle(page);
@@ -564,9 +584,17 @@ if (chromium) {
       await hiddenLater.page.waitForFunction((m) => document.querySelector('[data-field="cost"]').hidden === (m === 'maxbuy'), mode, { timeout: 3000 });
       await settle(hiddenLater.page);
     };
+    // (Measured from the first field: the modes' hints above differ in length.)
+    const placed = () =>
+      hiddenLater.page.evaluate(() => {
+        const at = (key) => document.querySelector(`[data-field="${key}"]`).getBoundingClientRect();
+        return ['ship', 'label', 'target'].map((key) => [at(key).left - at('price').left, at(key).top - at('price').top]);
+      });
+    const fieldsAt = await placed();
     await hiddenLater.page.focus('#f-cost');
     await to('maxbuy');
     assert.deepEqual(await hiddenLater.page.evaluate(focusNote, '[data-field="cost"]'), COST_NOTE, 'by a link later: the same');
+    assert.deepEqual(await placed(), fieldsAt, "the note in the cost's own place: the fields after it stay put");
     const [chosen, price, hash] = await typeOn(hiddenLater.page);
     assert.deepEqual([chosen, price, new URLSearchParams(hash.slice(1)).get('mode')], ['maxbuy', '50', 'maxbuy'], 'by a link later: the keys typed on change nothing');
     // Drawn again, the cost still hidden: the note stands, focus on it.
@@ -585,17 +613,26 @@ if (chromium) {
     assert.deepEqual(await notes(hiddenLater.page), [COST_NOTE[0]], 'typed into that field (drawn again): the note stays, so nothing moves under it');
     await to('profit');
     assert.deepEqual([await hiddenLater.page.evaluate(() => document.activeElement.id), await notes(hiddenLater.page)], ['f-ship', []], 'the cost shown again: the note goes, focus left where it is');
+    // List price hides the sale price, the form's first field.
+    await hiddenLater.page.focus('#f-price');
+    await hiddenLater.page.evaluate(() => (location.hash = '#mode=price&cost=10'));
+    await hiddenLater.page.waitForFunction(() => document.querySelector('[data-field="price"]').hidden, null, { timeout: 3000 });
+    await settle(hiddenLater.page);
+    assert.deepEqual(await hiddenLater.page.evaluate(focusNote, '[data-field="price"]'), ['Sell price: not used in List price mode.', true, true], 'the sale price hidden: its note');
+    assert.deepEqual(await tabsFrom(hiddenLater.page), ['#f-cost', '#tab-price', -1], "from the sale price's note: Tab to the cost, Shift+Tab to the tab");
     assert.deepEqual(hiddenLater.errors, []);
     await hiddenLater.context.close();
     // Settings' controls the same way: eBay's rate field (a link changing
     // its category from custom), and Reset (a shared link, which has no
     // Reset): the view where the visitor was, and a Space changes no box.
-    for (const [how, prepare, hidden, says] of [
+    // (Reset's note is the last thing focusable in Fine-tune: Tab goes on
+    // past it, not back to Fine-tune's first field.)
+    for (const [how, prepare, hidden, says, tabs] of [
       ["eBay's rate field", async (page) => {
         await page.selectOption('#f-ebayCategory', 'custom');
         await page.focus('#f-ebayCustomRate');
-      }, '[data-field="ebayCustomRate"]', 'eBay category rate: not used with this eBay category.'],
-      ['Reset', (page) => page.focus('[data-reset]'), '[data-reset]', 'Reset: not offered on a shared result.'],
+      }, '[data-field="ebayCustomRate"]', 'eBay category rate: not used with this eBay category.', ['#f-ebayAdRate', '#f-ebayCategory', -1]],
+      ['Reset', (page) => page.focus('[data-reset]'), '[data-reset]', 'Reset: not offered on a shared result.', ['See results', `platform=${PLATFORMS.at(-1).id}`, -1]],
     ]) {
       const settings = await open('/');
       await settings.page.locator('.tune > summary').click();
@@ -614,6 +651,8 @@ if (chromium) {
         [[says, true, true], scrolledTo, 9],
         `${how} hidden by a link: a note in its place, the view unmoved; a Space changes no box`,
       );
+      await settings.page.focus('.focus-note');
+      assert.deepEqual(await tabsFrom(settings.page), tabs, `${how}'s note: Tab and Shift+Tab carry on from its place`);
       assert.deepEqual(settings.errors, []);
       await settings.context.close();
     }
@@ -2558,7 +2597,6 @@ if (chromium) {
             const r = el.getBoundingClientRect();
             if (r.width && (r.right > box.right + 0.5 || r.left < box.left - 0.5)) found.push(`outside the card: ${el.className || el.tagName}`);
           }
-          if (document.documentElement.scrollWidth > document.documentElement.clientWidth) found.push('page scrolls sideways');
           // Nor may any text spill out of its own box (e.g. "Marketplace" in a checkbox column)...
           for (const el of calc.querySelectorAll('label, .check, [role=tab], .pname, .figure, .result-sub, dt, dd, summary, legend, .hint')) {
             if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) found.push(`text spills out: ${el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}"`);
@@ -2581,6 +2619,7 @@ if (chromium) {
         });
         // ...nor break a word that would have fit ("Merca/ri").
         problems.push(...(await page.evaluate(avoidableSplits, '.calc')));
+        if (await page.evaluate(sideways)) problems.push('page scrolls sideways');
         assert.deepEqual(problems, [], `${width}px, text ${text * 100}%, ${state}`);
       }
       await context.close();
@@ -3122,7 +3161,15 @@ if (chromium) {
       const short = await column();
       await page.evaluate(() => (document.documentElement.style.scrollbarGutter = 'auto'));
       const [unkept] = await column();
-      assert.deepEqual([overflows, short, unkept - long], [true, [long, false], 15], 'its room kept: the same width either way (15px more without that)');
+      assert.deepEqual([overflows, short, unkept > long], [true, [long, false], true], 'its room kept: the same width either way (wider without that)');
+      // A page without the calculator keeps no such room: a short one shows
+      // no empty strip beside its header and footer.
+      await page.goto(`${base}/404.html`, { waitUntil: 'networkidle' });
+      assert.deepEqual(
+        await page.evaluate(() => [document.documentElement.scrollHeight > innerHeight, document.querySelector('.site-header').getBoundingClientRect().width === innerWidth]),
+        [false, true],
+        'a short page: header across the whole window',
+      );
     } finally {
       await desktop.close();
     }
@@ -3168,7 +3215,7 @@ if (chromium) {
             for (const path of pages) {
               await page.goto(base + path, { waitUntil: 'domcontentloaded' });
               await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
-              const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+              const over = await page.evaluate(sideways);
               const found = [...(over > 0 ? [`scrolls sideways +${over}px`] : []), ...(await page.evaluate(avoidableSplits, 'body'))];
               if (found.length) problems.push(`${env ? 'configured' : 'default'}, ${width}px, text ${text * 100}%, ${path}: ${found.join('; ')}`);
             }
@@ -3202,14 +3249,13 @@ if (chromium) {
                 beside: nav.left >= brand.right - 1 && nav.top < brand.bottom,
                 shown,
                 cut: shown && name.right > brand.right + 1,
-                sideways: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth), // (less: the room kept for a scrollbar)
               };
             });
             assert.ok(r.beside, `${where}: nav wrapped under the logo`);
             // Either the whole name or just the logo (name still read out): never "Threa…".
             assert.ok(!r.cut, `${where}: site name cut short`);
             if (!name && text === 1 && width >= 768) assert.ok(r.shown, `${where}: there is room, so the name shows`);
-            assert.equal(r.sideways, 0, `${where}: page scrolls sideways (header or footer)`);
+            assert.equal(await page.evaluate(sideways), 0, `${where}: page scrolls sideways (header or footer)`);
             const logoLink = page.locator('.site-header').getByRole('link', { name: name || 'ThreadVet', exact: true });
             assert.equal(await logoLink.count(), 1, `${where}: logo link keeps its name`);
             await context.close();

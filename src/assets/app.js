@@ -246,7 +246,10 @@ function setup(root) {
    * visitor was, so Tab and Shift+Tab carry on from there, in view, read
    * out in a few words, and where the keys typed change nothing (another
    * control would take them: a field the digits, a box the space, a tab or
-   * a list the arrows). The note stays while what it stands for is hidden
+   * a list the arrows). It is a tab stop only while it has focus: Tab from
+   * an element focusable only by script, last in a <details> (as Reset's
+   * note is), would go back to the top of it in Chrome, and Shift+Tab onto
+   * it would make it a control. The note stays while what it stands for is hidden
    * (gone sooner, it would move the form under the next thing focused),
    * and goes in the draw that shows it again, handing focus back if it
    * still has it. Run once the draw is done, so the verdict focused is the
@@ -254,7 +257,7 @@ function setup(root) {
    * press holds it: this may scroll.
    */
   const notes = new Map(); // a hidden control -> the note in its place
-  function keepFocus(had, m) {
+  function keepFocus(had, m, input) {
     let back = null;
     for (const [control, note] of notes) {
       if (control.closest('[hidden]')) continue;
@@ -274,22 +277,22 @@ function setup(root) {
     const note = document.createElement('span');
     note.className = 'focus-note';
     note.tabIndex = -1;
-    note.textContent = whyHidden(had, m);
+    note.addEventListener('focus', () => (note.tabIndex = 0));
+    note.addEventListener('blur', () => (note.tabIndex = -1));
+    const key = had.closest('[data-field]')?.dataset.field;
+    note.textContent = key ? `${labelOf(key)}: ${hiddenWhy(key, m, input)}.` : `Reset: ${RESET_HIDDEN}.`;
     had.closest('[hidden]').before(note); // (a field's box, or Reset)
     notes.set(had, note);
     note.focus({ preventScroll: true });
   }
-  /** Why the draw for mode `m` hides `control` (a field or Reset), for the note in its place. */
-  function whyHidden(control, m) {
-    if (control === resetBtn) return 'Reset: not offered on a shared result.';
-    const key = control.closest('[data-field]').dataset.field;
-    const label = labelOf(key);
-    if (MODES[m].hidden.includes(key)) return `${label}: not used in ${MODES[m].label} mode.`;
-    return `${label}: not used with this eBay category.`; // the custom rate (see onShow)
-  }
-  /** Whether a field is on show in mode `m` (its box hidden otherwise, once drawn). */
-  const onShow = (key, m, input) =>
-    !MODES[m].hidden.includes(key) && (key !== 'ebayCustomRate' || PLATFORM_BY_ID.ebay.usesOption('ebayCustomRate', input.opts));
+  /** Why a field is hidden in mode `m` (its box, once drawn), or '' if it's on show. */
+  const hiddenWhy = (key, m, input) => {
+    if (MODES[m].hidden.includes(key)) return `not used in ${MODES[m].label} mode`;
+    if (key === 'ebayCustomRate' && !PLATFORM_BY_ID.ebay.usesOption(key, input.opts)) return 'not used with this eBay category';
+    return '';
+  };
+  const onShow = (key, m, input) => !hiddenWhy(key, m, input);
+  const RESET_HIDDEN = 'not offered on a shared result'; // (see the draw)
   /**
    * Each numeric field on the page, [{ key, problem, missing, blocks, needed }]:
    * `problem` says what is wrong with its value; `needed` marks a sell price
@@ -603,7 +606,7 @@ function setup(root) {
       if (reveal) for (const b of blocking) if (b.problem) field(b.key).closest('details:not([open])')?.setAttribute('open', '');
       reveal = false;
       paint(next);
-      keepFocus(had, m);
+      keepFocus(had, m, input);
     };
     if (holding()) drawDue = draw;
     else {

@@ -24,9 +24,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outArg = process.argv.indexOf('--out');
 if (outArg > -1 && !/^[^-]/.test(process.argv[outArg + 1] ?? '')) throw new Error('--out needs a directory');
 const OUT = resolve(ROOT, outArg > -1 ? process.argv[outArg + 1] : 'dist');
-// Built beside OUT, then swapped in once complete: a build that stops
-// part-way leaves the last one as it was.
-const STAGE = join(dirname(OUT), `.${basename(OUT)}.building`);
+// Each build writes to its own folder beside OUT (named for its process),
+// then swaps it in once complete: a build that stops part-way, or another
+// running at the same time, never leaves OUT half-written.
+const STAGE_PREFIX = `.${basename(OUT)}.building-`;
+const STAGE = join(dirname(OUT), `${STAGE_PREFIX}${process.pid}`);
+const PREVIOUS = `${STAGE}-old`; // the last build, moved aside for the swap
 const MARKER = '.threadvet-build';
 const quiet = process.argv.includes('--quiet');
 
@@ -37,7 +40,7 @@ const hash = (...parts) => {
   return h.digest('hex').slice(0, 10);
 };
 
-/** The build replaces `dir` (OUT, or STAGE), so only allow folders it created (or new/empty ones). */
+/** The build replaces `dir`, so only allow folders it created (or new/empty ones). */
 async function assertSafeToClean(dir) {
   const rel = relative(dir, ROOT);
   if (!rel.startsWith('..')) throw new Error(`Refusing to build into ${dir}: it contains the project.`);
@@ -122,22 +125,48 @@ function checkAssetNames() {
   }
 }
 
+const running = (pid) => {
+  try {
+    process.kill(pid, 0); // (a signal that only asks)
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM'; // someone else's
+  }
+};
+
+/** Removes what builds that died part-way left beside OUT (their process gone). */
+async function sweepStages() {
+  for (const name of await readdir(dirname(OUT)).catch(() => [])) {
+    const pid = name.startsWith(STAGE_PREFIX) && Number(/^(\d+)(?:-old)?$/.exec(name.slice(STAGE_PREFIX.length))?.[1]);
+    if (!pid || (pid !== process.pid && running(pid))) continue; // (this process's name: from one that had its number before)
+    const dir = join(dirname(OUT), name);
+    await assertSafeToClean(dir);
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function build() {
   checkAssetNames();
   const todo = validateConfig();
   await assertSafeToClean(OUT);
-  await assertSafeToClean(STAGE); // one a build that crashed left behind, or someone's own folder of that name
-  await rm(STAGE, { recursive: true, force: true });
+  await sweepStages();
   try {
     const built = await buildInto();
-    await rm(OUT, { recursive: true, force: true });
-    await rename(STAGE, OUT);
+    // The last build aside, then this one in its place: OUT is missing only
+    // between two renames. Another build may have swapped its own in first.
+    await rename(OUT, PREVIOUS).catch((err) => {
+      if (err.code !== 'ENOENT') throw err;
+    });
+    await rename(STAGE, OUT).catch((err) => {
+      throw ['ENOTEMPTY', 'EEXIST'].includes(err.code) ? new Error(`Another build of ${OUT} finished at the same moment; it stands, whole.`) : err;
+    });
     if (!quiet) {
       console.log(`Built ${built.pages.length} pages to ${OUT} (cache ${built.swVersion}) for ${config.url}`);
       if (todo.length) console.log(`\nTo start earning:\n${todo.map((t) => `  - ${t}`).join('\n')}\n`);
     }
   } finally {
     await rm(STAGE, { recursive: true, force: true }); // gone already, unless the build stopped
+    await rm(PREVIOUS, { recursive: true, force: true });
   }
 }
 

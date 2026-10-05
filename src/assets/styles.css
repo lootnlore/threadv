@@ -54,12 +54,16 @@
   box-sizing: border-box;
 }
 
-html {
-  /* A desktop scrollbar's room is kept whether or not the page is long
-     enough to need one, so the page's width doesn't change when it starts
-     or stops (the results' height can do that). Phones' scrollbars overlay
-     the page and take no room. */
+/* On a calculator's page, a desktop scrollbar's room is kept whether or
+   not the page is long enough to need one, so its width doesn't change
+   when one comes or goes (the results' height can do that). Phones'
+   scrollbars overlay the page and take no room. (Other pages don't change
+   height under the visitor, and a short one would show an empty strip.) */
+html:has([data-calc]) {
   scrollbar-gutter: stable;
+}
+
+html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   scroll-padding-top: 5rem;
@@ -683,16 +687,21 @@ summary,
 }
 
 /* Said, and focused, where a field or Reset was hidden while it had focus
-   (app.js keepFocus), until it's shown again. */
+   (app.js keepFocus), until it's shown again: for a field, in the field's
+   own place, so the form keeps its shape. */
 .focus-note {
   display: block;
-  grid-column: 1 / -1;
   width: fit-content;
   max-width: calc(100% + 12px);
   margin: 0 -6px 12px; /* its words in line with the labels, its ring clear of them */
   padding: 0 6px;
   font-size: 0.92rem;
   color: var(--muted);
+}
+
+.fields > .focus-note {
+  grid-row: span 3;
+  align-self: center;
 }
 
 /* Dropdowns need the room to show the chosen option. */
